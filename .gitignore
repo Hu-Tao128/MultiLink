@@ -1,0 +1,22 @@
+# Rust
+target/
+**/target/
+
+# CMake/Qt build outputs
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+*.cmake
+Makefile
+
+# Qt generated
+*.qrc.depends
+*.qmltypes
+qt6multilink_gui_*metatypes.json
+**/.qt/
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
