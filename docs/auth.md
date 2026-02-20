@@ -1,0 +1,30 @@
+# OAuth Design
+
+## Goals
+
+- Desktop-friendly login flow.
+- Local callback handling without embedded webview.
+- Encrypted token storage with refresh support.
+
+## Flow
+
+1. Core creates provider authorization URL with state.
+2. GUI opens default browser.
+3. Provider redirects to `http://127.0.0.1:<port>/callback`.
+4. Core listener captures code/state.
+5. Core exchanges code for access + refresh tokens.
+6. TokenStore saves encrypted payload on disk.
+7. AuthService refreshes token when near expiry.
+
+## Storage
+
+- Linux: `~/.config/multilink/`
+- Windows: `%APPDATA%\multilink\`
+- macOS: `~/Library/Application Support/multilink/`
+
+## Security controls
+
+- AES-256-GCM encryption at rest.
+- Restrictive file permissions on Unix.
+- Logout clears local tokens.
+- Revocation endpoint call is attempted when provider supports it.
