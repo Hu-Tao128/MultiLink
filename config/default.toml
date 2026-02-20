@@ -1,0 +1,16 @@
+preferred_provider = "ollama"
+
+[ollama]
+base_url = "http://127.0.0.1:11434"
+default_model = "llama3.2"
+
+[gemini]
+enabled = true
+timeout_secs = 20
+
+[codex]
+enabled = true
+timeout_secs = 20
+
+[storage]
+models_dir = "~/.local/share/multilink/models"
