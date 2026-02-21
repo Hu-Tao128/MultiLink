@@ -50,7 +50,7 @@ QML has no HTTP calls, no streaming parser, and no persistence logic.
 - Provider routing with runtime switch and fallback to local provider.
 - Provider availability status API (`Available` / `NotAvailable`).
 - Ollama local provider with streaming support.
-- OAuth desktop flow for Gemini/Codex (browser + localhost callback + encrypted token store).
+- OAuth module for Gemini/Codex in core (browser + localhost callback + encrypted token store), pending end-to-end GUI wiring.
 - Model manager registry with local detection, size tracking, migration, and delete support.
 - Guided Ollama installation plan for Linux with explicit consent gating.
 
@@ -94,10 +94,11 @@ cmake --build build/gui
 
 ## Security notes
 
-- OAuth tokens are encrypted at rest (AES-256-GCM).
+- OAuth tokens are encrypted at rest with AES-256-GCM in the core token store.
 - Config/token files are saved with restrictive permissions on Unix.
 - No privileged install command is run without explicit consent.
-- Remote providers are opt-in; local provider fallback remains available.
+- OAuth logic stays in Rust modules; QML does not handle secrets.
+- System keyring integration and PKCE hardening are planned next.
 
 ## Performance notes
 

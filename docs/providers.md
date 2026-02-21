@@ -17,8 +17,10 @@ The core also supports `stream_send(...)` for token-by-token updates.
 ## Current providers
 
 - `OllamaProvider`: local HTTP API, streaming enabled.
-- `GeminiProvider`: OAuth bearer token + HTTP endpoint.
-- `CodexProvider`: OAuth bearer token + HTTP endpoint.
+- `GeminiProvider`: OAuth bearer token + HTTP endpoint scaffold.
+- `CodexProvider`: OAuth bearer token + HTTP endpoint scaffold.
+
+At runtime today, the GUI bootstrap registers Ollama by default. Remote provider registration and auth lifecycle wiring are tracked as next integration work.
 
 ## Fallback policy
 
