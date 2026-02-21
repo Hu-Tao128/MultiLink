@@ -30,10 +30,20 @@ impl OllamaProvider {
 }
 
 #[derive(Serialize)]
+struct OllamaOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_ctx: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+}
+
+#[derive(Serialize)]
 struct OllamaRequest {
     model: String,
     stream: bool,
     messages: Vec<OllamaMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<OllamaOptions>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,6 +79,10 @@ impl LLMProvider for OllamaProvider {
 
     async fn send(&self, prompt: String, options: PromptOptions) -> Result<LLMResponse, LLMError> {
         let model = self.model_for(&options);
+        let ollama_options = OllamaOptions {
+            num_ctx: options.num_ctx,
+            temperature: options.temperature,
+        };
         let body = OllamaRequest {
             model: model.clone(),
             stream: false,
@@ -76,6 +90,7 @@ impl LLMProvider for OllamaProvider {
                 role: "user".to_string(),
                 content: prompt,
             }],
+            options: Some(ollama_options),
         };
 
         let response = self
@@ -108,6 +123,10 @@ impl LLMProvider for OllamaProvider {
         options: PromptOptions,
     ) -> Result<TokenStream, LLMError> {
         let model = self.model_for(&options);
+        let ollama_options = OllamaOptions {
+            num_ctx: options.num_ctx,
+            temperature: options.temperature,
+        };
         let body = OllamaRequest {
             model,
             stream: true,
@@ -115,6 +134,7 @@ impl LLMProvider for OllamaProvider {
                 role: "user".to_string(),
                 content: prompt,
             }],
+            options: Some(ollama_options),
         };
 
         let response = self

@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -43,6 +44,14 @@ pub struct ChatSession {
     pub id: String,
     pub provider: ProviderId,
     pub model: Option<String>,
+    #[serde(default)]
+    pub project_root: Option<String>,
+    #[serde(default)]
+    pub project_context: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub summarized_messages: usize,
     pub messages: Vec<ChatMessage>,
     pub state: SessionState,
 }
@@ -50,9 +59,13 @@ pub struct ChatSession {
 impl ChatSession {
     pub fn new(provider: ProviderId, model: Option<String>) -> Self {
         Self {
-            id: format!("session-{}", now_unix()),
+            id: next_session_id(),
             provider,
             model,
+            project_root: None,
+            project_context: None,
+            summary: None,
+            summarized_messages: 0,
             messages: Vec::new(),
             state: SessionState::Idle,
         }
@@ -76,4 +89,18 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn next_session_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let millis = now_unix_millis();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("session-{}-{}", millis, seq)
 }
