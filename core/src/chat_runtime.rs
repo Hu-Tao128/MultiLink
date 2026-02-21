@@ -245,9 +245,9 @@ impl ChatRuntime {
         self.maybe_summarize_session(session_id, provider, model.clone())
             .await;
 
-        let routed_prompt = self.build_context(session_id).await?;
+        let (system_prompt, routed_prompt) = self.build_context(session_id).await?;
         if context_debug_enabled() {
-            let context_tokens = estimate_tokens(&routed_prompt);
+            let context_tokens = estimate_tokens(&routed_prompt) + estimate_tokens(&system_prompt);
             eprintln!(
                 "[context] session={} context_tokens={} max_tokens={}",
                 session_id, context_tokens, MAX_CONTEXT_TOKENS
@@ -256,6 +256,7 @@ impl ChatRuntime {
 
         let options = PromptOptions {
             model,
+            system_prompt: Some(system_prompt).filter(|s| !s.is_empty()),
             ..PromptOptions::default()
         };
 
@@ -486,7 +487,7 @@ impl ChatRuntime {
         }
     }
 
-    async fn build_context(&self, session_id: &str) -> Result<String, ChatRuntimeError> {
+    async fn build_context(&self, session_id: &str) -> Result<(String, String), ChatRuntimeError> {
         let session = {
             let guard = self.sessions.read().await;
             guard
@@ -496,7 +497,7 @@ impl ChatRuntime {
         };
 
         let mut tokens = 0usize;
-        let mut prefix_chunks = Vec::new();
+        let mut system_chunks = Vec::new();
 
         let model_supported = session
             .model
@@ -519,19 +520,19 @@ impl ChatRuntime {
                         project_context.clone()
                     };
                     let prelude = format!(
-                        "System:\nYou are a senior software engineer.\n\nThis conversation is about the following project:\n{}\n",
+                        "You are a senior software engineer.\n\nThis conversation is about the following project:\n{}\n",
                         capped_context
                     );
                     tokens += estimate_tokens(&prelude);
-                    prefix_chunks.push(prelude);
+                    system_chunks.push(prelude);
                 }
             }
         }
 
         if let Some(summary) = session.summary.as_ref().filter(|v| !v.trim().is_empty()) {
-            let summary_block = format!("System:\nConversation summary:\n{}\n", summary);
+            let summary_block = format!("Conversation summary:\n{}\n", summary);
             tokens += estimate_tokens(&summary_block);
-            prefix_chunks.push(summary_block);
+            system_chunks.push(summary_block);
         }
 
         let base_index = session.summarized_messages.min(session.messages.len());
@@ -548,10 +549,7 @@ impl ChatRuntime {
 
         recent_chunks.reverse();
 
-        let mut all_chunks = Vec::with_capacity(prefix_chunks.len() + recent_chunks.len());
-        all_chunks.extend(prefix_chunks);
-        all_chunks.extend(recent_chunks);
-        Ok(all_chunks.join(""))
+        Ok((system_chunks.join("\n"), recent_chunks.join("")))
     }
 
     async fn maybe_summarize_session(
