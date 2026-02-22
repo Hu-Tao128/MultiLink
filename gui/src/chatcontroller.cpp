@@ -3,6 +3,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QGuiApplication>
+#include <QClipboard>
 #include <QMetaObject>
 
 #include <cstdlib>
@@ -343,6 +345,12 @@ void ChatController::setSelectedSessionProjectRoot(const QString &projectRoot) {
         return;
     }
     setSessionProjectRoot(m_selectedSessionId, projectRoot);
+}
+
+void ChatController::copyText(const QString &text) {
+    if (auto *clipboard = QGuiApplication::clipboard()) {
+        clipboard->setText(text);
+    }
 }
 
 

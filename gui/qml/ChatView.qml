@@ -94,6 +94,10 @@ Page {
         return segments
     }
 
+    function scrollToBottom() {
+        chatList.positionViewAtEnd()
+    }
+
     function hydrateCurrentSession() {
         if (!controller) return
         if (controller.sessions.length === 0) {
@@ -271,7 +275,7 @@ Page {
                     Rectangle {
                         id: bubble
                         width: parent.width * 0.86
-                        implicitHeight: segmentColumn.implicitHeight + 14
+                        implicitHeight: bubbleContent.implicitHeight + 14
                         anchors.right: model.role === "user" ? parent.right : undefined
                         anchors.left: model.role === "assistant" ? parent.left : undefined
                         color: model.role === "user" ? "#E8F5E9" : "#FFFFFF"
@@ -279,79 +283,183 @@ Page {
                         radius: 8
 
                         Column {
-                            id: segmentColumn
+                            id: bubbleContent
                             anchors.fill: parent
                             anchors.margins: 7
                             spacing: 6
 
-                            Repeater {
-                                model: segments
-                                delegate: Item {
-                                    required property var modelData
-                                    property var segment: modelData ? modelData : ({ kind: "text", value: "", language: "" })
-                                    width: segmentColumn.width
-                                    implicitHeight: segment.kind === "code" ? codeBlock.implicitHeight : textBlock.implicitHeight
+                            Column {
+                                id: segmentColumn
+                                width: parent.width
+                                spacing: 6
 
-                                    Text {
-                                        id: textBlock
-                                        visible: segment.kind !== "code"
-                                        width: parent.width
-                                        color: colorTextPrimary
-                                        text: segment.value
-                                        wrapMode: Text.Wrap
-                                    }
+                                Repeater {
+                                    model: segments
+                                    delegate: Item {
+                                        required property var modelData
+                                        property var segment: modelData ? modelData : ({ kind: "text", value: "", language: "" })
+                                        width: segmentColumn.width
+                                        implicitHeight: segment.kind === "code" ? codeBlock.implicitHeight : textBlock.implicitHeight
 
-                                    Rectangle {
-                                        id: codeBlock
-                                        visible: segment.kind === "code"
-                                        width: parent.width
-                                        color: "#1F2933"
-                                        radius: 6
-                                        border.color: "#2F3E4D"
-                                        implicitHeight: codeHeader.implicitHeight + codeFlick.implicitHeight + 10
+                                        TextArea {
+                                            id: textBlock
+                                            visible: segment.kind !== "code"
+                                            width: parent.width
+                                            color: colorTextPrimary
+                                            text: segment.value
+                                            wrapMode: TextArea.Wrap
+                                            readOnly: true
+                                            selectByMouse: true
+                                            selectionColor: "#90CAF9"
+                                            selectedTextColor: colorTextPrimary
+                                            padding: 0
+                                            background: null
+                                        }
 
-                                        Column {
-                                            anchors.fill: parent
-                                            anchors.margins: 6
-                                            spacing: 4
+                                        Rectangle {
+                                            id: codeBlock
+                                            visible: segment.kind === "code"
+                                            width: parent.width
+                                            color: "#1F2933"
+                                            radius: 6
+                                            border.color: "#2F3E4D"
+                                            implicitHeight: codeHeader.implicitHeight + codeFlick.implicitHeight + 10
 
-                                            Label {
-                                                id: codeHeader
-                                                text: segment.language && segment.language.length > 0 ? segment.language : "code"
-                                                color: "#9FB3C8"
-                                                font.pixelSize: 11
-                                            }
+                                            Column {
+                                                anchors.fill: parent
+                                                anchors.margins: 6
+                                                spacing: 4
 
-                                            Flickable {
-                                                id: codeFlick
-                                                width: parent.width
-                                                implicitHeight: Math.min(260, codeText.implicitHeight + 4)
-                                                contentWidth: Math.max(width, codeText.contentWidth + 8)
-                                                contentHeight: codeText.implicitHeight + 4
-                                                clip: true
-                                                boundsBehavior: Flickable.StopAtBounds
-                                                ScrollBar.horizontal: ScrollBar { }
+                                                RowLayout {
+                                                    id: codeHeader
+                                                    width: parent.width
+                                                    Label {
+                                                        text: segment.language && segment.language.length > 0 ? segment.language : "code"
+                                                        color: "#9FB3C8"
+                                                        font.pixelSize: 11
+                                                        Layout.fillWidth: true
+                                                    }
+                                                    Rectangle {
+                                                        width: copyLabel.implicitWidth + 16
+                                                        height: copyLabel.implicitHeight + 6
+                                                        radius: 4
+                                                        color: copyMa.containsMouse ? "#3D4F5F" : "#2F3E4D"
+                                                        Label {
+                                                            id: copyLabel
+                                                            anchors.centerIn: parent
+                                                            text: "⎘ Copiar Código"
+                                                            color: "#9FB3C8"
+                                                            font.pixelSize: 11
+                                                        }
+                                                        MouseArea {
+                                                            id: copyMa
+                                                            anchors.fill: parent
+                                                            hoverEnabled: true
+                                                            cursorShape: Qt.PointingHandCursor
+                                                            onClicked: {
+                                                                if (controller) {
+                                                                    controller.copyText(segment.value)
+                                                                }
+                                                                copyLabel.text = "✓ Copiado"
+                                                                copyTimer.start()
+                                                            }
+                                                        }
+                                                        Timer {
+                                                            id: copyTimer
+                                                            interval: 1500
+                                                            onTriggered: copyLabel.text = "⎘ Copiar Código"
+                                                        }
+                                                    }
+                                                }
 
-                                                TextEdit {
-                                                    id: codeText
-                                                    x: 4
-                                                    width: Math.max(codeFlick.width, contentWidth + 8)
-                                                    text: segment.value
-                                                    color: "#D8DEE9"
-                                                    font.family: "Monospace"
-                                                    font.pixelSize: 13
-                                                    wrapMode: TextEdit.NoWrap
-                                                    readOnly: true
-                                                    selectByMouse: true
+                                                Flickable {
+                                                    id: codeFlick
+                                                    width: parent.width
+                                                    implicitHeight: Math.min(260, codeText.implicitHeight + 4)
+                                                    contentWidth: Math.max(width, codeText.contentWidth + 8)
+                                                    contentHeight: codeText.implicitHeight + 4
+                                                    clip: true
+                                                    boundsBehavior: Flickable.StopAtBounds
+                                                    ScrollBar.horizontal: ScrollBar { }
+
+                                                    TextArea {
+                                                        id: codeText
+                                                        x: 4
+                                                        width: Math.max(codeFlick.width, contentWidth + 8)
+                                                        text: segment.value
+                                                        color: "#D8DEE9"
+                                                        font.family: "Monospace"
+                                                        font.pixelSize: 13
+                                                        wrapMode: TextArea.NoWrap
+                                                        readOnly: true
+                                                        selectByMouse: true
+                                                        padding: 0
+                                                        background: null
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
+
+                            Row {
+                                width: parent.width
+                                visible: model.role === "assistant"
+                                layoutDirection: Qt.RightToLeft
+
+                                Rectangle {
+                                    width: 26
+                                    height: 22
+                                    radius: 4
+                                    color: modelCopyMouse.containsMouse ? "#E0E0E0" : "#F5F5F5"
+                                    border.color: "#D0D0D0"
+                                    border.width: 1
+
+                                    Label {
+                                        id: modelCopyLabel
+                                        anchors.centerIn: parent
+                                        text: "⎘"
+                                        color: colorTextSecondary
+                                        font.pixelSize: 13
+                                    }
+
+                                    MouseArea {
+                                        id: modelCopyMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (controller) {
+                                                controller.copyText(model.text)
+                                            }
+                                            modelCopyLabel.text = "✓"
+                                            modelCopyTimer.start()
+                                        }
+                                    }
+
+                                    Timer {
+                                        id: modelCopyTimer
+                                        interval: 1200
+                                        onTriggered: modelCopyLabel.text = "⎘"
+                                    }
+                                }
+                            }
+
                         }
                     }
                 }
+            }
+
+            Button {
+                id: scrollBottomButton
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.rightMargin: 18
+                anchors.bottomMargin: 18
+                text: "↓ Ir abajo"
+                visible: messageModel.count > 0 && !chatList.atYEnd
+                onClicked: scrollToBottom()
             }
         }
 
@@ -401,6 +509,7 @@ Page {
                         controller.selectSession(viewSessionId)
                     }
                     messageModel.append({ role: "user", text: prompt })
+                    scrollToBottom()
                     promptInput.text = ""
                     pendingAssistantText = ""
                     controller.sendPromptForSession(viewSessionId, prompt)
@@ -429,6 +538,7 @@ Page {
             }
             pendingAssistantText = ""
             messageModel.append({ role: "assistant", text: "" })
+            scrollToBottom()
         }
         function onStreamChunk(sessionId, text) {
             if (sessionId !== currentViewSessionId()) {
@@ -452,6 +562,7 @@ Page {
                 return
             }
             messageModel.append({ role: "assistant", text: "Error: " + message })
+            scrollToBottom()
         }
         function onMessagesHydrated(messages) {
             messageModel.clear()
@@ -461,7 +572,7 @@ Page {
                     text: messages[i].text
                 })
             }
-            chatList.positionViewAtEnd()
+            scrollToBottom()
         }
         function onSessionsChanged() {
             if (!controller || controller.sessions.length === 0) {

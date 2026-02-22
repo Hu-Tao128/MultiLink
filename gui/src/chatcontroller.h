@@ -44,6 +44,7 @@ public:
     Q_INVOKABLE void deleteEmptySessions();
     Q_INVOKABLE void setSessionProjectRoot(const QString &sessionId, const QString &projectRoot);
     Q_INVOKABLE void setSelectedSessionProjectRoot(const QString &projectRoot);
+    Q_INVOKABLE void copyText(const QString &text);
 
     void refreshSnapshot();
     void refreshCollections();
