@@ -33,7 +33,7 @@ impl Default for PromptOptions {
             model: None,
             temperature: Some(0.7),
             system_prompt: None,
-            num_ctx: Some(32768),
+            num_ctx: None,
         }
     }
 }

@@ -109,8 +109,7 @@ pub extern "C" fn chat_backend_create(
             .await
     });
 
-    let mut ui = UiState::default();
-    ui.provider_health = "available".to_string();
+    let ui = UiState::default();
 
     Box::into_raw(Box::new(BackendHandle {
         runtime,
@@ -256,7 +255,11 @@ fn spawn_send_prompt(
                         StreamEvent::Error(message) => {
                             if let Ok(mut ui) = ui_state.lock() {
                                 ui.is_loading = false;
-                                ui.provider_health = "unavailable".to_string();
+                                ui.provider_health = if is_provider_connection_error(&message) {
+                                    "unavailable".to_string()
+                                } else {
+                                    "available".to_string()
+                                };
                             }
                             emit_session_string(
                                 callbacks.on_stream_error,
@@ -269,19 +272,34 @@ fn spawn_send_prompt(
                 }
             }
             Err(err) => {
+                let message = err.to_string();
                 if let Ok(mut ui) = ui_state.lock() {
                     ui.is_loading = false;
-                    ui.provider_health = "unavailable".to_string();
+                    ui.provider_health = if is_provider_connection_error(&message) {
+                        "unavailable".to_string()
+                    } else {
+                        "available".to_string()
+                    };
                 }
                 emit_session_string(
                     callbacks.on_stream_error,
                     ctx as *mut c_void,
                     &stream_session,
-                    &err.to_string(),
+                    &message,
                 );
             }
         }
     });
+}
+
+fn is_provider_connection_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("connection refused")
+        || lower.contains("failed to connect")
+        || lower.contains("dns")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("socket")
 }
 
 #[unsafe(no_mangle)]

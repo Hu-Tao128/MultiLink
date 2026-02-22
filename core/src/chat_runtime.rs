@@ -16,13 +16,13 @@ use crate::providers::{PromptOptions, ProviderId};
 use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
 
-const MAX_CONTEXT_TOKENS: usize = 32768;
+const MAX_CONTEXT_TOKENS: usize = 7000;
 const SUMMARY_TRIGGER_TOKENS: usize = 6000;
 const KEEP_LAST_MESSAGES: usize = 6;
 const MAX_SUMMARY_TOKENS: usize = 1200;
 const MAX_PROJECT_FILES: usize = 30;
 const MAX_PROJECT_BYTES: usize = 200 * 1024;
-const MAX_PROJECT_CONTEXT_TOKENS: usize = 24000;
+const MAX_PROJECT_CONTEXT_TOKENS: usize = 3500;
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -245,7 +245,7 @@ impl ChatRuntime {
         self.maybe_summarize_session(session_id, provider, model.clone())
             .await;
 
-        let (system_prompt, routed_prompt) = self.build_context(session_id).await?;
+        let (system_prompt, routed_prompt) = self.build_context(session_id, true).await?;
         if context_debug_enabled() {
             let context_tokens = estimate_tokens(&routed_prompt) + estimate_tokens(&system_prompt);
             eprintln!(
@@ -260,11 +260,34 @@ impl ChatRuntime {
             ..PromptOptions::default()
         };
 
-        let stream = self
+        let stream_result = self
             .router
-            .stream_send(provider, routed_prompt, options)
-            .await
-            .map_err(|e| ChatRuntimeError::Provider(e.to_string()))?;
+            .stream_send(provider, routed_prompt.clone(), options.clone())
+            .await;
+
+        let stream = match stream_result {
+            Ok(stream) => stream,
+            Err(err) => {
+                let err_text = err.to_string();
+                eprintln!("[provider] stream error: {}", err_text);
+                if likely_context_overflow(&err_text) {
+                    eprintln!("[provider] retrying without project context (possible context overflow)");
+                    let (fallback_system, fallback_prompt) = self.build_context(session_id, false).await?;
+                    let fallback_options = PromptOptions {
+                        model: options.model.clone(),
+                        system_prompt: Some(fallback_system).filter(|s| !s.is_empty()),
+                        num_ctx: None,
+                        ..PromptOptions::default()
+                    };
+                    self.router
+                        .stream_send(provider, fallback_prompt, fallback_options)
+                        .await
+                        .map_err(|e| ChatRuntimeError::Provider(e.to_string()))?
+                } else {
+                    return Err(ChatRuntimeError::Provider(err_text));
+                }
+            }
+        };
 
         let (event_tx, event_rx) = mpsc::channel(128);
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
@@ -487,7 +510,11 @@ impl ChatRuntime {
         }
     }
 
-    async fn build_context(&self, session_id: &str) -> Result<(String, String), ChatRuntimeError> {
+    async fn build_context(
+        &self,
+        session_id: &str,
+        include_project_context: bool,
+    ) -> Result<(String, String), ChatRuntimeError> {
         let session = {
             let guard = self.sessions.read().await;
             guard
@@ -505,7 +532,7 @@ impl ChatRuntime {
             .map(supports_code_context)
             .unwrap_or(true);
 
-        if model_supported {
+        if include_project_context && model_supported {
             if let Some(project_context) = session
                 .project_context
                 .as_ref()
@@ -662,6 +689,16 @@ impl ChatRuntime {
             );
         }
     }
+}
+
+fn likely_context_overflow(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("context length")
+        || lower.contains("context window")
+        || lower.contains("too many tokens")
+        || lower.contains("maximum context")
+        || lower.contains("prompt is too long")
+        || lower.contains("token limit")
 }
 
 fn role_label(role: &str) -> &str {
