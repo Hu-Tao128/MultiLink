@@ -2,6 +2,12 @@
 
 MultiLink is a Linux-first, truly cross-platform LLM desktop client with a native Qt/QML GUI and a reusable Rust core.
 
+## Current engineering priority
+
+- Performance and runtime correctness are prioritized over interface polish.
+- The Rust core is treated as the product backbone; GUI changes should not regress stream stability, memory behavior, or context handling.
+- UI improvements are welcome when they preserve low overhead and keep logic in core.
+
 ## Architecture decisions
 
 - Rust owns runtime concerns: streaming, session state, persistence, cancellation, and provider routing.
@@ -50,9 +56,19 @@ QML has no HTTP calls, no streaming parser, and no persistence logic.
 - Provider routing with runtime switch and fallback to local provider.
 - Provider availability status API (`Available` / `NotAvailable`).
 - Ollama local provider with streaming support.
+- Context builder with bounded token budgets and project-context injection (per session) with defensive fallback when provider context windows are exceeded.
 - OAuth module for Gemini/Codex in core (browser + localhost callback + encrypted token store), pending end-to-end GUI wiring.
 - Model manager registry with local detection, size tracking, migration, and delete support.
 - Guided Ollama installation plan for Linux with explicit consent gating.
+
+## Current behavior notes (important for contributors)
+
+- Runtime classifies connection failures separately from prompt/content failures so provider health is not marked down for non-connectivity errors.
+- Ollama requests now include system prompts explicitly in `messages` for both sync and streaming paths.
+- Streaming parser in Ollama provider handles chunk boundaries safely (line-buffered JSON decode) to avoid partial-frame parse errors.
+- If a stream fails due to likely context overflow, runtime retries without project context before surfacing an error.
+- GUI supports selectable assistant text and copy actions (code block copy + full message copy) without moving clipboard logic into QML.
+- Project context support for models is in progress and intentionally conservative to reduce 500-class startup/send failures.
 
 ## Project layout
 
@@ -106,6 +122,7 @@ cmake --build build/gui
 - During streaming responses, persistence is throttled by time (400 ms) inside the Rust runtime and always flushed on stream completion/error to reduce unnecessary CPU and write pressure.
 - Streaming cancellation is explicit and non-blocking through runtime-owned cancellation handles.
 - Session files are stored in platform data directories resolved via `directories::ProjectDirs`.
+- Context limits are intentionally capped below provider maximums to keep requests resilient under real project payloads.
 
 ## Screenshots
 

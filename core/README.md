@@ -13,6 +13,13 @@ Rust library crate with all business logic.
 - Run checks: `cargo check`
 - Run tests: `cargo test`
 - Keep UI logic out of this crate.
+- Prefer performance-safe defaults (bounded context, throttled persistence, non-blocking stream handling).
+
+## Current core priorities
+
+- Prevent provider-facing failures caused by oversized context payloads.
+- Keep provider health signaling accurate (connection failures vs prompt/content failures).
+- Keep streaming robust under partial network frames and long-running responses.
 
 ## PR guidance
 
