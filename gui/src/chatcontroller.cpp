@@ -26,7 +26,7 @@ void chat_backend_destroy(void *backend);
 void chat_backend_send_prompt(void *backend, const char *text);
 void chat_backend_send_prompt_for_session(void *backend, const char *session_id, const char *text);
 void chat_backend_stop_generation(void *backend);
-void chat_backend_new_session(void *backend);
+char *chat_backend_new_session(void *backend);
 void chat_backend_select_session(void *backend, const char *session_id);
 void chat_backend_select_model(void *backend, const char *model);
 void chat_backend_set_session_project_root(void *backend, const char *session_id, const char *project_root);
@@ -34,6 +34,7 @@ void chat_backend_request_sessions(void *backend);
 void chat_backend_request_models(void *backend);
 void chat_backend_request_messages(void *backend, const char *session_id);
 void chat_backend_delete_empty_sessions(void *backend);
+bool chat_backend_delete_session(void *backend, const char *session_id);
 
 char *chat_backend_get_active_provider(void *backend);
 char *chat_backend_get_active_model(void *backend);
@@ -255,7 +256,26 @@ void ChatController::newSession() {
     if (!m_backend) {
         return;
     }
-    chat_backend_new_session(m_backend);
+    const QString newId = takeRustString(chat_backend_new_session(m_backend));
+    if (newId.isEmpty()) {
+        return;
+    }
+
+    if (m_selectedSessionId != newId) {
+        m_selectedSessionId = newId;
+        emit selectedSessionIdChanged();
+    }
+    if (!m_streamingSessionId.isEmpty()) {
+        m_streamingSessionId.clear();
+        emit streamingSessionIdChanged();
+    }
+    if (!m_selectedProjectRoot.isEmpty()) {
+        m_selectedProjectRoot.clear();
+        emit selectedProjectRootChanged();
+    }
+
+    const QByteArray encoded = newId.toUtf8();
+    chat_backend_request_messages(m_backend, encoded.constData());
     refreshSnapshot();
     requestSessions();
 }
@@ -317,6 +337,33 @@ void ChatController::selectModel(const QString &name) {
 void ChatController::deleteEmptySessions() {
     if (!m_backend) return;
     chat_backend_delete_empty_sessions(m_backend);
+    requestSessions();
+    refreshSnapshot();
+}
+
+void ChatController::deleteSession(const QString &sessionId) {
+    if (!m_backend || sessionId.trimmed().isEmpty()) {
+        return;
+    }
+
+    const QByteArray encoded = sessionId.toUtf8();
+    const bool deleted = chat_backend_delete_session(m_backend, encoded.constData());
+    if (!deleted) {
+        return;
+    }
+
+    if (m_selectedSessionId == sessionId) {
+        m_selectedSessionId.clear();
+        emit selectedSessionIdChanged();
+
+        if (!m_selectedProjectRoot.isEmpty()) {
+            m_selectedProjectRoot.clear();
+            emit selectedProjectRootChanged();
+        }
+
+        emit messagesHydrated(QVariantList{});
+    }
+
     requestSessions();
     refreshSnapshot();
 }

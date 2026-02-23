@@ -42,6 +42,7 @@ public:
     Q_INVOKABLE void requestModels();
     Q_INVOKABLE void requestMessages(const QString &sessionId);
     Q_INVOKABLE void deleteEmptySessions();
+    Q_INVOKABLE void deleteSession(const QString &sessionId);
     Q_INVOKABLE void setSessionProjectRoot(const QString &sessionId, const QString &projectRoot);
     Q_INVOKABLE void setSelectedSessionProjectRoot(const QString &projectRoot);
     Q_INVOKABLE void copyText(const QString &text);

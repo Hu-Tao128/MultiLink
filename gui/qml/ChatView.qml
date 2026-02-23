@@ -9,6 +9,7 @@ Page {
     required property ChatController controller
     property string pendingAssistantText: ""
     property bool pendingSelectNewestSession: false
+    property string pendingDeleteSessionId: ""
 
     readonly property color colorBackground: "#F5F6F7"
     readonly property color colorSurface: "#FFFFFF"
@@ -164,6 +165,22 @@ Page {
         }
     }
 
+    MessageDialog {
+        id: deleteSessionDialog
+        title: "Eliminar sesion"
+        text: "Esta accion no se puede deshacer.\n\nDeseas eliminar esta sesion?"
+        buttons: MessageDialog.Yes | MessageDialog.No
+        onAccepted: {
+            if (controller && pendingDeleteSessionId.length > 0) {
+                controller.deleteSession(pendingDeleteSessionId)
+            }
+            pendingDeleteSessionId = ""
+        }
+        onRejected: {
+            pendingDeleteSessionId = ""
+        }
+    }
+
     Rectangle {
         anchors.fill: parent
         color: colorBackground
@@ -222,6 +239,16 @@ Page {
                 onClicked: {
                     pendingSelectNewestSession = true
                     controller.newSession()
+                }
+            }
+            Button {
+                text: "Eliminar sesion"
+                enabled: currentViewSessionId().length > 0
+                onClicked: {
+                    pendingDeleteSessionId = currentViewSessionId()
+                    if (pendingDeleteSessionId.length > 0) {
+                        deleteSessionDialog.open()
+                    }
                 }
             }
             Button {
@@ -495,8 +522,11 @@ Page {
             Button {
                 id: sendButton
                 text: "Enviar"
-                enabled: !isStreamingActiveScope()
+                enabled: !isStreamingActiveScope() && !pendingSelectNewestSession
                 onClicked: {
+                    if (pendingSelectNewestSession) {
+                        return
+                    }
                     const prompt = promptInput.text.trim()
                     if (prompt.length === 0) {
                         return
@@ -581,9 +611,13 @@ Page {
 
             if (pendingSelectNewestSession) {
                 pendingSelectNewestSession = false
-                sessionBox.currentIndex = 0
-                controller.selectSessionAtIndex(0)
-                return
+                const selectedId = controller.selectedSessionId
+                const selectedIndex = indexForSessionId(selectedId)
+                if (selectedIndex >= 0) {
+                    sessionBox.currentIndex = selectedIndex
+                    controller.selectSession(selectedId)
+                    return
+                }
             }
 
             hydrateCurrentSession()

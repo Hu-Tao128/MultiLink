@@ -157,6 +157,32 @@ impl ChatRuntime {
         persist_index_and_state(&self.storage_dir, ids, new_active).await
     }
 
+    pub async fn delete_session(&self, session_id: &str) -> Result<(), ChatRuntimeError> {
+        if let Some(cancel) = self.cancellation.lock().await.remove(session_id) {
+            let _ = cancel.send(true);
+        }
+
+        {
+            let mut guard = self.sessions.write().await;
+            guard
+                .remove(session_id)
+                .ok_or(ChatRuntimeError::SessionNotFound)?;
+
+            let mut active = self.active_session_id.write().await;
+            if active.as_deref() == Some(session_id) {
+                *active = guard.keys().max().cloned();
+            }
+        }
+
+        let path = self.storage_dir.join(format!("{}.json", session_id));
+        let _ = fs::remove_file(path).await;
+        remove_partial_file(&self.storage_dir, session_id).await;
+
+        let ids = self.sessions.read().await.keys().cloned().collect();
+        let new_active = self.active_session_id.read().await.clone();
+        persist_index_and_state(&self.storage_dir, ids, new_active).await
+    }
+
     pub async fn active_session(&self) -> Option<String> {
         self.active_session_id.read().await.clone()
     }

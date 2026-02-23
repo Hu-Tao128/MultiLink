@@ -324,9 +324,9 @@ pub unsafe extern "C" fn chat_backend_stop_generation(handle: *mut BackendHandle
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chat_backend_new_session(handle: *mut BackendHandle) {
+pub unsafe extern "C" fn chat_backend_new_session(handle: *mut BackendHandle) -> *mut c_char {
     let Some(backend) = (unsafe { handle.as_ref() }) else {
-        return;
+        return std::ptr::null_mut();
     };
     let model = backend
         .ui_state
@@ -339,22 +339,33 @@ pub unsafe extern "C" fn chat_backend_new_session(handle: *mut BackendHandle) {
         Some(model)
     };
 
-    let runtime = backend.runtime.handle().clone();
-    let chat_runtime = backend.chat_runtime.clone();
-    let active_session_id = backend.active_session_id.clone();
-    let callbacks = backend.callbacks;
-    let ctx = backend.callback_ctx;
+    let id = backend
+        .runtime
+        .block_on(backend.chat_runtime.create_session(ProviderId::Ollama, selected_model));
 
-    runtime.spawn(async move {
-        let id = chat_runtime
-            .create_session(ProviderId::Ollama, selected_model)
-            .await;
-        if let Ok(mut active) = active_session_id.lock() {
-            *active = id.clone();
-        }
-        let payload = build_sessions_json(&chat_runtime).await;
-        emit_string(callbacks.on_sessions_updated, ctx as *mut c_void, &payload);
-    });
+    if let Ok(mut active) = backend.active_session_id.lock() {
+        *active = id.clone();
+    }
+
+    let payload = backend
+        .runtime
+        .block_on(async { build_sessions_json(&backend.chat_runtime).await });
+    emit_string(
+        backend.callbacks.on_sessions_updated,
+        backend.callback_ctx as *mut c_void,
+        &payload,
+    );
+
+    let messages_payload = backend
+        .runtime
+        .block_on(async { build_messages_json(&backend.chat_runtime, &id).await });
+    emit_string(
+        backend.callbacks.on_messages_updated,
+        backend.callback_ctx as *mut c_void,
+        &messages_payload,
+    );
+
+    into_c_string(id)
 }
 
 #[unsafe(no_mangle)]
@@ -618,6 +629,65 @@ pub unsafe extern "C" fn chat_backend_delete_empty_sessions(handle: *mut Backend
     let _ = backend
         .runtime
         .block_on(backend.chat_runtime.delete_empty_sessions());
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_delete_session(
+    handle: *mut BackendHandle,
+    session_id: *const c_char,
+) -> bool {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return false;
+    };
+    let Some(id_cstr) = (!session_id.is_null()).then(|| unsafe { CStr::from_ptr(session_id) })
+    else {
+        return false;
+    };
+    let id = id_cstr.to_string_lossy().trim().to_string();
+    if id.is_empty() {
+        return false;
+    }
+
+    let deleted = backend
+        .runtime
+        .block_on(backend.chat_runtime.delete_session(&id))
+        .is_ok();
+    if !deleted {
+        return false;
+    }
+
+    let next_active = backend
+        .runtime
+        .block_on(async { backend.chat_runtime.active_session().await })
+        .unwrap_or_default();
+
+    if let Ok(mut active) = backend.active_session_id.lock() {
+        *active = next_active.clone();
+    }
+
+    let payload = backend
+        .runtime
+        .block_on(async { build_sessions_json(&backend.chat_runtime).await });
+    emit_string(
+        backend.callbacks.on_sessions_updated,
+        backend.callback_ctx as *mut c_void,
+        &payload,
+    );
+
+    let messages_payload = if next_active.is_empty() {
+        "{\"sessionId\":\"\",\"messages\":[]}".to_string()
+    } else {
+        backend
+            .runtime
+            .block_on(async { build_messages_json(&backend.chat_runtime, &next_active).await })
+    };
+    emit_string(
+        backend.callbacks.on_messages_updated,
+        backend.callback_ctx as *mut c_void,
+        &messages_payload,
+    );
+
+    true
 }
 
 #[unsafe(no_mangle)]
