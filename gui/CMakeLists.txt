@@ -15,8 +15,14 @@ add_custom_target(chat_controller_rust
 )
 
 add_library(chat_controller STATIC IMPORTED GLOBAL)
+if(WIN32)
+    set(RUST_LIB_NAME "chat_controller.lib")
+else()
+    set(RUST_LIB_NAME "libchat_controller.a")
+endif()
+
 set_target_properties(chat_controller PROPERTIES
-    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/rust/chat_controller/target/release/libchat_controller.a
+    IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/rust/chat_controller/target/release/${RUST_LIB_NAME}
 )
 add_dependencies(chat_controller chat_controller_rust)
 
