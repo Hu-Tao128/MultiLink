@@ -40,13 +40,13 @@ jobs:
         run: echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
 
       - name: Install Qt
+        if: runner.os != 'Linux'
         uses: jurplel/install-qt-action@v3
         with:
           version: '6.5.3'
-          host: ${{ runner.os == 'Windows' && 'windows' || runner.os == 'macOS' && 'mac' || 'linux' }}
+          host: ${{ runner.os == 'Windows' && 'windows' || 'mac' }}
           target: 'desktop'
-          modules: 'qtquick3d qt5compat qtshadertools' # Add any extra modules if needed
-          setup-python: 'false'
+          modules: 'qtquick3d qt5compat qtshadertools'
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
