@@ -96,7 +96,7 @@ pub extern "C" fn chat_backend_create(
     );
 
     let _ = runtime.block_on(chat_runtime.load_sessions_from_disk());
-    let active = runtime.block_on(async {
+    let active_session_id = runtime.block_on(async {
         if let Some(existing_active) = chat_runtime.active_session().await {
             return existing_active;
         }
@@ -111,14 +111,25 @@ pub extern "C" fn chat_backend_create(
             .await
     });
 
-    let ui = UiState::default();
+    let active_model = runtime.block_on(async {
+        let sessions = chat_runtime.list_sessions().await;
+        if let Some(session) = sessions.iter().find(|s| s.id == active_session_id) {
+            return session.model.clone().unwrap_or_else(|| "llama3.2".to_string());
+        }
+        "llama3.2".to_string()
+    });
+
+    let ui = UiState {
+        active_model,
+        ..UiState::default()
+    };
 
     Box::into_raw(Box::new(BackendHandle {
         runtime,
         chat_runtime,
         callbacks,
         callback_ctx: callback_ctx as usize,
-        active_session_id: Arc::new(Mutex::new(active)),
+        active_session_id: Arc::new(Mutex::new(active_session_id)),
         ui_state: Arc::new(Mutex::new(ui)),
     }))
 }
