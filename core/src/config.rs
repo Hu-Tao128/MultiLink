@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub gemini: RemoteProviderConfig,
     pub codex: RemoteProviderConfig,
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +31,36 @@ pub struct RemoteProviderConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     pub models_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    pub max_context_tokens: usize,
+    pub summary_trigger_tokens: usize,
+    pub keep_last_messages: usize,
+    pub max_summary_tokens: usize,
+    pub max_project_files: usize,
+    pub max_project_bytes: usize,
+    pub max_project_file_bytes: usize,
+    pub max_project_context_tokens: usize,
+    pub max_parallel_streams: usize,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            max_context_tokens: 7000,
+            summary_trigger_tokens: 6000,
+            keep_last_messages: 6,
+            max_summary_tokens: 1200,
+            max_project_files: 30,
+            max_project_bytes: 200 * 1024,
+            max_project_file_bytes: 64 * 1024,
+            max_project_context_tokens: 3500,
+            max_parallel_streams: 4,
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -50,6 +82,7 @@ impl Default for AppConfig {
             storage: StorageConfig {
                 models_dir: "~/.local/share/multilink/models".to_string(),
             },
+            runtime: RuntimeConfig::default(),
         }
     }
 }
