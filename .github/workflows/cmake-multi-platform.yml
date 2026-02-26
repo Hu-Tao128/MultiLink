@@ -62,6 +62,9 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install cmake ninja -y
 
+      - name: Build Rust Backend
+        run: cargo build --release --manifest-path gui/rust/chat_controller/Cargo.toml
+
       - name: Configure CMake (Linux)
         if: runner.os == 'Linux'
         run: >
