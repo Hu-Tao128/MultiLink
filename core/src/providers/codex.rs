@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, TokenEvent, TokenStream};
+use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, TokenEvent, TokenStream, TokenUsage};
 
 #[derive(Clone)]
 pub struct CodexProvider {
@@ -43,6 +43,18 @@ struct CodexRequest {
 struct CodexResponse {
     output_text: String,
     model: Option<String>,
+    #[serde(default)]
+    usage: Option<CodexUsage>,
+}
+
+#[derive(Deserialize)]
+struct CodexUsage {
+    #[serde(rename = "input_tokens", default)]
+    input_tokens: Option<usize>,
+    #[serde(rename = "output_tokens", default)]
+    output_tokens: Option<usize>,
+    #[serde(rename = "total_tokens", default)]
+    total_tokens: Option<usize>,
 }
 
 #[async_trait]
@@ -107,20 +119,32 @@ impl LLMProvider for CodexProvider {
             .await
             .map_err(|e| LLMError::Serialization(e.to_string()))?;
 
+        let usage = payload.usage.map(|u| {
+            TokenUsage::exact(
+                u.input_tokens.unwrap_or(0),
+                u.output_tokens.unwrap_or(0),
+            )
+        });
+
         Ok(LLMResponse {
             text: payload.output_text,
             provider: ProviderId::Codex,
             model: payload.model,
+            usage,
         })
     }
 
     async fn stream_send(&self, prompt: String, options: PromptOptions) -> Result<TokenStream, LLMError> {
         let full = self.send(prompt, options).await?;
-        let stream = tokio_stream::iter(vec![
+        let mut events = vec![
             Ok(TokenEvent::Started),
-            Ok(TokenEvent::Token(full.text)),
-            Ok(TokenEvent::Completed),
-        ]);
+            Ok(TokenEvent::Token(full.text.clone())),
+        ];
+        if let Some(usage) = full.usage {
+            events.push(Ok(TokenEvent::Usage(usage)));
+        }
+        events.push(Ok(TokenEvent::Completed));
+        let stream = tokio_stream::iter(events);
         Ok(Box::pin(stream))
     }
 }

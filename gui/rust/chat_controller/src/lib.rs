@@ -12,6 +12,7 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(2);
 
 type SessionCallback = extern "C" fn(*mut c_void, *const c_char);
 type SessionStringCallback = extern "C" fn(*mut c_void, *const c_char, *const c_char);
+type SessionUsageCallback = extern "C" fn(*mut c_void, *const c_char, usize, usize, usize, bool);
 type StringCallback = extern "C" fn(*mut c_void, *const c_char);
 
 #[repr(C)]
@@ -21,6 +22,7 @@ pub struct BackendCallbacks {
     pub on_stream_chunk: Option<SessionStringCallback>,
     pub on_stream_finished: Option<SessionCallback>,
     pub on_stream_error: Option<SessionStringCallback>,
+    pub on_token_usage: Option<SessionUsageCallback>,
     pub on_sessions_updated: Option<StringCallback>,
     pub on_models_updated: Option<StringCallback>,
     pub on_messages_updated: Option<StringCallback>,
@@ -241,6 +243,21 @@ fn spawn_send_prompt(
                                 &stream_session,
                                 &chunk,
                             );
+                        }
+                        StreamEvent::Usage { prompt_tokens, completion_tokens, total_tokens, is_estimated } => {
+                            if let Some(callback) = callbacks.on_token_usage {
+                                let session_cstr = CString::new(stream_session.clone()).unwrap();
+                                unsafe {
+                                    callback(
+                                        ctx as *mut c_void,
+                                        session_cstr.as_ptr(),
+                                        prompt_tokens,
+                                        completion_tokens,
+                                        total_tokens,
+                                        is_estimated,
+                                    );
+                                }
+                            }
                         }
                         StreamEvent::Finished => {
                             if let Ok(mut ui) = ui_state.lock() {

@@ -60,6 +60,7 @@ signals:
     void streamChunk(const QString &sessionId, const QString &text);
     void streamFinished(const QString &sessionId);
     void streamError(const QString &sessionId, const QString &message);
+    void tokenUsageUpdated(const QString &sessionId, int promptTokens, int completionTokens, int totalTokens, bool isEstimated);
 
     void activeProviderChanged();
     void activeModelChanged();

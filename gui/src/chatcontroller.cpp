@@ -16,6 +16,7 @@ struct BackendCallbacks {
     void (*on_stream_chunk)(void *ctx, const char *session_id, const char *text);
     void (*on_stream_finished)(void *ctx, const char *session_id);
     void (*on_stream_error)(void *ctx, const char *session_id, const char *message);
+    void (*on_token_usage)(void *ctx, const char *session_id, size_t prompt_tokens, size_t completion_tokens, size_t total_tokens, bool is_estimated);
     void (*on_sessions_updated)(void *ctx, const char *json);
     void (*on_models_updated)(void *ctx, const char *json);
     void (*on_messages_updated)(void *ctx, const char *json);
@@ -92,6 +93,14 @@ static void onStreamErrorThunk(void *ctx, const char *session_id, const char *me
     }, Qt::QueuedConnection);
 }
 
+static void onTokenUsageThunk(void *ctx, const char *session_id, size_t prompt_tokens, size_t completion_tokens, size_t total_tokens, bool is_estimated) {
+    auto *self = static_cast<ChatController *>(ctx);
+    const QString sessionId = QString::fromUtf8(session_id ? session_id : "");
+    QMetaObject::invokeMethod(self, [self, sessionId, prompt_tokens, completion_tokens, total_tokens, is_estimated]() {
+        emit self->tokenUsageUpdated(sessionId, static_cast<int>(prompt_tokens), static_cast<int>(completion_tokens), static_cast<int>(total_tokens), is_estimated);
+    }, Qt::QueuedConnection);
+}
+
 static QVariantList parseJsonListFromUtf8(const QString &jsonText) {
     const QJsonDocument doc = QJsonDocument::fromJson(jsonText.toUtf8());
     QVariantList output;
@@ -136,6 +145,7 @@ ChatController::ChatController(QObject *parent)
     callbacks.on_stream_chunk = &onStreamChunkThunk;
     callbacks.on_stream_finished = &onStreamFinishedThunk;
     callbacks.on_stream_error = &onStreamErrorThunk;
+    callbacks.on_token_usage = &onTokenUsageThunk;
     callbacks.on_sessions_updated = &onSessionsUpdatedThunk;
     callbacks.on_models_updated = &onModelsUpdatedThunk;
     callbacks.on_messages_updated = &onMessagesUpdatedThunk;

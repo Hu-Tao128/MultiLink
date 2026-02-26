@@ -6,7 +6,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 
-use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, TokenEvent, TokenStream};
+use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, TokenEvent, TokenStream, TokenUsage};
 use crate::session::ChatMessage;
 
 #[derive(Clone)]
@@ -162,12 +162,20 @@ struct OllamaMessage {
 #[derive(Deserialize)]
 struct OllamaResponse {
     message: OllamaMessage,
+    #[serde(default)]
+    prompt_eval_count: Option<usize>,
+    #[serde(default)]
+    eval_count: Option<usize>,
 }
 
 #[derive(Deserialize)]
 struct OllamaStreamChunk {
     done: bool,
     message: Option<OllamaMessage>,
+    #[serde(default)]
+    prompt_eval_count: Option<usize>,
+    #[serde(default)]
+    eval_count: Option<usize>,
 }
 
 #[async_trait]
@@ -240,10 +248,20 @@ impl LLMProvider for OllamaProvider {
             .await
             .map_err(|e| LLMError::Serialization(e.to_string()))?;
 
+        let usage = if parsed.prompt_eval_count.is_some() || parsed.eval_count.is_some() {
+            Some(TokenUsage::exact(
+                parsed.prompt_eval_count.unwrap_or(0),
+                parsed.eval_count.unwrap_or(0),
+            ))
+        } else {
+            None
+        };
+
         Ok(LLMResponse {
             text: parsed.message.content,
             provider: ProviderId::Ollama,
             model: Some(model),
+            usage,
         })
     }
 
@@ -367,6 +385,12 @@ impl LLMProvider for OllamaProvider {
                                                     }
                                                     if chunk.done && !completed_sent {
                                                         completed_sent = true;
+                                                        let prompt_tokens = chunk.prompt_eval_count.unwrap_or(0);
+                                                        let completion_tokens = chunk.eval_count.unwrap_or(0);
+                                                        if prompt_tokens > 0 || completion_tokens > 0 {
+                                                            let usage = TokenUsage::exact(prompt_tokens, completion_tokens);
+                                                            let _ = tx.send(Ok(TokenEvent::Usage(usage))).await;
+                                                        }
                                                         let _ = tx.send(Ok(TokenEvent::Completed)).await;
                                                     }
                                                 }
@@ -425,6 +449,13 @@ impl LLMProvider for OllamaProvider {
                                                             let _ = tx.send(Ok(TokenEvent::Token(message.content))).await;
                                                         }
                                                         if chunk.done && !completed_sent {
+                                                            completed_sent = true;
+                                                            let prompt_tokens = chunk.prompt_eval_count.unwrap_or(0);
+                                                            let completion_tokens = chunk.eval_count.unwrap_or(0);
+                                                            if prompt_tokens > 0 || completion_tokens > 0 {
+                                                                let usage = TokenUsage::exact(prompt_tokens, completion_tokens);
+                                                                let _ = tx.send(Ok(TokenEvent::Usage(usage))).await;
+                                                            }
                                                             let _ = tx.send(Ok(TokenEvent::Completed)).await;
                                                         }
                                                     }

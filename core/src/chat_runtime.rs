@@ -22,6 +22,12 @@ use crate::session::{ChatMessage, ChatSession, SessionState};
 pub enum StreamEvent {
     Started,
     Chunk(String),
+    Usage {
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        total_tokens: usize,
+        is_estimated: bool,
+    },
     Finished,
     Error(String),
 }
@@ -405,6 +411,14 @@ impl ChatRuntime {
                                 let _ = finalize_success(&sessions, &storage_dir, &session_id_owned, &full_output).await;
                                 let _ = event_tx.send(StreamEvent::Finished).await;
                                 break;
+                            }
+                            Some(Ok(crate::providers::TokenEvent::Usage(usage))) => {
+                                let _ = event_tx.send(StreamEvent::Usage {
+                                    prompt_tokens: usage.prompt_tokens,
+                                    completion_tokens: usage.completion_tokens,
+                                    total_tokens: usage.total_tokens,
+                                    is_estimated: usage.is_estimated,
+                                }).await;
                             }
                             Some(Ok(crate::providers::TokenEvent::Started)) => {}
                             Some(Err(err)) => {

@@ -10,6 +10,12 @@ Page {
     property string pendingAssistantText: ""
     property bool pendingSelectNewestSession: false
     property string pendingDeleteSessionId: ""
+    property bool tokenSidebarExpanded: true
+    property int currentPromptTokens: 0
+    property int currentCompletionTokens: 0
+    property int currentTotalTokens: 0
+    property bool currentUsageIsEstimated: false
+    property int contextMaxTokens: 4096
 
     readonly property color colorBackground: "#F5F6F7"
     readonly property color colorSurface: "#FFFFFF"
@@ -629,6 +635,15 @@ Page {
                     break
                 }
             }
+        }
+        function onTokenUsageUpdated(sessionId, promptTokens, completionTokens, totalTokens, isEstimated) {
+            if (sessionId !== currentViewSessionId()) {
+                return
+            }
+            currentPromptTokens = promptTokens
+            currentCompletionTokens = completionTokens
+            currentTotalTokens = totalTokens
+            currentUsageIsEstimated = isEstimated
         }
     }
 }

@@ -46,12 +46,46 @@ pub struct LLMResponse {
     pub text: String,
     pub provider: ProviderId,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub total_tokens: usize,
+    #[serde(default)]
+    pub is_estimated: bool,
+}
+
+impl TokenUsage {
+    pub fn estimated(prompt_tokens: usize, completion_tokens: usize) -> Self {
+        let total = prompt_tokens + completion_tokens;
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: total,
+            is_estimated: true,
+        }
+    }
+
+    pub fn exact(prompt_tokens: usize, completion_tokens: usize) -> Self {
+        let total = prompt_tokens + completion_tokens;
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: total,
+            is_estimated: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TokenEvent {
     Started,
     Token(String),
+    Usage(TokenUsage),
     Completed,
 }
 
