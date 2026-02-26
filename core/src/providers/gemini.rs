@@ -61,12 +61,34 @@ impl LLMProvider for GeminiProvider {
 
     async fn send(&self, prompt: String, options: PromptOptions) -> Result<LLMResponse, LLMError> {
         let token = self.access_token.as_deref().ok_or(LLMError::NotConfigured)?;
+        
+        let final_prompt = if let Some(messages) = options.messages {
+            let mut content = String::new();
+            for msg in messages {
+                let role_str = match msg.role.as_str() {
+                    "system" => "System",
+                    "assistant" => "Assistant",
+                    _ => "User",
+                };
+                content.push_str(&format!("{}: {}\n\n", role_str, msg.content));
+            }
+            content
+        } else {
+            let mut p = String::new();
+            if let Some(sys) = options.system_prompt {
+                p.push_str(&sys);
+                p.push_str("\n\n");
+            }
+            p.push_str(&prompt);
+            p
+        };
+        
         let response = self
             .client
             .post(&self.endpoint)
             .bearer_auth(token)
             .json(&GeminiRequest {
-                prompt,
+                prompt: final_prompt,
                 model: options.model,
             })
             .send()

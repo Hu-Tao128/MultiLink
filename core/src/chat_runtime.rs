@@ -291,18 +291,19 @@ impl ChatRuntime {
         self.maybe_summarize_session(session_id, provider, model.clone())
             .await;
 
-        let (system_prompt, routed_prompt) = self.build_context(session_id, true).await?;
+        let messages = self.build_messages(session_id, prompt.clone(), true).await?;
         if context_debug_enabled() {
-            let context_tokens = estimate_tokens(&routed_prompt) + estimate_tokens(&system_prompt);
+            let context_tokens: usize = messages.iter().map(|m| estimate_tokens(&m.content)).sum();
             eprintln!(
-                "[context] session={} context_tokens={} max_tokens={}",
-                session_id, context_tokens, self.runtime_config.max_context_tokens
+                "[context] session={} context_tokens={} max_tokens={} message_count={}",
+                session_id, context_tokens, self.runtime_config.max_context_tokens,
+                messages.len()
             );
         }
 
         let options = PromptOptions {
             model,
-            system_prompt: Some(system_prompt).filter(|s| !s.is_empty()),
+            messages: Some(messages),
             ..PromptOptions::default()
         };
 
@@ -315,7 +316,7 @@ impl ChatRuntime {
 
         let stream_result = self
             .router
-            .stream_send(provider, routed_prompt.clone(), options.clone())
+            .stream_send(provider, prompt.clone(), options.clone())
             .await;
 
         let stream = match stream_result {
@@ -325,15 +326,15 @@ impl ChatRuntime {
                 eprintln!("[provider] stream error: {}", err_text);
                 if likely_context_overflow(&err_text) {
                     eprintln!("[provider] retrying without project context (possible context overflow)");
-                    let (fallback_system, fallback_prompt) = self.build_context(session_id, false).await?;
+                    let fallback_messages = self.build_messages(session_id, prompt.clone(), false).await?;
                     let fallback_options = PromptOptions {
                         model: options.model.clone(),
-                        system_prompt: Some(fallback_system).filter(|s| !s.is_empty()),
+                        messages: Some(fallback_messages),
                         num_ctx: None,
                         ..PromptOptions::default()
                     };
                     self.router
-                        .stream_send(provider, fallback_prompt, fallback_options)
+                        .stream_send(provider, prompt, fallback_options)
                         .await
                         .map_err(|e| ChatRuntimeError::Provider(e.to_string()))?
                 } else {
@@ -565,11 +566,12 @@ impl ChatRuntime {
         }
     }
 
-    async fn build_context(
+    async fn build_messages(
         &self,
         session_id: &str,
+        current_prompt: String,
         include_project_context: bool,
-    ) -> Result<(String, String), ChatRuntimeError> {
+    ) -> Result<Vec<ChatMessage>, ChatRuntimeError> {
         let session = {
             let guard = self.sessions.read().await;
             guard
@@ -578,8 +580,8 @@ impl ChatRuntime {
                 .ok_or(ChatRuntimeError::SessionNotFound)?
         };
 
+        let mut messages = Vec::new();
         let mut tokens = 0usize;
-        let mut system_chunks = Vec::new();
         let model_hint = session.model.as_deref();
 
         let model_supported = session
@@ -587,6 +589,8 @@ impl ChatRuntime {
             .as_deref()
             .map(supports_code_context)
             .unwrap_or(true);
+
+        let mut system_content = String::new();
 
         if include_project_context && model_supported {
             if let Some(project_context) = session
@@ -604,37 +608,45 @@ impl ChatRuntime {
                     } else {
                         project_context.clone()
                     };
-                    let prelude = format!(
-                        "You are a senior software engineer.\n\nThis conversation is about the following project:\n{}\n",
-                        capped_context
-                    );
-                    tokens += estimate_tokens_for_model(&prelude, model_hint);
-                    system_chunks.push(prelude);
+                    system_content.push_str("You are a senior software engineer.\n\nThis conversation is about the following project:\n");
+                    system_content.push_str(&capped_context);
+                    system_content.push('\n');
                 }
             }
         }
 
         if let Some(summary) = session.summary.as_ref().filter(|v| !v.trim().is_empty()) {
-            let summary_block = format!("Conversation summary:\n{}\n", summary);
-            tokens += estimate_tokens_for_model(&summary_block, model_hint);
-            system_chunks.push(summary_block);
+            system_content.push_str("Conversation summary:\n");
+            system_content.push_str(summary);
+            system_content.push('\n');
+        }
+
+        if !system_content.is_empty() {
+            tokens += estimate_tokens_for_model(&system_content, model_hint);
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: system_content,
+                timestamp: 0,
+            });
         }
 
         let base_index = session.summarized_messages.min(session.messages.len());
-        let mut recent_chunks = Vec::new();
-        for msg in session.messages.iter().skip(base_index).rev() {
-            let text = format!("{}: {}\n", role_label(&msg.role), msg.content);
-            let t = estimate_tokens_for_model(&text, model_hint);
+        for msg in session.messages.iter().skip(base_index) {
+            let t = estimate_tokens_for_model(&msg.content, model_hint);
             if tokens + t > self.runtime_config.max_context_tokens {
                 break;
             }
             tokens += t;
-            recent_chunks.push(text);
+            messages.push(msg.clone());
         }
 
-        recent_chunks.reverse();
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: current_prompt,
+            timestamp: 0,
+        });
 
-        Ok((system_chunks.join("\n"), recent_chunks.join("")))
+        Ok(messages)
     }
 
     async fn maybe_summarize_session(

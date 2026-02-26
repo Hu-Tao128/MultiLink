@@ -25,6 +25,8 @@ pub struct PromptOptions {
     pub temperature: Option<f32>,
     pub system_prompt: Option<String>,
     pub num_ctx: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Vec<super::session::ChatMessage>>,
 }
 
 impl Default for PromptOptions {
@@ -34,6 +36,7 @@ impl Default for PromptOptions {
             temperature: Some(0.7),
             system_prompt: None,
             num_ctx: None,
+            messages: None,
         }
     }
 }

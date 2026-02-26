@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 
 use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, TokenEvent, TokenStream};
+use crate::session::ChatMessage;
 
 #[derive(Clone)]
 pub struct OllamaProvider {
@@ -202,17 +203,28 @@ impl LLMProvider for OllamaProvider {
             temperature: options.temperature,
         };
         
-        let mut messages = Vec::new();
-        if let Some(sys) = options.system_prompt.as_ref() {
-            messages.push(OllamaMessage {
-                role: "system".to_string(),
-                content: sys.clone(),
+        let messages = if let Some(chat_messages) = options.messages {
+            chat_messages
+                .into_iter()
+                .map(|m| OllamaMessage {
+                    role: m.role,
+                    content: m.content,
+                })
+                .collect()
+        } else {
+            let mut msgs = Vec::new();
+            if let Some(sys) = options.system_prompt.as_ref() {
+                msgs.push(OllamaMessage {
+                    role: "system".to_string(),
+                    content: sys.clone(),
+                });
+            }
+            msgs.push(OllamaMessage {
+                role: "user".to_string(),
+                content: prompt,
             });
-        }
-        messages.push(OllamaMessage {
-            role: "user".to_string(),
-            content: prompt,
-        });
+            msgs
+        };
 
         let body = OllamaRequest {
             model: model.clone(),
@@ -246,17 +258,32 @@ impl LLMProvider for OllamaProvider {
             temperature: options.temperature,
         };
         
-        let mut messages = Vec::new();
-        if let Some(sys) = options.system_prompt.as_ref() {
-            messages.push(OllamaMessage {
-                role: "system".to_string(),
-                content: sys.clone(),
+        let messages = if let Some(chat_messages) = options.messages {
+            chat_messages
+        } else {
+            let mut msgs = Vec::new();
+            if let Some(sys) = options.system_prompt.as_ref() {
+                msgs.push(ChatMessage {
+                    role: "system".to_string(),
+                    content: sys.clone(),
+                    timestamp: 0,
+                });
+            }
+            msgs.push(ChatMessage {
+                role: "user".to_string(),
+                content: prompt,
+                timestamp: 0,
             });
-        }
-        messages.push(OllamaMessage {
-            role: "user".to_string(),
-            content: prompt,
-        });
+            msgs
+        };
+
+        let ollama_messages: Vec<OllamaMessage> = messages
+            .into_iter()
+            .map(|m| OllamaMessage {
+                role: m.role,
+                content: m.content,
+            })
+            .collect();
 
         const STREAM_RETRIES: usize = 2;
         const STREAM_TIMEOUT_SECS: u64 = 60;
@@ -272,7 +299,7 @@ impl LLMProvider for OllamaProvider {
             let body = OllamaRequest {
                 model: model.clone(),
                 stream: true,
-                messages: messages.clone(),
+                messages: ollama_messages.clone(),
                 options: Some(ollama_options.clone()),
             };
 
