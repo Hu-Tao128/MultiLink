@@ -11,6 +11,7 @@ Page {
     property bool pendingSelectNewestSession: false
     property string pendingDeleteSessionId: ""
     property bool tokenSidebarExpanded: true
+    property bool modelSelectorInitializing: true
     property int currentPromptTokens: 0
     property int currentCompletionTokens: 0
     property int currentTotalTokens: 0
@@ -111,6 +112,7 @@ Page {
             controller.requestSessions()
             return
         }
+        modelSelectorInitializing = false
 
         const targetId = controller.selectedSessionId
         let targetIndex = -1
@@ -508,6 +510,9 @@ Page {
                     text: modelData.provider + " - " + modelData.label
                 }
                 onCurrentIndexChanged: {
+                    if (modelSelectorInitializing) {
+                        return
+                    }
                     if (currentIndex < 0 || currentIndex >= controller.availableModelsDetailed.length) {
                         return
                     }
@@ -635,6 +640,7 @@ Page {
                     break
                 }
             }
+            modelSelectorInitializing = false
         }
         function onTokenUsageUpdated(sessionId, promptTokens, completionTokens, totalTokens, isEstimated) {
             if (sessionId !== currentViewSessionId()) {
