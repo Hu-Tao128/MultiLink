@@ -39,6 +39,15 @@ jobs:
         shell: bash
         run: echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
 
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.5.3'
+          host: ${{ runner.os == 'Windows' && 'windows' || runner.os == 'macOS' && 'mac' || 'linux' }}
+          target: 'desktop'
+          modules: 'qtquick3d qt5compat qtshadertools' # Add any extra modules if needed
+          setup-python: 'false'
+
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -47,11 +56,11 @@ jobs:
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install qt cmake
+        run: brew install cmake ninja
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
-        run: choco install qt6 cmake -y
+        run: choco install cmake ninja -y
 
       - name: Configure CMake (Linux)
         if: runner.os == 'Linux'
@@ -65,7 +74,7 @@ jobs:
         run: >
           cmake -B ${{ steps.strings.outputs.build-output-dir }}
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
-          -DCMAKE_PREFIX_PATH=$(brew --prefix qt6)
+          -G Ninja
           -S gui
 
       - name: Configure CMake (Windows)
@@ -73,6 +82,7 @@ jobs:
         run: >
           cmake -B ${{ steps.strings.outputs.build-output-dir }}
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -G "Visual Studio 17 2022"
           -S gui
 
       - name: Build
