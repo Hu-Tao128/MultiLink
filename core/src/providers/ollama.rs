@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, TokenEvent, TokenStream};
 
@@ -14,8 +15,14 @@ pub struct OllamaProvider {
 
 impl OllamaProvider {
     pub fn new(base_url: String, default_model: String) -> Self {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(180))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
         Self {
-            client: Client::new(),
+            client,
             base_url,
             default_model,
         }
@@ -30,10 +37,20 @@ impl OllamaProvider {
 }
 
 #[derive(Serialize)]
+struct OllamaOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_ctx: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+}
+
+#[derive(Serialize)]
 struct OllamaRequest {
     model: String,
     stream: bool,
     messages: Vec<OllamaMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<OllamaOptions>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,13 +86,28 @@ impl LLMProvider for OllamaProvider {
 
     async fn send(&self, prompt: String, options: PromptOptions) -> Result<LLMResponse, LLMError> {
         let model = self.model_for(&options);
+        let ollama_options = OllamaOptions {
+            num_ctx: options.num_ctx,
+            temperature: options.temperature,
+        };
+        
+        let mut messages = Vec::new();
+        if let Some(sys) = options.system_prompt.as_ref() {
+            messages.push(OllamaMessage {
+                role: "system".to_string(),
+                content: sys.clone(),
+            });
+        }
+        messages.push(OllamaMessage {
+            role: "user".to_string(),
+            content: prompt,
+        });
+
         let body = OllamaRequest {
             model: model.clone(),
             stream: false,
-            messages: vec![OllamaMessage {
-                role: "user".to_string(),
-                content: prompt,
-            }],
+            messages,
+            options: Some(ollama_options),
         };
 
         let response = self
@@ -87,7 +119,14 @@ impl LLMProvider for OllamaProvider {
             .map_err(|e| LLMError::Http(e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(LLMError::Http(response.status().to_string()));
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let detail = if body.trim().is_empty() {
+                status.to_string()
+            } else {
+                format!("{}: {}", status, body)
+            };
+            return Err(LLMError::Http(detail));
         }
 
         let parsed = response
@@ -108,13 +147,28 @@ impl LLMProvider for OllamaProvider {
         options: PromptOptions,
     ) -> Result<TokenStream, LLMError> {
         let model = self.model_for(&options);
+        let ollama_options = OllamaOptions {
+            num_ctx: options.num_ctx,
+            temperature: options.temperature,
+        };
+        
+        let mut messages = Vec::new();
+        if let Some(sys) = options.system_prompt.as_ref() {
+            messages.push(OllamaMessage {
+                role: "system".to_string(),
+                content: sys.clone(),
+            });
+        }
+        messages.push(OllamaMessage {
+            role: "user".to_string(),
+            content: prompt,
+        });
+
         let body = OllamaRequest {
             model,
             stream: true,
-            messages: vec![OllamaMessage {
-                role: "user".to_string(),
-                content: prompt,
-            }],
+            messages,
+            options: Some(ollama_options),
         };
 
         let response = self
@@ -126,7 +180,14 @@ impl LLMProvider for OllamaProvider {
             .map_err(|e| LLMError::Http(e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(LLMError::Http(response.status().to_string()));
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let detail = if body.trim().is_empty() {
+                status.to_string()
+            } else {
+                format!("{}: {}", status, body)
+            };
+            return Err(LLMError::Http(detail));
         }
 
         let byte_stream = response.bytes_stream();
@@ -135,12 +196,22 @@ impl LLMProvider for OllamaProvider {
             tokio::spawn(async move {
                 let _ = tx.send(Ok(TokenEvent::Started)).await;
                 tokio::pin!(byte_stream);
+                let mut pending = Vec::<u8>::new();
+                let mut completed_sent = false;
 
                 while let Some(item) = byte_stream.next().await {
                     match item {
                         Ok(bytes) => {
-                            let text = String::from_utf8_lossy(&bytes);
-                            for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                            pending.extend_from_slice(&bytes);
+
+                            while let Some(newline_pos) = pending.iter().position(|b| *b == b'\n') {
+                                let line_bytes: Vec<u8> = pending.drain(..=newline_pos).collect();
+                                let line = String::from_utf8_lossy(&line_bytes);
+                                let line = line.trim();
+                                if line.is_empty() {
+                                    continue;
+                                }
+
                                 let parsed = serde_json::from_str::<OllamaStreamChunk>(line)
                                     .map_err(|e| LLMError::Serialization(e.to_string()));
 
@@ -149,20 +220,43 @@ impl LLMProvider for OllamaProvider {
                                         if let Some(message) = chunk.message {
                                             let _ = tx.send(Ok(TokenEvent::Token(message.content))).await;
                                         }
-                                        if chunk.done {
+                                        if chunk.done && !completed_sent {
+                                            completed_sent = true;
                                             let _ = tx.send(Ok(TokenEvent::Completed)).await;
                                         }
                                     }
                                     Err(err) => {
                                         let _ = tx.send(Err(err)).await;
-                                        break;
+                                        return;
                                     }
                                 }
                             }
                         }
                         Err(err) => {
                             let _ = tx.send(Err(LLMError::Http(err.to_string()))).await;
-                            break;
+                            return;
+                        }
+                    }
+                }
+
+                if !pending.is_empty() {
+                    let line = String::from_utf8_lossy(&pending);
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        match serde_json::from_str::<OllamaStreamChunk>(line)
+                            .map_err(|e| LLMError::Serialization(e.to_string()))
+                        {
+                            Ok(chunk) => {
+                                if let Some(message) = chunk.message {
+                                    let _ = tx.send(Ok(TokenEvent::Token(message.content))).await;
+                                }
+                                if chunk.done && !completed_sent {
+                                    let _ = tx.send(Ok(TokenEvent::Completed)).await;
+                                }
+                            }
+                            Err(err) => {
+                                let _ = tx.send(Err(err)).await;
+                            }
                         }
                     }
                 }

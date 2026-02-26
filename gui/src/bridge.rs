@@ -4,6 +4,8 @@ use std::time::Duration;
 use multilink_core::providers::ollama::OllamaProvider;
 use multilink_core::{ChatRuntime, ProviderId, ProviderRouter, StreamEvent};
 
+const PERSIST_INTERVAL: Duration = Duration::from_secs(2);
+
 pub trait ChatCallbacks: Send + Sync {
     fn on_stream_started(&self);
     fn on_token_received(&self, token: &str);
@@ -37,12 +39,12 @@ impl Default for ChatBridge {
         let chat_runtime = if let Some(rt) = runtime.as_ref() {
             rt.block_on(async {
                 let chat_runtime = Arc::new(
-                    ChatRuntime::new_portable(Arc::new(router), Duration::from_millis(400))
+                    ChatRuntime::new_portable(Arc::new(router), PERSIST_INTERVAL)
                         .unwrap_or_else(|_| {
                             ChatRuntime::new(
                                 Arc::new(ProviderRouter::new()),
                                 std::path::PathBuf::from("./.multilink/sessions"),
-                                Duration::from_millis(400),
+                                PERSIST_INTERVAL,
                             )
                         }),
                 );
@@ -53,7 +55,7 @@ impl Default for ChatBridge {
             Arc::new(ChatRuntime::new(
                 Arc::new(ProviderRouter::new()),
                 std::path::PathBuf::from("./.multilink/sessions"),
-                Duration::from_millis(400),
+                PERSIST_INTERVAL,
             ))
         };
 

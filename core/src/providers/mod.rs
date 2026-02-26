@@ -24,6 +24,7 @@ pub struct PromptOptions {
     pub model: Option<String>,
     pub temperature: Option<f32>,
     pub system_prompt: Option<String>,
+    pub num_ctx: Option<usize>,
 }
 
 impl Default for PromptOptions {
@@ -32,6 +33,7 @@ impl Default for PromptOptions {
             model: None,
             temperature: Some(0.7),
             system_prompt: None,
+            num_ctx: None,
         }
     }
 }

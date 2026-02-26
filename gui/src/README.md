@@ -5,7 +5,7 @@ Thin adapter layer between QML and Rust backend.
 ## Files
 
 - `main.cpp`: Qt app bootstrap, injects `chatController` context property.
-- `chatcontroller.h/.cpp`: shim only; converts Rust FFI payloads to Qt properties/signals and forwards user actions to Rust.
+- `chatcontroller.h/.cpp`: shim only; converts Rust FFI payloads to Qt properties/signals, exposes invokables used by QML (including clipboard copy), and forwards user actions to Rust.
 - `bridge.rs`: legacy/prototype bridge experiments (not primary runtime path).
 
 ## Important rule
