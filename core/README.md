@@ -12,6 +12,7 @@ Rust library crate with all business logic.
 
 - Run checks: `cargo check`
 - Run tests: `cargo test`
+- Cross-platform builds (Linux, macOS, Windows) are automatically verified via GitHub Actions CI/CD.
 - Keep UI logic out of this crate.
 - Prefer performance-safe defaults (bounded context, throttled persistence, non-blocking stream handling).
 

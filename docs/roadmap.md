@@ -27,6 +27,8 @@
 ## Week 7
 - Packaging strategy and install scripts.
 - Platform-specific docs.
+- CI/CD automation for Windows, Linux, and macOS (completed).
+- Cross-platform build hardening for Qt6 and Rust (completed).
 
 ## Week 8
 - Final polish.

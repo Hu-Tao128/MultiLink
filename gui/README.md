@@ -12,14 +12,16 @@ Qt/QML desktop app plus Rust-backed bridge artifacts.
 
 ## Build
 
-From repo root:
+The GUI build automatically triggers the compilation of the Rust backend (`rust/chat_controller`).
+
+From the repository root:
 
 ```bash
-cmake -S gui -B build/gui
-cmake --build build/gui
+cmake -S gui -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 ```
 
-This automatically builds `rust/chat_controller` via Cargo.
+For platform-specific prerequisites, please refer to the main [README.md](../README.md#prerequisites).
 
 ## Current scope
 

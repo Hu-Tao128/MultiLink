@@ -93,20 +93,43 @@ QML has no HTTP calls, no streaming parser, and no persistence logic.
 
 ## Build
 
-Core only:
+### Prerequisites
 
+- **Rust**: Stable toolchain (install via [rustup](https://rustup.rs/)).
+- **CMake**: Version 3.21 or higher.
+- **Qt 6**: (6.5+ recommended) with QML and Quick modules.
+
+### Platform-Specific Dependencies
+
+#### Linux (Ubuntu 24.04+)
 ```bash
-cd core
-cargo check
-cargo test
+sudo apt update
+sudo apt install -y qt6-base-dev qt6-declarative-dev cmake build-essential libgl1-mesa-dev libxkbcommon-dev
 ```
 
-Qt GUI shell:
+#### macOS
+```bash
+brew install qt cmake ninja
+```
+
+#### Windows
+Install via [Chocolatey](https://chocolatey.org/):
+```bash
+choco install cmake ninja -y
+# Qt6 is best installed via the official online installer or 'install-qt-action' in CI.
+```
+
+### Compilation
+
+The project uses a unified CMake build that orchestrates the Rust backend automatically.
 
 ```bash
-cmake -S gui -B build/gui
-cmake --build build/gui
+# From the repository root
+cmake -S gui -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 ```
+
+The executable will be located in `build/` (or `build/Release` on Windows).
 
 ## Security notes
 
