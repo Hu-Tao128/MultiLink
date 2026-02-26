@@ -1,0 +1,28 @@
+name: Rust Core
+
+on:
+  push:
+    branches: [ "release/mvp-freeze" ]
+  pull_request:
+    branches: [ "release/mvp-freeze" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Build core
+        run: cargo build --verbose --manifest-path core/Cargo.toml
+
+      - name: Run tests
+        run: cargo test --verbose --manifest-path core/Cargo.toml
