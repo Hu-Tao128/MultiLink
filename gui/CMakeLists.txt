@@ -42,3 +42,7 @@ qt_add_qml_module(multilink_gui
 )
 
 target_link_libraries(multilink_gui PRIVATE Qt6::Core Qt6::Quick Qt6::Qml Qt6::Network chat_controller)
+
+if(WIN32)
+    target_link_libraries(multilink_gui PRIVATE bcrypt ntdll userenv ws2_32)
+endif()
