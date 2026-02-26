@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs as stdfs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,20 +10,13 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, watch, Mutex, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, RwLock, Semaphore};
 use walkdir::WalkDir;
 
+use crate::config::RuntimeConfig;
 use crate::providers::{PromptOptions, ProviderId};
 use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
-
-const MAX_CONTEXT_TOKENS: usize = 7000;
-const SUMMARY_TRIGGER_TOKENS: usize = 6000;
-const KEEP_LAST_MESSAGES: usize = 6;
-const MAX_SUMMARY_TOKENS: usize = 1200;
-const MAX_PROJECT_FILES: usize = 30;
-const MAX_PROJECT_BYTES: usize = 200 * 1024;
-const MAX_PROJECT_CONTEXT_TOKENS: usize = 3500;
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -37,8 +31,10 @@ pub struct ChatRuntime {
     sessions: Arc<RwLock<HashMap<String, ChatSession>>>,
     active_session_id: Arc<RwLock<Option<String>>>,
     cancellation: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    stream_slots: Arc<Semaphore>,
     storage_dir: PathBuf,
     persist_interval: Duration,
+    runtime_config: RuntimeConfig,
 }
 
 impl ChatRuntime {
@@ -47,13 +43,24 @@ impl ChatRuntime {
         storage_dir: PathBuf,
         persist_interval: Duration,
     ) -> Self {
+        Self::new_with_config(router, storage_dir, persist_interval, RuntimeConfig::default())
+    }
+
+    pub fn new_with_config(
+        router: Arc<ProviderRouter>,
+        storage_dir: PathBuf,
+        persist_interval: Duration,
+        runtime_config: RuntimeConfig,
+    ) -> Self {
         Self {
             router,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             active_session_id: Arc::new(RwLock::new(None)),
             cancellation: Arc::new(Mutex::new(HashMap::new())),
+            stream_slots: Arc::new(Semaphore::new(runtime_config.max_parallel_streams.max(1))),
             storage_dir,
             persist_interval,
+            runtime_config,
         }
     }
 
@@ -61,8 +68,21 @@ impl ChatRuntime {
         router: Arc<ProviderRouter>,
         persist_interval: Duration,
     ) -> Result<Self, ChatRuntimeError> {
+        Self::new_portable_with_config(router, persist_interval, RuntimeConfig::default())
+    }
+
+    pub fn new_portable_with_config(
+        router: Arc<ProviderRouter>,
+        persist_interval: Duration,
+        runtime_config: RuntimeConfig,
+    ) -> Result<Self, ChatRuntimeError> {
         let storage_dir = app_data_dir()?.join("sessions");
-        Ok(Self::new(router, storage_dir, persist_interval))
+        Ok(Self::new_with_config(
+            router,
+            storage_dir,
+            persist_interval,
+            runtime_config,
+        ))
     }
 
     pub async fn create_session(&self, provider: ProviderId, model: Option<String>) -> String {
@@ -210,7 +230,7 @@ impl ChatRuntime {
         project_root: Option<String>,
     ) -> Result<(), ChatRuntimeError> {
         let cached_context = if let Some(root) = project_root.as_ref() {
-            match build_project_context_for_root(root).await {
+            match build_project_context_for_root(root, self.runtime_config.clone()).await {
                 Ok(context) => {
                     if context_debug_enabled() {
                         eprintln!(
@@ -276,7 +296,7 @@ impl ChatRuntime {
             let context_tokens = estimate_tokens(&routed_prompt) + estimate_tokens(&system_prompt);
             eprintln!(
                 "[context] session={} context_tokens={} max_tokens={}",
-                session_id, context_tokens, MAX_CONTEXT_TOKENS
+                session_id, context_tokens, self.runtime_config.max_context_tokens
             );
         }
 
@@ -285,6 +305,13 @@ impl ChatRuntime {
             system_prompt: Some(system_prompt).filter(|s| !s.is_empty()),
             ..PromptOptions::default()
         };
+
+        let stream_permit = self
+            .stream_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ChatRuntimeError::Provider("stream concurrency limiter unavailable".to_string()))?;
 
         let stream_result = self
             .router
@@ -328,6 +355,8 @@ impl ChatRuntime {
         let session_id_owned = session_id.to_string();
 
         tokio::spawn(async move {
+            let _permit = stream_permit;
+
             let _ = event_tx.send(StreamEvent::Started).await;
             {
                 let mut guard = sessions.write().await;
@@ -517,7 +546,7 @@ impl ChatRuntime {
             return;
         };
 
-        let context = match build_project_context_for_root(&project_root).await {
+        let context = match build_project_context_for_root(&project_root, self.runtime_config.clone()).await {
             Ok(value) => value,
             Err(err) => {
                 if context_debug_enabled() {
@@ -551,6 +580,7 @@ impl ChatRuntime {
 
         let mut tokens = 0usize;
         let mut system_chunks = Vec::new();
+        let model_hint = session.model.as_deref();
 
         let model_supported = session
             .model
@@ -565,10 +595,12 @@ impl ChatRuntime {
                 .filter(|v| !v.trim().is_empty())
             {
                 let context_budget =
-                    MAX_PROJECT_CONTEXT_TOKENS.min(MAX_CONTEXT_TOKENS.saturating_sub(tokens));
+                    self.runtime_config
+                        .max_project_context_tokens
+                        .min(self.runtime_config.max_context_tokens.saturating_sub(tokens));
                 if context_budget > 0 {
-                    let capped_context = if estimate_tokens(project_context) > context_budget {
-                        truncate_to_token_budget(project_context, context_budget)
+                    let capped_context = if estimate_tokens_for_model(project_context, model_hint) > context_budget {
+                        truncate_to_token_budget(project_context, context_budget, model_hint)
                     } else {
                         project_context.clone()
                     };
@@ -576,7 +608,7 @@ impl ChatRuntime {
                         "You are a senior software engineer.\n\nThis conversation is about the following project:\n{}\n",
                         capped_context
                     );
-                    tokens += estimate_tokens(&prelude);
+                    tokens += estimate_tokens_for_model(&prelude, model_hint);
                     system_chunks.push(prelude);
                 }
             }
@@ -584,7 +616,7 @@ impl ChatRuntime {
 
         if let Some(summary) = session.summary.as_ref().filter(|v| !v.trim().is_empty()) {
             let summary_block = format!("Conversation summary:\n{}\n", summary);
-            tokens += estimate_tokens(&summary_block);
+            tokens += estimate_tokens_for_model(&summary_block, model_hint);
             system_chunks.push(summary_block);
         }
 
@@ -592,8 +624,8 @@ impl ChatRuntime {
         let mut recent_chunks = Vec::new();
         for msg in session.messages.iter().skip(base_index).rev() {
             let text = format!("{}: {}\n", role_label(&msg.role), msg.content);
-            let t = estimate_tokens(&text);
-            if tokens + t > MAX_CONTEXT_TOKENS {
+            let t = estimate_tokens_for_model(&text, model_hint);
+            if tokens + t > self.runtime_config.max_context_tokens {
                 break;
             }
             tokens += t;
@@ -619,19 +651,22 @@ impl ChatRuntime {
             }
         };
 
-        if estimate_session_tokens(&session) <= SUMMARY_TRIGGER_TOKENS {
+        if estimate_session_tokens(&session) <= self.runtime_config.summary_trigger_tokens {
             if context_debug_enabled() {
                 eprintln!(
                     "[context] session={} summarize=no estimated_tokens={} trigger={}",
                     session_id,
                     estimate_session_tokens(&session),
-                    SUMMARY_TRIGGER_TOKENS
+                    self.runtime_config.summary_trigger_tokens
                 );
             }
             return;
         }
 
-        let end_index = session.messages.len().saturating_sub(KEEP_LAST_MESSAGES);
+        let end_index = session
+            .messages
+            .len()
+            .saturating_sub(self.runtime_config.keep_last_messages);
         if end_index <= session.summarized_messages {
             return;
         }
@@ -685,8 +720,14 @@ impl ChatRuntime {
             return;
         }
 
-        let capped_summary = if estimate_tokens(&new_summary) > MAX_SUMMARY_TOKENS {
-            truncate_to_token_budget(&new_summary, MAX_SUMMARY_TOKENS)
+        let capped_summary = if estimate_tokens_for_model(&new_summary, session.model.as_deref())
+            > self.runtime_config.max_summary_tokens
+        {
+            truncate_to_token_budget(
+                &new_summary,
+                self.runtime_config.max_summary_tokens,
+                session.model.as_deref(),
+            )
         } else {
             new_summary
         };
@@ -737,37 +778,73 @@ fn role_label(role: &str) -> &str {
 }
 
 fn estimate_tokens(s: &str) -> usize {
-    s.len() / 4
+    estimate_tokens_for_model(s, None)
+}
+
+fn estimate_tokens_for_model(s: &str, _model: Option<&str>) -> usize {
+    if let Some(tokenizer) = cl100k_tokenizer() {
+        return tokenizer.encode_with_special_tokens(s).len();
+    }
+    let graphemes = s.chars().count();
+    let words = s.split_whitespace().count();
+    graphemes / 4 + words / 2
 }
 
 fn estimate_session_tokens(session: &ChatSession) -> usize {
     let mut total = 0usize;
+    let model_hint = session.model.as_deref();
     if let Some(summary) = session.summary.as_ref() {
-        total += estimate_tokens(summary);
+        total += estimate_tokens_for_model(summary, model_hint);
     }
     let from = session.summarized_messages.min(session.messages.len());
     for msg in session.messages.iter().skip(from) {
-        total += estimate_tokens(&msg.content);
+        total += estimate_tokens_for_model(&msg.content, model_hint);
     }
     total
 }
 
-fn truncate_to_token_budget(text: &str, max_tokens: usize) -> String {
-    let max_bytes = max_tokens.saturating_mul(4);
-    if text.len() <= max_bytes {
+fn truncate_to_token_budget(text: &str, max_tokens: usize, model: Option<&str>) -> String {
+    if estimate_tokens_for_model(text, model) <= max_tokens {
         return text.to_string();
     }
-    let mut end = max_bytes.min(text.len());
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
+
+    let mut boundaries: Vec<usize> = text.char_indices().map(|(idx, _)| idx).collect();
+    boundaries.push(text.len());
+    let mut left = 0usize;
+    let mut right = boundaries.len().saturating_sub(1);
+    let mut best = 0usize;
+
+    while left <= right {
+        let mid = left + (right - left) / 2;
+        let end = boundaries[mid];
+        let tokens = estimate_tokens_for_model(&text[..end], model);
+        if tokens <= max_tokens {
+            best = end;
+            left = mid.saturating_add(1);
+        } else if mid == 0 {
+            break;
+        } else {
+            right = mid - 1;
+        }
     }
-    text[..end].to_string()
+
+    text[..best].to_string()
 }
 
-async fn build_project_context_for_root(project_root: &str) -> Result<String, ChatRuntimeError> {
+fn cl100k_tokenizer() -> Option<&'static tiktoken_rs::CoreBPE> {
+    static TOKENIZER: OnceLock<Option<tiktoken_rs::CoreBPE>> = OnceLock::new();
+    TOKENIZER
+        .get_or_init(|| tiktoken_rs::cl100k_base().ok())
+        .as_ref()
+}
+
+async fn build_project_context_for_root(
+    project_root: &str,
+    runtime_config: RuntimeConfig,
+) -> Result<String, ChatRuntimeError> {
     let root = PathBuf::from(project_root);
     let root_for_task = root.clone();
-    tokio::task::spawn_blocking(move || collect_project_snapshot(&root_for_task))
+    tokio::task::spawn_blocking(move || collect_project_snapshot(&root_for_task, &runtime_config))
         .await
         .map_err(|e| ChatRuntimeError::Path(format!("project scan task failed: {}", e)))
         .and_then(|r| r)
@@ -803,7 +880,10 @@ impl ProjectSnapshot {
     }
 }
 
-fn collect_project_snapshot(root: &Path) -> Result<ProjectSnapshot, ChatRuntimeError> {
+fn collect_project_snapshot(
+    root: &Path,
+    runtime_config: &RuntimeConfig,
+) -> Result<ProjectSnapshot, ChatRuntimeError> {
     if !root.exists() {
         return Err(ChatRuntimeError::Path(format!(
             "project root does not exist: {}",
@@ -839,8 +919,18 @@ fn collect_project_snapshot(root: &Path) -> Result<ProjectSnapshot, ChatRuntimeE
     let mut files = Vec::new();
     let mut total_bytes = 0usize;
     for path in candidate_paths {
-        if files.len() >= MAX_PROJECT_FILES || total_bytes >= MAX_PROJECT_BYTES {
+        if files.len() >= runtime_config.max_project_files
+            || total_bytes >= runtime_config.max_project_bytes
+        {
             break;
+        }
+
+        let metadata = match stdfs::metadata(&path) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if metadata.len() as usize > runtime_config.max_project_file_bytes {
+            continue;
         }
 
         let content_bytes = match stdfs::read(&path) {
@@ -852,7 +942,7 @@ fn collect_project_snapshot(root: &Path) -> Result<ProjectSnapshot, ChatRuntimeE
             Err(_) => continue,
         };
 
-        if total_bytes + content.len() > MAX_PROJECT_BYTES {
+        if total_bytes + content.len() > runtime_config.max_project_bytes {
             break;
         }
         total_bytes += content.len();

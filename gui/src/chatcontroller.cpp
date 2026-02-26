@@ -291,17 +291,7 @@ void ChatController::selectSession(const QString &id) {
         m_selectedSessionId = id;
         emit selectedSessionIdChanged();
     }
-    QString projectRoot;
-    for (const QVariant &rowValue : std::as_const(m_sessions)) {
-        const QVariantMap row = rowValue.toMap();
-        const QString rowId = row.value("sessionId").toString().isEmpty()
-            ? row.value("id").toString()
-            : row.value("sessionId").toString();
-        if (rowId == id) {
-            projectRoot = row.value("projectRoot").toString();
-            break;
-        }
-    }
+    const QString projectRoot = projectRootForSession(id);
     if (m_selectedProjectRoot != projectRoot) {
         m_selectedProjectRoot = projectRoot;
         emit selectedProjectRootChanged();
@@ -425,19 +415,7 @@ void ChatController::requestMessages(const QString &sessionId) {
 
 void ChatController::applySessionsPayload(const QString &json) {
     m_sessions = parseJsonListFromUtf8(json);
-    QString selectedRoot;
-    if (!m_selectedSessionId.isEmpty()) {
-        for (const QVariant &rowValue : std::as_const(m_sessions)) {
-            const QVariantMap row = rowValue.toMap();
-            const QString rowId = row.value("sessionId").toString().isEmpty()
-                ? row.value("id").toString()
-                : row.value("sessionId").toString();
-            if (rowId == m_selectedSessionId) {
-                selectedRoot = row.value("projectRoot").toString();
-                break;
-            }
-        }
-    }
+    const QString selectedRoot = projectRootForSession(m_selectedSessionId);
     if (m_selectedProjectRoot != selectedRoot) {
         m_selectedProjectRoot = selectedRoot;
         emit selectedProjectRootChanged();
@@ -473,4 +451,22 @@ void ChatController::applyMessagesPayload(const QString &json) {
 
     const QVariantList messages = parseJsonListFromUtf8(json);
     emit messagesHydrated(messages);
+}
+
+QString ChatController::projectRootForSession(const QString &sessionId) const {
+    if (sessionId.isEmpty()) {
+        return QString();
+    }
+
+    for (const QVariant &rowValue : std::as_const(m_sessions)) {
+        const QVariantMap row = rowValue.toMap();
+        const QString rowId = row.value("sessionId").toString().isEmpty()
+            ? row.value("id").toString()
+            : row.value("sessionId").toString();
+        if (rowId == sessionId) {
+            return row.value("projectRoot").toString();
+        }
+    }
+
+    return QString();
 }

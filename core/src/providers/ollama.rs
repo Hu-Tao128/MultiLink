@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::time::sleep;
 
 use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, TokenEvent, TokenStream};
 
@@ -14,10 +16,16 @@ pub struct OllamaProvider {
 }
 
 impl OllamaProvider {
+    const RETRY_ATTEMPTS: usize = 3;
+
     pub fn new(base_url: String, default_model: String) -> Self {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(180))
+            .timeout(Duration::from_secs(300))
+            .pool_idle_timeout(Duration::from_secs(10))
+            .pool_max_idle_per_host(1)
+            .tcp_keepalive(Duration::from_secs(30))
+            .tcp_nodelay(true)
             .build()
             .unwrap_or_else(|_| Client::new());
 
@@ -34,9 +42,100 @@ impl OllamaProvider {
             .clone()
             .unwrap_or_else(|| self.default_model.clone())
     }
+
+    fn healthcheck_socket_addr(&self) -> Option<String> {
+        let url = reqwest::Url::parse(&self.base_url).ok()?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        let host = url.host_str()?;
+        let port = url.port_or_known_default()?;
+        Some(format!("{}:{}", host, port))
+    }
+
+    async fn post_chat_with_retry<T: Serialize>(&self, body: &T) -> Result<reqwest::Response, LLMError> {
+        let mut backoff = Duration::from_millis(200);
+        let mut last_error: Option<LLMError> = None;
+
+        for attempt in 0..Self::RETRY_ATTEMPTS {
+            let result = self
+                .client
+                .post(format!("{}/api/chat", self.base_url))
+                .json(body)
+                .send()
+                .await;
+
+            match result {
+                Ok(response) if response.status().is_success() => return Ok(response),
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    let detail = if body.trim().is_empty() {
+                        status.to_string()
+                    } else {
+                        format!("{}: {}", status, body)
+                    };
+
+                    if !is_transient_status(status) || attempt + 1 == Self::RETRY_ATTEMPTS {
+                        return Err(LLMError::Http(detail));
+                    }
+
+                    last_error = Some(LLMError::Http(detail));
+                }
+                Err(err) => {
+                    let error_str = err.to_string();
+                    if error_str.contains("decoding response body") || error_str.contains("connection closed") {
+                        if attempt + 1 == Self::RETRY_ATTEMPTS {
+                            return Err(LLMError::Http(format!(
+                                "server connection failed: the stream was interrupted. This may be due to server overload, timeout, or network issues. Original error: {}",
+                                error_str
+                            )));
+                        }
+                        last_error = Some(LLMError::Http(format!("stream interrupted (attempt {}/{}): {}", attempt + 1, Self::RETRY_ATTEMPTS, error_str)));
+                    } else if err.is_timeout() {
+                        if attempt + 1 == Self::RETRY_ATTEMPTS {
+                            return Err(LLMError::Timeout);
+                        }
+                        last_error = Some(LLMError::Timeout);
+                    } else if !is_transient_transport_error(&err)
+                        || attempt + 1 == Self::RETRY_ATTEMPTS
+                    {
+                        return Err(LLMError::Http(err.to_string()));
+                    } else {
+                        last_error = Some(LLMError::Http(err.to_string()));
+                    }
+                }
+            }
+
+            let jitter = Duration::from_millis(jitter_millis(60));
+            sleep(backoff + jitter).await;
+            backoff = (backoff * 2).min(Duration::from_secs(2));
+        }
+
+        Err(last_error.unwrap_or_else(|| LLMError::Unexpected("request failed after retries".to_string())))
+    }
 }
 
-#[derive(Serialize)]
+fn jitter_millis(max: u64) -> u64 {
+    if max == 0 {
+        return 0;
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d: std::time::Duration| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    nanos % (max + 1)
+}
+
+fn is_transient_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn is_transient_transport_error(err: &reqwest::Error) -> bool {
+    err.is_connect() || err.is_timeout() || err.is_request()
+}
+
+#[derive(Serialize, Clone)]
 struct OllamaOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     num_ctx: Option<usize>,
@@ -53,7 +152,7 @@ struct OllamaRequest {
     options: Option<OllamaOptions>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct OllamaMessage {
     role: String,
     content: String,
@@ -81,7 +180,19 @@ impl LLMProvider for OllamaProvider {
     }
 
     fn is_available(&self) -> bool {
-        true
+        let Some(addr) = self.healthcheck_socket_addr() else {
+            return false;
+        };
+
+        let mut iter = match addr.to_socket_addrs() {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        let Some(socket_addr) = iter.next() else {
+            return false;
+        };
+
+        TcpStream::connect_timeout(&socket_addr, Duration::from_millis(700)).is_ok()
     }
 
     async fn send(&self, prompt: String, options: PromptOptions) -> Result<LLMResponse, LLMError> {
@@ -110,24 +221,7 @@ impl LLMProvider for OllamaProvider {
             options: Some(ollama_options),
         };
 
-        let response = self
-            .client
-            .post(format!("{}/api/chat", self.base_url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LLMError::Http(e.to_string()))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            let detail = if body.trim().is_empty() {
-                status.to_string()
-            } else {
-                format!("{}: {}", status, body)
-            };
-            return Err(LLMError::Http(detail));
-        }
+        let response = self.post_chat_with_retry(&body).await?;
 
         let parsed = response
             .json::<OllamaResponse>()
@@ -164,106 +258,168 @@ impl LLMProvider for OllamaProvider {
             content: prompt,
         });
 
-        let body = OllamaRequest {
-            model,
-            stream: true,
-            messages,
-            options: Some(ollama_options),
-        };
+        const STREAM_RETRIES: usize = 2;
+        const STREAM_TIMEOUT_SECS: u64 = 60;
+        const MAX_PENDING_STREAM_BYTES: usize = 512 * 1024;
 
-        let response = self
-            .client
-            .post(format!("{}/api/chat", self.base_url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LLMError::Http(e.to_string()))?;
+        for attempt in 0..=STREAM_RETRIES {
+            if attempt > 0 {
+                let backoff_ms = 500u64 * 2u64.pow((attempt - 1) as u32);
+                let backoff = Duration::from_millis(backoff_ms);
+                sleep(backoff).await;
+            }
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            let detail = if body.trim().is_empty() {
-                status.to_string()
-            } else {
-                format!("{}: {}", status, body)
+            let body = OllamaRequest {
+                model: model.clone(),
+                stream: true,
+                messages: messages.clone(),
+                options: Some(ollama_options.clone()),
             };
-            return Err(LLMError::Http(detail));
-        }
 
-        let byte_stream = response.bytes_stream();
-        let stream = tokio_stream::wrappers::ReceiverStream::new({
-            let (tx, rx) = tokio::sync::mpsc::channel(64);
-            tokio::spawn(async move {
-                let _ = tx.send(Ok(TokenEvent::Started)).await;
-                tokio::pin!(byte_stream);
-                let mut pending = Vec::<u8>::new();
-                let mut completed_sent = false;
+            let response = match self.post_chat_with_retry(&body).await {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt == STREAM_RETRIES {
+                        return Err(e);
+                    }
+                    let err_str = e.to_string();
+                    if err_str.contains("connection") || err_str.contains("timeout") || err_str.contains("closed") {
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
 
-                while let Some(item) = byte_stream.next().await {
-                    match item {
-                        Ok(bytes) => {
-                            pending.extend_from_slice(&bytes);
+            let byte_stream = response.bytes_stream();
+            let attempt_num = attempt;
+            
+            let stream = tokio_stream::wrappers::ReceiverStream::new({
+                let (tx, rx) = tokio::sync::mpsc::channel(64);
+                tokio::spawn(async move {
+                    let _ = tx.send(Ok(TokenEvent::Started)).await;
+                    tokio::pin!(byte_stream);
+                    let mut pending = Vec::<u8>::new();
+                    let mut completed_sent = false;
+                    let mut last_data_time = Instant::now();
 
-                            while let Some(newline_pos) = pending.iter().position(|b| *b == b'\n') {
-                                let line_bytes: Vec<u8> = pending.drain(..=newline_pos).collect();
-                                let line = String::from_utf8_lossy(&line_bytes);
-                                let line = line.trim();
-                                if line.is_empty() {
-                                    continue;
+                    loop {
+                        tokio::select! {
+                            _ = sleep(Duration::from_secs(STREAM_TIMEOUT_SECS)) => {
+                                let idle_secs = last_data_time.elapsed().as_secs();
+                                if idle_secs >= STREAM_TIMEOUT_SECS {
+                                    let _ = tx.send(Err(LLMError::Timeout)).await;
+                                    break;
                                 }
-
-                                let parsed = serde_json::from_str::<OllamaStreamChunk>(line)
-                                    .map_err(|e| LLMError::Serialization(e.to_string()));
-
-                                match parsed {
-                                    Ok(chunk) => {
-                                        if let Some(message) = chunk.message {
-                                            let _ = tx.send(Ok(TokenEvent::Token(message.content))).await;
+                            }
+                            item = byte_stream.next() => {
+                                match item {
+                                    Some(Ok(bytes)) => {
+                                        last_data_time = Instant::now();
+                                        
+                                        if pending.len().saturating_add(bytes.len()) > MAX_PENDING_STREAM_BYTES {
+                                            let _ = tx.send(Err(LLMError::Unexpected("stream buffer exceeded maximum size".to_string()))).await;
+                                            return;
                                         }
-                                        if chunk.done && !completed_sent {
-                                            completed_sent = true;
-                                            let _ = tx.send(Ok(TokenEvent::Completed)).await;
+                                        pending.extend_from_slice(&bytes);
+
+                                        while let Some(newline_pos) = pending.iter().position(|b| *b == b'\n') {
+                                            let line_bytes: Vec<u8> = pending.drain(..=newline_pos).collect();
+                                            let line = String::from_utf8_lossy(&line_bytes);
+                                            let line = line.trim();
+                                            if line.is_empty() {
+                                                continue;
+                                            }
+
+                                            let parsed = serde_json::from_str::<OllamaStreamChunk>(line)
+                                                .map_err(|e| LLMError::Serialization(e.to_string()));
+
+                                            match parsed {
+                                                Ok(chunk) => {
+                                                    if let Some(message) = chunk.message {
+                                                        let _ = tx.send(Ok(TokenEvent::Token(message.content))).await;
+                                                    }
+                                                    if chunk.done && !completed_sent {
+                                                        completed_sent = true;
+                                                        let _ = tx.send(Ok(TokenEvent::Completed)).await;
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    let _ = tx.send(Err(err)).await;
+                                                    return;
+                                                }
+                                            }
+                                        }
+
+                                        if pending.len() > MAX_PENDING_STREAM_BYTES {
+                                            let _ = tx.send(Err(LLMError::Unexpected("stream line exceeded maximum size".to_string()))).await;
+                                            return;
                                         }
                                     }
-                                    Err(err) => {
-                                        let _ = tx.send(Err(err)).await;
+                                    Some(Err(err)) => {
+                                        let error_msg = err.to_string();
+                                        let is_retryable = error_msg.contains("decoding response body") 
+                                            || error_msg.contains("connection closed")
+                                            || error_msg.contains("reset");
+
+                                        let enhanced_error = if is_retryable {
+                                            if attempt_num < STREAM_RETRIES {
+                                                LLMError::Http(format!(
+                                                    "stream interrupted (attempt {}/{}): server closed connection. You can retry to continue the generation.",
+                                                    attempt_num + 1,
+                                                    STREAM_RETRIES + 1
+                                                ))
+                                            } else {
+                                                LLMError::Http(format!(
+                                                    "stream interrupted: server closed connection unexpectedly. Details: {}",
+                                                    error_msg
+                                                ))
+                                            }
+                                        } else {
+                                            LLMError::Http(error_msg)
+                                        };
+                                        
+                                        if is_retryable && attempt_num < STREAM_RETRIES {
+                                            let _ = tx.send(Err(enhanced_error)).await;
+                                        } else {
+                                            let _ = tx.send(Err(enhanced_error)).await;
+                                        }
                                         return;
                                     }
+                                    None => {
+                                        if !pending.is_empty() {
+                                            let line = String::from_utf8_lossy(&pending);
+                                            let line = line.trim();
+                                            if !line.is_empty() {
+                                                match serde_json::from_str::<OllamaStreamChunk>(line)
+                                                    .map_err(|e| LLMError::Serialization(e.to_string()))
+                                                {
+                                                    Ok(chunk) => {
+                                                        if let Some(message) = chunk.message {
+                                                            let _ = tx.send(Ok(TokenEvent::Token(message.content))).await;
+                                                        }
+                                                        if chunk.done && !completed_sent {
+                                                            let _ = tx.send(Ok(TokenEvent::Completed)).await;
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        let _ = tx.send(Err(err)).await;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        break;
+                                    }
                                 }
-                            }
-                        }
-                        Err(err) => {
-                            let _ = tx.send(Err(LLMError::Http(err.to_string()))).await;
-                            return;
-                        }
-                    }
-                }
-
-                if !pending.is_empty() {
-                    let line = String::from_utf8_lossy(&pending);
-                    let line = line.trim();
-                    if !line.is_empty() {
-                        match serde_json::from_str::<OllamaStreamChunk>(line)
-                            .map_err(|e| LLMError::Serialization(e.to_string()))
-                        {
-                            Ok(chunk) => {
-                                if let Some(message) = chunk.message {
-                                    let _ = tx.send(Ok(TokenEvent::Token(message.content))).await;
-                                }
-                                if chunk.done && !completed_sent {
-                                    let _ = tx.send(Ok(TokenEvent::Completed)).await;
-                                }
-                            }
-                            Err(err) => {
-                                let _ = tx.send(Err(err)).await;
                             }
                         }
                     }
-                }
+                });
+                rx
             });
-            rx
-        });
 
-        Ok(Box::pin(stream))
+            return Ok(Box::pin(stream));
+        }
+
+        Err(LLMError::Http("stream failed after all retries".to_string()))
     }
 }

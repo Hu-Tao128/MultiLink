@@ -74,6 +74,8 @@ signals:
     void messagesHydrated(const QVariantList &messages);
 
 private:
+    QString projectRootForSession(const QString &sessionId) const;
+
     void *m_backend = nullptr;
     QString m_activeProvider;
     QString m_activeModel;

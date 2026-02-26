@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use multilink_core::config::RuntimeConfig;
 use multilink_core::session::{ChatMessage, SessionState};
 use multilink_core::{
     ChatRuntime, LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, ProviderRouter,
@@ -10,6 +11,8 @@ use multilink_core::{
 use tokio::fs;
 
 struct SlowMockProvider;
+
+struct HoldingMockProvider;
 
 #[async_trait]
 impl LLMProvider for SlowMockProvider {
@@ -52,6 +55,48 @@ impl LLMProvider for SlowMockProvider {
             let _ = tx.send(Ok(TokenEvent::Completed)).await;
         });
 
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+}
+
+#[async_trait]
+impl LLMProvider for HoldingMockProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::Ollama
+    }
+
+    fn name(&self) -> &str {
+        "holding-mock"
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    async fn send(
+        &self,
+        _prompt: String,
+        _options: PromptOptions,
+    ) -> Result<LLMResponse, LLMError> {
+        Ok(LLMResponse {
+            text: "ok".to_string(),
+            provider: ProviderId::Ollama,
+            model: Some("mock".to_string()),
+        })
+    }
+
+    async fn stream_send(
+        &self,
+        _prompt: String,
+        _options: PromptOptions,
+    ) -> Result<TokenStream, LLMError> {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(TokenEvent::Started)).await;
+            let _ = tx.send(Ok(TokenEvent::Token("busy".to_string()))).await;
+            tokio::time::sleep(Duration::from_millis(220)).await;
+            let _ = tx.send(Ok(TokenEvent::Completed)).await;
+        });
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 }
@@ -164,4 +209,102 @@ async fn runtime_recovers_partial_wal_on_load() {
         !wal_path.exists(),
         "partial wal should be removed after recovery"
     );
+}
+
+#[tokio::test]
+async fn runtime_project_context_skips_oversized_files() {
+    let mut router = ProviderRouter::new();
+    router.register(Arc::new(SlowMockProvider));
+
+    let temp = tempfile::tempdir().expect("temp");
+    let storage_dir = temp.path().join("sessions");
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(&project_root)
+        .await
+        .expect("create project root");
+
+    fs::write(project_root.join("main.rs"), "fn main() {}")
+        .await
+        .expect("write small file");
+    fs::write(project_root.join("big.rs"), "x".repeat(2048))
+        .await
+        .expect("write large file");
+
+    let runtime = ChatRuntime::new_with_config(
+        Arc::new(router),
+        storage_dir,
+        Duration::from_millis(40),
+        RuntimeConfig {
+            max_project_file_bytes: 256,
+            ..RuntimeConfig::default()
+        },
+    );
+
+    let session_id = runtime
+        .create_session(ProviderId::Ollama, Some("mock".to_string()))
+        .await;
+
+    runtime
+        .set_session_project_root(&session_id, Some(project_root.to_string_lossy().to_string()))
+        .await
+        .expect("set project root");
+
+    let sessions = runtime.list_sessions().await;
+    let session = sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .expect("session exists");
+    let context = session.project_context.clone().unwrap_or_default();
+
+    assert!(context.contains("main.rs"));
+    assert!(!context.contains("big.rs"));
+}
+
+#[tokio::test]
+async fn runtime_limits_parallel_streams() {
+    let mut router = ProviderRouter::new();
+    router.register(Arc::new(HoldingMockProvider));
+
+    let temp = tempfile::tempdir().expect("temp");
+    let runtime = ChatRuntime::new_with_config(
+        Arc::new(router),
+        temp.path().join("sessions"),
+        Duration::from_millis(40),
+        RuntimeConfig {
+            max_parallel_streams: 1,
+            ..RuntimeConfig::default()
+        },
+    );
+
+    let first = runtime
+        .create_session(ProviderId::Ollama, Some("mock".to_string()))
+        .await;
+    let second = runtime
+        .create_session(ProviderId::Ollama, Some("mock".to_string()))
+        .await;
+
+    let mut first_rx = runtime
+        .send_message(&first, "one".to_string())
+        .await
+        .expect("first send");
+
+    let blocked = tokio::time::timeout(
+        Duration::from_millis(60),
+        runtime.send_message(&second, "two".to_string()),
+    )
+    .await;
+    assert!(blocked.is_err(), "second send should wait for slot");
+
+    while let Some(event) = first_rx.recv().await {
+        if matches!(event, StreamEvent::Finished) {
+            break;
+        }
+    }
+
+    let second_start = tokio::time::timeout(
+        Duration::from_millis(300),
+        runtime.send_message(&second, "two".to_string()),
+    )
+    .await;
+    assert!(second_start.is_ok(), "second send should proceed after slot frees");
 }
