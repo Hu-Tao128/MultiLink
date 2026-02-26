@@ -1,0 +1,53 @@
+name: MultiLink CI
+
+on:
+  push:
+    branches: [ "release/mvp-freeze" ]
+  pull_request:
+    branches: [ "release/mvp-freeze" ]
+
+jobs:
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Run Rust tests
+        run: cargo test --manifest-path core/Cargo.toml
+
+  cmake-build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        build_type: [Release]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set build dir
+        id: strings
+        shell: bash
+        run: echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+
+      - name: Configure CMake
+        run: >
+          cmake -B ${{ steps.strings.outputs.build-output-dir }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -S gui
+
+      - name: Build
+        run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+
+      - name: Test
+        working-directory: ${{ steps.strings.outputs.build-output-dir }}
+        run: ctest --build-config ${{ matrix.build_type }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiLink-${{ matrix.os }}
+          path: ${{ steps.strings.outputs.build-output-dir }}
