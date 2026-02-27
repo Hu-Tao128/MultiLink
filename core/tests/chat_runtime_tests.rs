@@ -37,6 +37,7 @@ impl LLMProvider for SlowMockProvider {
             text: "ok".to_string(),
             provider: ProviderId::Ollama,
             model: Some("mock".to_string()),
+            usage: None,
         })
     }
 
@@ -82,6 +83,7 @@ impl LLMProvider for HoldingMockProvider {
             text: "ok".to_string(),
             provider: ProviderId::Ollama,
             model: Some("mock".to_string()),
+            usage: None,
         })
     }
 
@@ -135,6 +137,7 @@ async fn runtime_streams_and_persists_session() {
                 break;
             }
             StreamEvent::Error(message) => panic!("unexpected error: {message}"),
+            StreamEvent::Usage { .. } => {}
         }
     }
 

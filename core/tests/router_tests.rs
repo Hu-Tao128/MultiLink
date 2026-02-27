@@ -30,6 +30,7 @@ impl LLMProvider for MockProvider {
             text: "ok".to_string(),
             provider: self.id,
             model: Some("mock".to_string()),
+            usage: None,
         })
     }
 
