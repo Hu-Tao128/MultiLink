@@ -2,11 +2,14 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
 use tokio::time::sleep;
 
-use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, TokenEvent, TokenStream, TokenUsage};
+use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId, TokenEvent, TokenStream, TokenUsage};
 use crate::session::ChatMessage;
 
 #[derive(Clone)]
@@ -14,10 +17,18 @@ pub struct OllamaProvider {
     client: Client,
     base_url: String,
     default_model: String,
+    model_cache: Arc<RwLock<HashMap<String, CachedModelInfo>>>,
+}
+
+#[derive(Clone)]
+struct CachedModelInfo {
+    capabilities: ProviderCapabilities,
+    cached_at: Instant,
 }
 
 impl OllamaProvider {
     const RETRY_ATTEMPTS: usize = 3;
+    const CACHE_TTL_SECS: u64 = 300;
 
     pub fn new(base_url: String, default_model: String) -> Self {
         let client = Client::builder()
@@ -34,6 +45,7 @@ impl OllamaProvider {
             client,
             base_url,
             default_model,
+            model_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -52,6 +64,111 @@ impl OllamaProvider {
         let host = url.host_str()?;
         let port = url.port_or_known_default()?;
         Some(format!("{}:{}", host, port))
+    }
+
+    async fn fetch_model_info(&self, model: &str) -> Result<OllamaShowResponse, LLMError> {
+        let request = serde_json::json!({
+            "model": model,
+            "verbose": false
+        });
+
+        let response = self
+            .client
+            .post(format!("{}/api/show", self.base_url))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| LLMError::Http(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(LLMError::Http(format!(
+                "failed to get model info: {}",
+                response.status()
+            )));
+        }
+
+        response
+            .json::<OllamaShowResponse>()
+            .await
+            .map_err(|e| LLMError::Serialization(e.to_string()))
+    }
+
+    fn extract_context_length(model_info: &Option<HashMap<String, serde_json::Value>>) -> usize {
+        let info = match model_info {
+            Some(i) => i,
+            None => return 4096,
+        };
+
+        info.iter()
+            .find(|(k, _)| k.ends_with(".context_length"))
+            .and_then(|(_, v)| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(4096)
+    }
+
+    fn detect_capabilities(
+        response: &OllamaShowResponse,
+        context_length: usize,
+    ) -> ProviderCapabilities {
+        let capabilities_raw = response.capabilities.as_deref().unwrap_or(&[]);
+        let template = response.template.as_deref().unwrap_or("");
+        let model_info = response.model_info.as_ref();
+
+        let has_tools_in_capabilities = capabilities_raw.contains(&"tools".to_string());
+        let supports_tools = has_tools_in_capabilities && template.contains(".Tools");
+
+        let has_insert_in_capabilities = capabilities_raw.contains(&"insert".to_string());
+        let supports_fim = has_insert_in_capabilities && template.contains("fim_prefix");
+
+        let supports_vision = capabilities_raw.contains(&"vision".to_string())
+            || model_info.map_or(false, |m| {
+                m.keys().any(|k| k.contains("vision") || k.contains("mm."))
+            });
+
+        ProviderCapabilities {
+            chat: true,
+            tools: supports_tools,
+            fim: supports_fim,
+            vision: supports_vision,
+            max_context_tokens: context_length,
+        }
+    }
+
+    async fn get_cached_or_fetch(&self, model: &str) -> Result<ProviderCapabilities, LLMError> {
+        let cache = self.model_cache.read().await;
+        if let Some(cached) = cache.get(model) {
+            if cached.cached_at.elapsed() < Duration::from_secs(Self::CACHE_TTL_SECS) {
+                return Ok(cached.capabilities.clone());
+            }
+        }
+        drop(cache);
+
+        let response = self.fetch_model_info(model).await?;
+        let context_length = Self::extract_context_length(&response.model_info);
+        let capabilities = Self::detect_capabilities(&response, context_length);
+
+        let mut cache = self.model_cache.write().await;
+        cache.insert(
+            model.to_string(),
+            CachedModelInfo {
+                capabilities: capabilities.clone(),
+                cached_at: Instant::now(),
+            },
+        );
+
+        Ok(capabilities)
+    }
+
+    pub async fn invalidate_cache(&self, model: Option<&str>) {
+        let mut cache = self.model_cache.write().await;
+        match model {
+            Some(m) => {
+                cache.remove(m);
+            }
+            None => {
+                cache.clear();
+            }
+        }
     }
 
     async fn post_chat_with_retry<T: Serialize>(&self, body: &T) -> Result<reqwest::Response, LLMError> {
@@ -176,6 +293,40 @@ struct OllamaStreamChunk {
     prompt_eval_count: Option<usize>,
     #[serde(default)]
     eval_count: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct OllamaShowResponse {
+    #[serde(default)]
+    parameters: Option<String>,
+    #[serde(default)]
+    license: Option<String>,
+    #[serde(default)]
+    modified_at: Option<String>,
+    #[serde(default)]
+    details: Option<OllamaModelDetails>,
+    #[serde(default)]
+    template: Option<String>,
+    #[serde(default)]
+    capabilities: Option<Vec<String>>,
+    #[serde(default)]
+    model_info: Option<HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Deserialize)]
+struct OllamaModelDetails {
+    #[serde(default)]
+    parent_model: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    family: Option<String>,
+    #[serde(default)]
+    families: Option<Vec<String>>,
+    #[serde(default)]
+    parameter_size: Option<String>,
+    #[serde(default)]
+    quantization_level: Option<String>,
 }
 
 #[async_trait]
@@ -479,5 +630,14 @@ impl LLMProvider for OllamaProvider {
         }
 
         Err(LLMError::Http("stream failed after all retries".to_string()))
+    }
+
+    async fn get_model_info(&self, model: &str) -> Result<ProviderCapabilities, LLMError> {
+        let model_name = if model.is_empty() {
+            self.default_model.clone()
+        } else {
+            model.to_string()
+        };
+        self.get_cached_or_fetch(&model_name).await
     }
 }

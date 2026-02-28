@@ -45,6 +45,9 @@ impl OllamaModelManager {
                     size_gb,
                     path,
                     status: ModelStatus::Installed,
+                    capabilities: None,
+                    parameter_count: None,
+                    quantization: None,
                 });
             }
         }

@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use multilink_core::config::RuntimeConfig;
 use multilink_core::session::{ChatMessage, SessionState};
 use multilink_core::{
-    ChatRuntime, LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, ProviderRouter,
-    StreamEvent, TokenEvent, TokenStream,
+    ChatRuntime, LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities,
+    ProviderId, ProviderRouter, StreamEvent, TokenEvent, TokenStream,
 };
 use tokio::fs;
 
@@ -58,6 +58,10 @@ impl LLMProvider for SlowMockProvider {
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
+
+    async fn get_model_info(&self, _model: &str) -> Result<ProviderCapabilities, LLMError> {
+        Ok(ProviderCapabilities::default_with_context(4096))
+    }
 }
 
 #[async_trait]
@@ -100,6 +104,10 @@ impl LLMProvider for HoldingMockProvider {
             let _ = tx.send(Ok(TokenEvent::Completed)).await;
         });
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+
+    async fn get_model_info(&self, _model: &str) -> Result<ProviderCapabilities, LLMError> {
+        Ok(ProviderCapabilities::default_with_context(4096))
     }
 }
 

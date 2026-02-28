@@ -120,4 +120,27 @@ pub trait LLMProvider: Send + Sync {
         prompt: String,
         options: PromptOptions,
     ) -> Result<TokenStream, LLMError>;
+
+    async fn get_model_info(&self, model: &str) -> Result<ProviderCapabilities, LLMError>;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderCapabilities {
+    pub chat: bool,
+    pub tools: bool,
+    pub fim: bool,
+    pub vision: bool,
+    pub max_context_tokens: usize,
+}
+
+impl ProviderCapabilities {
+    pub fn default_with_context(context_tokens: usize) -> Self {
+        Self {
+            chat: true,
+            tools: false,
+            fim: false,
+            vision: false,
+            max_context_tokens: context_tokens,
+        }
+    }
 }

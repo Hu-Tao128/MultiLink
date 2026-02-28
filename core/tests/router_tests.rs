@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use multilink_core::{
-    LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, ProviderRouter, TokenEvent,
-    TokenStream,
+    LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId,
+    ProviderRouter, TokenEvent, TokenStream,
 };
 
 struct MockProvider {
@@ -45,6 +45,10 @@ impl LLMProvider for MockProvider {
             Ok(TokenEvent::Completed),
         ]);
         Ok(Box::pin(stream))
+    }
+
+    async fn get_model_info(&self, _model: &str) -> Result<ProviderCapabilities, LLMError> {
+        Ok(ProviderCapabilities::default_with_context(4096))
     }
 }
 

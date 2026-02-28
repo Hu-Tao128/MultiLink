@@ -12,7 +12,8 @@ pub use chat_runtime::{ChatRuntime, ChatRuntimeError, StreamEvent};
 pub use config::AppConfig;
 pub use model_manager::{ModelInfo, ModelManager, ModelStatus, ProviderType};
 pub use providers::{
-    LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, TokenEvent, TokenStream,
+    LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId,
+    TokenEvent, TokenStream,
 };
 pub use router::{ProviderAvailability, ProviderRouter};
 pub use session::{ChatMessage, ChatSession, SessionState};

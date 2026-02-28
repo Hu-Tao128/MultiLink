@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, TokenEvent, TokenStream, TokenUsage};
+use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId, TokenEvent, TokenStream, TokenUsage};
 
 #[derive(Clone)]
 pub struct CodexProvider {
@@ -146,6 +146,16 @@ impl LLMProvider for CodexProvider {
         events.push(Ok(TokenEvent::Completed));
         let stream = tokio_stream::iter(events);
         Ok(Box::pin(stream))
+    }
+
+    async fn get_model_info(&self, _model: &str) -> Result<ProviderCapabilities, LLMError> {
+        Ok(ProviderCapabilities {
+            chat: true,
+            tools: false,
+            fim: true,
+            vision: false,
+            max_context_tokens: 128_000,
+        })
     }
 }
 
