@@ -74,25 +74,28 @@ Page {
 
     function parseMessageSegments(text) {
         const source = String(text || "")
-        const pattern = /```[\t ]*([^\n`]*)\n([\s\S]*?)```/g
         const segments = []
-        let last = 0
+        let remaining = source
+
+        const codePattern = /```[\t ]*([^\n`]*)\n([\s\S]*?)```/g
+        let lastIndex = 0
         let match
 
-        while ((match = pattern.exec(source)) !== null) {
-            if (match.index > last) {
-                segments.push({ kind: "text", value: source.slice(last, match.index) })
+        while ((match = codePattern.exec(source)) !== null) {
+            if (match.index > lastIndex) {
+                const textBefore = source.slice(lastIndex, match.index)
+                segments.push(...parseInlineMarkdown(textBefore))
             }
             segments.push({
                 kind: "code",
                 value: String(match[2] || ""),
                 language: String(match[1] || "").trim()
             })
-            last = pattern.lastIndex
+            lastIndex = codePattern.lastIndex
         }
 
-        if (last < source.length) {
-            segments.push({ kind: "text", value: source.slice(last) })
+        if (lastIndex < source.length) {
+            segments.push(...parseInlineMarkdown(source.slice(lastIndex)))
         }
 
         if (segments.length === 0) {
@@ -100,6 +103,72 @@ Page {
         }
 
         return segments
+    }
+
+    function parseInlineMarkdown(text) {
+        const segments = []
+        const boldItalicPattern = /(\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*(.+?)\*|__(.+?)__|_(.+?)_|`(.+?)`)/g
+        let lastIndex = 0
+        let match
+
+        while ((match = boldItalicPattern.exec(text)) !== null) {
+            if (match.index > lastIndex) {
+                segments.push({ kind: "text", value: text.slice(lastIndex, match.index) })
+            }
+
+            if (match[2]) {
+                segments.push({ kind: "bolditalic", value: match[2] })
+            } else if (match[3]) {
+                segments.push({ kind: "bold", value: match[3] })
+            } else if (match[4]) {
+                segments.push({ kind: "italic", value: match[4] })
+            } else if (match[5]) {
+                segments.push({ kind: "bold", value: match[5] })
+            } else if (match[6]) {
+                segments.push({ kind: "italic", value: match[6] })
+            } else if (match[7]) {
+                segments.push({ kind: "inlinecode", value: match[7] })
+            }
+
+            lastIndex = boldItalicPattern.lastIndex
+        }
+
+        if (lastIndex < text.length) {
+            segments.push({ kind: "text", value: text.slice(lastIndex) })
+        }
+
+        if (segments.length === 0) {
+            segments.push({ kind: "text", value: text })
+        }
+
+        return segments
+    }
+
+    function formatListItems(text) {
+        const lines = text.split('\n')
+        const formatted = []
+        
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i]
+            const bulletMatch = line.match(/^(\s*)([-*+]|\d+\.)\s/)
+            
+            if (bulletMatch) {
+                const indent = bulletMatch[1].length
+                const bullet = bulletMatch[2]
+                const content = line.slice(bulletMatch[0].length)
+                
+                formatted.push({
+                    kind: "listitem",
+                    indent: Math.floor(indent / 2),
+                    bullet: bullet,
+                    content: content
+                })
+            } else {
+                formatted.push({ kind: "text", value: line + (i < lines.length - 1 ? '\n' : '') })
+            }
+        }
+        
+        return formatted
     }
 
     function scrollToBottom() {
@@ -340,50 +409,88 @@ Page {
                                             id: textBlock
                                             visible: segment.kind !== "code"
                                             width: parent.width
-                                            color: colorTextPrimary
+                                            textFormat: TextArea.AutoText
+                                            property string baseColor: colorTextPrimary
+                                            property bool isBold: segment.kind === "bold" || segment.kind === "bolditalic"
+                                            property bool isItalic: segment.kind === "italic" || segment.kind === "bolditalic"
+                                            property bool isInlineCode: segment.kind === "inlinecode"
+                                            color: isInlineCode ? "#E53935" : (model.role === "user" ? colorTextPrimary : baseColor)
                                             text: segment.value
                                             wrapMode: TextArea.Wrap
                                             readOnly: true
                                             selectByMouse: true
                                             selectionColor: "#90CAF9"
                                             selectedTextColor: colorTextPrimary
-                                            padding: 0
-                                            background: null
+                                            padding: isInlineCode ? 4 : 0
+                                            font.family: isInlineCode ? "Monospace" : "sans-serif"
+                                            font.pixelSize: isInlineCode ? 12 : 14
+                                            font.bold: isBold
+                                            font.italic: isItalic
+                                            background: isInlineCode ? Rectangle {
+                                                color: "#F5F5F5"
+                                                radius: 3
+                                                border.color: "#E0E0E0"
+                                            } : null
                                         }
 
-                                        Rectangle {
-                                            id: codeBlock
-                                            visible: segment.kind === "code"
-                                            width: parent.width
-                                            color: "#1F2933"
-                                            radius: 6
-                                            border.color: "#2F3E4D"
-                                            implicitHeight: codeHeader.implicitHeight + codeFlick.implicitHeight + 10
+                                            Rectangle {
+                                                id: codeBlock
+                                                visible: segment.kind === "code"
+                                                width: parent.width
+                                                gradient: Gradient {
+                                                    GradientStop { position: 0; color: "#1E2A32" }
+                                                    GradientStop { position: 1; color: "#1F2933" }
+                                                }
+                                                radius: 8
+                                                border.color: "#3D4F5F"
+                                                implicitHeight: codeHeader.implicitHeight + codeFlick.implicitHeight + 10
 
-                                            Column {
-                                                anchors.fill: parent
-                                                anchors.margins: 6
-                                                spacing: 4
+                                                Column {
+                                                    anchors.fill: parent
+                                                    anchors.margins: 6
+                                                    spacing: 4
 
-                                                RowLayout {
-                                                    id: codeHeader
-                                                    width: parent.width
-                                                    Label {
-                                                        text: segment.language && segment.language.length > 0 ? segment.language : "code"
-                                                        color: "#9FB3C8"
-                                                        font.pixelSize: 11
-                                                        Layout.fillWidth: true
-                                                    }
-                                                    Rectangle {
-                                                        width: copyLabel.implicitWidth + 16
-                                                        height: copyLabel.implicitHeight + 6
-                                                        radius: 4
-                                                        color: copyMa.containsMouse ? "#3D4F5F" : "#2F3E4D"
+                                                    RowLayout {
+                                                        id: codeHeader
+                                                        width: parent.width
+                                                        Item {
+                                                            width: 6
+                                                        }
+                                                        Rectangle {
+                                                            width: 18
+                                                            height: 18
+                                                            radius: 4
+                                                            color: "#3D4F5F"
+                                                            Text {
+                                                                anchors.centerIn: parent
+                                                                text: "<>"
+                                                                color: "#61AFEF"
+                                                                font.family: "Monospace"
+                                                                font.pixelSize: 10
+                                                                font.bold: true
+                                                            }
+                                                        }
+                                                        Item {
+                                                            width: 8
+                                                        }
                                                         Label {
+                                                            text: segment.language && segment.language.length > 0 ? segment.language.toUpperCase() : "CODE"
+                                                            color: "#61AFEF"
+                                                            font.pixelSize: 11
+                                                            font.bold: true
+                                                            font.family: "Monospace"
+                                                            Layout.fillWidth: true
+                                                        }
+                                                        Rectangle {
+                                                            width: copyLabel.implicitWidth + 16
+                                                            height: copyLabel.implicitHeight + 6
+                                                            radius: 4
+                                                            color: copyMa.containsMouse ? "#4A5A6A" : "#2F3E4D"
+                                                            Label {
                                                             id: copyLabel
                                                             anchors.centerIn: parent
                                                             text: "⎘ Copiar Código"
-                                                            color: "#9FB3C8"
+                                                            color: "#D8DEE9"
                                                             font.pixelSize: 11
                                                         }
                                                         MouseArea {
@@ -411,16 +518,17 @@ Page {
                                                     id: codeFlick
                                                     width: parent.width
                                                     implicitHeight: Math.min(260, codeText.implicitHeight + 4)
-                                                    contentWidth: Math.max(width, codeText.contentWidth + 8)
-                                                    contentHeight: codeText.implicitHeight + 4
+                                                    contentWidth: codeText.width
+                                                    contentHeight: codeText.implicitHeight
                                                     clip: true
                                                     boundsBehavior: Flickable.StopAtBounds
-                                                    ScrollBar.horizontal: ScrollBar { }
+                                                    ScrollBar.horizontal: ScrollBar {
+                                                        policy: ScrollBar.AsNeeded
+                                                        visible: ScrollBar.visible
+                                                    }
 
                                                     TextArea {
                                                         id: codeText
-                                                        x: 4
-                                                        width: Math.max(codeFlick.width, contentWidth + 8)
                                                         text: segment.value
                                                         color: "#D8DEE9"
                                                         font.family: "Monospace"
@@ -428,7 +536,7 @@ Page {
                                                         wrapMode: TextArea.NoWrap
                                                         readOnly: true
                                                         selectByMouse: true
-                                                        padding: 0
+                                                        padding: 4
                                                         background: null
                                                     }
                                                 }
