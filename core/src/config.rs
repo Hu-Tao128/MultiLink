@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_context_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +85,7 @@ impl Default for AppConfig {
                 models_dir: "~/.local/share/multilink/models".to_string(),
             },
             runtime: RuntimeConfig::default(),
+            system_context_dir: None,
         }
     }
 }
@@ -136,6 +139,10 @@ impl AppConfig {
 
         if let Ok(value) = std::env::var("MULTILINK_MODELS_DIR") {
             self.storage.models_dir = value;
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_SYSTEM_CONTEXT_DIR") {
+            self.system_context_dir = Some(PathBuf::from(value));
         }
     }
 }

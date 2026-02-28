@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use futures_util::Stream;
@@ -27,6 +28,8 @@ pub struct PromptOptions {
     pub num_ctx: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<super::session::ChatMessage>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_context_dir: Option<PathBuf>,
 }
 
 impl Default for PromptOptions {
@@ -37,6 +40,7 @@ impl Default for PromptOptions {
             system_prompt: None,
             num_ctx: None,
             messages: None,
+            system_context_dir: None,
         }
     }
 }

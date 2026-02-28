@@ -41,6 +41,7 @@ pub struct ChatRuntime {
     storage_dir: PathBuf,
     persist_interval: Duration,
     runtime_config: RuntimeConfig,
+    system_context_dir: Option<PathBuf>,
 }
 
 impl ChatRuntime {
@@ -49,7 +50,7 @@ impl ChatRuntime {
         storage_dir: PathBuf,
         persist_interval: Duration,
     ) -> Self {
-        Self::new_with_config(router, storage_dir, persist_interval, RuntimeConfig::default())
+        Self::new_with_config(router, storage_dir, persist_interval, RuntimeConfig::default(), None)
     }
 
     pub fn new_with_config(
@@ -57,6 +58,7 @@ impl ChatRuntime {
         storage_dir: PathBuf,
         persist_interval: Duration,
         runtime_config: RuntimeConfig,
+        system_context_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             router,
@@ -67,6 +69,7 @@ impl ChatRuntime {
             storage_dir,
             persist_interval,
             runtime_config,
+            system_context_dir,
         }
     }
 
@@ -88,6 +91,7 @@ impl ChatRuntime {
             storage_dir,
             persist_interval,
             runtime_config,
+            None, // Pass None for system_context_dir
         ))
     }
 
@@ -310,6 +314,7 @@ impl ChatRuntime {
         let options = PromptOptions {
             model,
             messages: Some(messages),
+            system_context_dir: self.system_context_dir.clone(),
             ..PromptOptions::default()
         };
 
@@ -598,15 +603,30 @@ impl ChatRuntime {
         let mut tokens = 0usize;
         let model_hint = session.model.as_deref();
 
-        let model_supported = session
-            .model
-            .as_deref()
-            .map(supports_code_context)
-            .unwrap_or(true);
-
         let mut system_content = String::new();
 
-        if include_project_context && model_supported {
+        if let Some(system_context_path) = &self.system_context_dir {
+            match build_system_context(system_context_path, self.runtime_config.clone()).await {
+                Ok(context) => {
+                    if context_debug_enabled() {
+                        eprintln!(
+                            "[context] session={} system_context_dir={} files_context_tokens={}",
+                            session_id,
+                            system_context_path.display(),
+                            estimate_tokens(&context)
+                        );
+                    }
+                    system_content.push_str("You are a senior software engineer.\n\nThis conversation is about a project in the following system directory:\n");
+                    system_content.push_str(&context);
+                    system_content.push('\n');
+                }
+                Err(e) => {
+                    eprintln!("[context error] session={} failed to build system context: {:?}", session_id, e);
+                }
+            }
+        }
+
+        if include_project_context {
             if let Some(project_context) = session
                 .project_context
                 .as_ref()
@@ -724,6 +744,7 @@ impl ChatRuntime {
         let options = PromptOptions {
             model,
             temperature: Some(0.2),
+            system_context_dir: self.system_context_dir.clone(),
             ..PromptOptions::default()
         };
 
@@ -873,6 +894,18 @@ async fn build_project_context_for_root(
     tokio::task::spawn_blocking(move || collect_project_snapshot(&root_for_task, &runtime_config))
         .await
         .map_err(|e| ChatRuntimeError::Path(format!("project scan task failed: {}", e)))
+        .and_then(|r| r)
+        .map(|snapshot| snapshot.render())
+}
+
+async fn build_system_context(
+    system_context_dir: &PathBuf,
+    runtime_config: RuntimeConfig,
+) -> Result<String, ChatRuntimeError> {
+    let root_for_task = system_context_dir.clone();
+    tokio::task::spawn_blocking(move || collect_project_snapshot(&root_for_task, &runtime_config))
+        .await
+        .map_err(|e| ChatRuntimeError::Path(format!("system context scan task failed: {}", e)))
         .and_then(|r| r)
         .map(|snapshot| snapshot.render())
 }
@@ -1040,17 +1073,6 @@ fn context_debug_enabled() -> bool {
     std::env::var("MULTILINK_DEBUG_CONTEXT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
-}
-
-fn supports_code_context(model: &str) -> bool {
-    let lower = model.to_lowercase();
-    lower.contains("coder")
-        || lower.contains("qwen")
-        || lower.contains("mistral")
-        || lower.contains("llama3")
-        || lower.contains("phind")
-        || lower.contains("deepseek")
-        || lower.contains("codellama")
 }
 
 fn app_data_dir() -> Result<PathBuf, ChatRuntimeError> {
