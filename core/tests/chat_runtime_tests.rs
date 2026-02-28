@@ -249,6 +249,7 @@ async fn runtime_project_context_skips_oversized_files() {
             max_project_file_bytes: 256,
             ..RuntimeConfig::default()
         },
+        None,
     );
 
     let session_id = runtime
@@ -285,6 +286,7 @@ async fn runtime_limits_parallel_streams() {
             max_parallel_streams: 1,
             ..RuntimeConfig::default()
         },
+        None,
     );
 
     let first = runtime

@@ -17,10 +17,9 @@ int main(int argc, char *argv[]) {
     ChatController controller;
     engine.rootContext()->setContextProperty("chatController", &controller);
 
-    const QUrl url(QStringLiteral("qrc:/MultiLink/qml/Main.qml"));
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app,
                      []() { QCoreApplication::exit(-1); }, Qt::QueuedConnection);
 
-    engine.load(url);
+    engine.loadFromModule("MultiLink", "Main");
     return app.exec();
 }

@@ -8,6 +8,11 @@ find_package(Qt6 REQUIRED COMPONENTS Core Quick Qml Network)
 
 qt_standard_project_setup()
 
+if(COMMAND qt_policy)
+    qt_policy(SET QTP0001 NEW)
+    qt_policy(SET QTP0004 NEW)
+endif()
+
 add_custom_target(chat_controller_rust
     COMMAND cargo build --release
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/rust/chat_controller

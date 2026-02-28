@@ -53,8 +53,6 @@ struct CodexUsage {
     input_tokens: Option<usize>,
     #[serde(rename = "output_tokens", default)]
     output_tokens: Option<usize>,
-    #[serde(rename = "total_tokens", default)]
-    total_tokens: Option<usize>,
 }
 
 #[async_trait]

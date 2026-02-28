@@ -115,7 +115,7 @@ impl OllamaProvider {
         let model_info = response.model_info.as_ref();
 
         let has_tools_in_capabilities = capabilities_raw.contains(&"tools".to_string());
-        let supports_tools = has_tools_in_capabilities && template.contains(".Tools");
+        let supports_tools = has_tools_in_capabilities || template.contains(".Tools");
 
         let has_insert_in_capabilities = capabilities_raw.contains(&"insert".to_string());
         let supports_fim = has_insert_in_capabilities && template.contains("fim_prefix");
@@ -298,35 +298,11 @@ struct OllamaStreamChunk {
 #[derive(Deserialize)]
 struct OllamaShowResponse {
     #[serde(default)]
-    parameters: Option<String>,
-    #[serde(default)]
-    license: Option<String>,
-    #[serde(default)]
-    modified_at: Option<String>,
-    #[serde(default)]
-    details: Option<OllamaModelDetails>,
-    #[serde(default)]
     template: Option<String>,
     #[serde(default)]
     capabilities: Option<Vec<String>>,
     #[serde(default)]
     model_info: Option<HashMap<String, serde_json::Value>>,
-}
-
-#[derive(Deserialize)]
-struct OllamaModelDetails {
-    #[serde(default)]
-    parent_model: Option<String>,
-    #[serde(default)]
-    format: Option<String>,
-    #[serde(default)]
-    family: Option<String>,
-    #[serde(default)]
-    families: Option<Vec<String>>,
-    #[serde(default)]
-    parameter_size: Option<String>,
-    #[serde(default)]
-    quantization_level: Option<String>,
 }
 
 #[async_trait]
@@ -600,7 +576,6 @@ impl LLMProvider for OllamaProvider {
                                                             let _ = tx.send(Ok(TokenEvent::Token(message.content))).await;
                                                         }
                                                         if chunk.done && !completed_sent {
-                                                            completed_sent = true;
                                                             let prompt_tokens = chunk.prompt_eval_count.unwrap_or(0);
                                                             let completion_tokens = chunk.eval_count.unwrap_or(0);
                                                             if prompt_tokens > 0 || completion_tokens > 0 {

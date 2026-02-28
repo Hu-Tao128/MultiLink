@@ -258,16 +258,14 @@ fn spawn_send_prompt(
                         StreamEvent::Usage { prompt_tokens, completion_tokens, total_tokens, is_estimated } => {
                             if let Some(callback) = callbacks.on_token_usage {
                                 let session_cstr = CString::new(stream_session.clone()).unwrap();
-                                unsafe {
-                                    callback(
-                                        ctx as *mut c_void,
-                                        session_cstr.as_ptr(),
-                                        prompt_tokens,
-                                        completion_tokens,
-                                        total_tokens,
-                                        is_estimated,
-                                    );
-                                }
+                                callback(
+                                    ctx as *mut c_void,
+                                    session_cstr.as_ptr(),
+                                    prompt_tokens,
+                                    completion_tokens,
+                                    total_tokens,
+                                    is_estimated,
+                                );
                             }
                         }
                         StreamEvent::Finished => {

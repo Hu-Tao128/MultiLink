@@ -426,11 +426,12 @@ Page {
                                             font.pixelSize: isInlineCode ? 12 : 14
                                             font.bold: isBold
                                             font.italic: isItalic
-                                            background: isInlineCode ? Rectangle {
+                                            background: Rectangle {
+                                                visible: textBlock.isInlineCode
                                                 color: "#F5F5F5"
                                                 radius: 3
                                                 border.color: "#E0E0E0"
-                                            } : null
+                                            }
                                         }
 
                                             Rectangle {
@@ -453,28 +454,10 @@ Page {
                                                     RowLayout {
                                                         id: codeHeader
                                                         width: parent.width
-                                                        Item {
-                                                            width: 6
-                                                        }
-                                                        Rectangle {
-                                                            width: 18
-                                                            height: 18
-                                                            radius: 4
-                                                            color: "#3D4F5F"
-                                                            Text {
-                                                                anchors.centerIn: parent
-                                                                text: "<>"
-                                                                color: "#61AFEF"
-                                                                font.family: "Monospace"
-                                                                font.pixelSize: 10
-                                                                font.bold: true
-                                                            }
-                                                        }
-                                                        Item {
-                                                            width: 8
-                                                        }
                                                         Label {
-                                                            text: segment.language && segment.language.length > 0 ? segment.language.toUpperCase() : "CODE"
+                                                            text: segment.language && segment.language.length > 0
+                                                                  ? segment.language.toLowerCase()
+                                                                  : "text"
                                                             color: "#61AFEF"
                                                             font.pixelSize: 11
                                                             font.bold: true
@@ -524,7 +507,6 @@ Page {
                                                     boundsBehavior: Flickable.StopAtBounds
                                                     ScrollBar.horizontal: ScrollBar {
                                                         policy: ScrollBar.AsNeeded
-                                                        visible: ScrollBar.visible
                                                     }
 
                                                     TextArea {

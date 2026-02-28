@@ -53,8 +53,6 @@ struct GeminiUsageMetadata {
     prompt_token_count: Option<usize>,
     #[serde(rename = "candidatesTokenCount", default)]
     candidates_token_count: Option<usize>,
-    #[serde(rename = "totalTokenCount", default)]
-    total_token_count: Option<usize>,
 }
 
 #[async_trait]
