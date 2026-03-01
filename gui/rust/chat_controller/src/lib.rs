@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use multilink_core::providers::ollama::OllamaProvider;
-use multilink_core::{ChatRuntime, ProviderId, ProviderRouter, StreamEvent};
+use multilink_core::{AppConfig, ChatRuntime, ProviderId, ProviderRouter, StreamEvent};
 use serde_json::json;
 use tokio::runtime::Runtime;
 
@@ -79,14 +79,27 @@ pub extern "C" fn chat_backend_create(
         Err(_) => return std::ptr::null_mut(),
     };
 
+    let config_path = AppConfig::default_user_config_path();
+    let config = runtime
+        .block_on(AppConfig::load_or_create(&config_path))
+        .unwrap_or_default();
+
+    std::env::set_var("MULTILINK_OLLAMA_BASE_URL", config.ollama.base_url.clone());
+
     let mut router = ProviderRouter::new();
     router.register(Arc::new(OllamaProvider::new(
-        "http://127.0.0.1:11434".to_string(),
-        "llama3.2".to_string(),
+        config.ollama.base_url.clone(),
+        config.ollama.default_model.clone(),
     )));
 
     let chat_runtime = Arc::new(
-        ChatRuntime::new_portable(Arc::new(router), PERSIST_INTERVAL).unwrap_or_else(|_| {
+        ChatRuntime::new_portable_with_settings(
+            Arc::new(router),
+            PERSIST_INTERVAL,
+            config.runtime.clone(),
+            config.system_context_dir.clone(),
+        )
+        .unwrap_or_else(|_| {
             ChatRuntime::new(
                 Arc::new(ProviderRouter::new()),
                 PathBuf::from("./.multilink/sessions"),
@@ -107,16 +120,19 @@ pub extern "C" fn chat_backend_create(
         }
 
         chat_runtime
-            .create_session(ProviderId::Ollama, Some("llama3.2".to_string()))
+            .create_session(ProviderId::Ollama, Some(config.ollama.default_model.clone()))
             .await
     });
 
     let active_model = runtime.block_on(async {
         let sessions = chat_runtime.list_sessions().await;
         if let Some(session) = sessions.iter().find(|s| s.id == active_session_id) {
-            return session.model.clone().unwrap_or_else(|| "llama3.2".to_string());
+            return session
+                .model
+                .clone()
+                .unwrap_or_else(|| config.ollama.default_model.clone());
         }
-        "llama3.2".to_string()
+        config.ollama.default_model.clone()
     });
 
     let ui = UiState {

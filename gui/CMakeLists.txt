@@ -9,8 +9,12 @@ find_package(Qt6 REQUIRED COMPONENTS Core Quick Qml Network)
 qt_standard_project_setup()
 
 if(COMMAND qt_policy)
-    qt_policy(SET QTP0001 NEW)
-    qt_policy(SET QTP0004 NEW)
+    if(DEFINED Qt6Core_VERSION AND Qt6Core_VERSION VERSION_GREATER_EQUAL "6.5")
+        qt_policy(SET QTP0001 NEW)
+    endif()
+    if(DEFINED Qt6Core_VERSION AND Qt6Core_VERSION VERSION_GREATER_EQUAL "6.6")
+        qt_policy(SET QTP0004 NEW)
+    endif()
 endif()
 
 add_custom_target(chat_controller_rust
