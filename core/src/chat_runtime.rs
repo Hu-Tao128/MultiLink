@@ -13,7 +13,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, watch, Mutex, RwLock, Semaphore};
 use walkdir::WalkDir;
 
-use crate::config::RuntimeConfig;
+use crate::config::{ModelTier, RuntimeConfig};
+use crate::context_retrieval::build_relevant_project_context;
 use crate::providers::{PromptOptions, ProviderId};
 use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
@@ -85,13 +86,22 @@ impl ChatRuntime {
         persist_interval: Duration,
         runtime_config: RuntimeConfig,
     ) -> Result<Self, ChatRuntimeError> {
+        Self::new_portable_with_settings(router, persist_interval, runtime_config, None)
+    }
+
+    pub fn new_portable_with_settings(
+        router: Arc<ProviderRouter>,
+        persist_interval: Duration,
+        runtime_config: RuntimeConfig,
+        system_context_dir: Option<PathBuf>,
+    ) -> Result<Self, ChatRuntimeError> {
         let storage_dir = app_data_dir()?.join("sessions");
         Ok(Self::new_with_config(
             router,
             storage_dir,
             persist_interval,
             runtime_config,
-            None, // Pass None for system_context_dir
+            system_context_dir,
         ))
     }
 
@@ -106,6 +116,11 @@ impl ChatRuntime {
             let mut active_guard = self.active_session_id.write().await;
             *active_guard = Some(session_id.clone());
         }
+
+        let ids = self.sessions.read().await.keys().cloned().collect();
+        let _ = persist_session(&self.storage_dir, &session).await;
+        let _ = persist_index_and_state(&self.storage_dir, ids, Some(session_id.clone())).await;
+
         session_id
     }
 
@@ -239,8 +254,20 @@ impl ChatRuntime {
         session_id: &str,
         project_root: Option<String>,
     ) -> Result<(), ChatRuntimeError> {
+        let model_hint = {
+            let guard = self.sessions.read().await;
+            guard
+                .get(session_id)
+                .ok_or(ChatRuntimeError::SessionNotFound)?
+                .model
+                .clone()
+        };
+        let context_config = self
+            .runtime_config
+            .effective_for_model(model_hint.as_deref());
+
         let cached_context = if let Some(root) = project_root.as_ref() {
-            match build_project_context_for_root(root, self.runtime_config.clone()).await {
+            match build_project_context_for_root(root, context_config).await {
                 Ok(context) => {
                     if context_debug_enabled() {
                         eprintln!(
@@ -475,6 +502,7 @@ impl ChatRuntime {
 
         let index_path = self.storage_dir.join("index.json");
         let mut loaded_ids = Vec::new();
+        let mut index_needs_rebuild = false;
 
         if index_path.exists() {
             let raw = fs::read_to_string(&index_path)
@@ -485,22 +513,25 @@ impl ChatRuntime {
             loaded_ids = index.session_ids;
         }
 
+        let disk_ids = collect_session_ids_from_storage(&self.storage_dir).await?;
+
         if loaded_ids.is_empty() {
-            let mut entries = fs::read_dir(&self.storage_dir)
-                .await
-                .map_err(ChatRuntimeError::Io)?;
-            while let Some(entry) = entries.next_entry().await.map_err(ChatRuntimeError::Io)? {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                    continue;
-                }
-                let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                if file_stem != "index" && file_stem != "state" {
-                    loaded_ids.push(file_stem.to_string());
+            loaded_ids = disk_ids;
+            index_needs_rebuild = true;
+        } else {
+            for disk_id in &disk_ids {
+                if !loaded_ids.contains(disk_id) {
+                    loaded_ids.push(disk_id.clone());
+                    index_needs_rebuild = true;
                 }
             }
+            loaded_ids.retain(|id| {
+                let exists_on_disk = disk_ids.contains(id);
+                if !exists_on_disk {
+                    index_needs_rebuild = true;
+                }
+                exists_on_disk
+            });
         }
 
         for session_id in loaded_ids {
@@ -535,8 +566,15 @@ impl ChatRuntime {
                 let exists = self.sessions.read().await.contains_key(&active_id);
                 if !exists {
                     *self.active_session_id.write().await = None;
+                    index_needs_rebuild = true;
                 }
             }
+        }
+
+        if index_needs_rebuild {
+            let ids = self.sessions.read().await.keys().cloned().collect();
+            let active = self.active_session_id.read().await.clone();
+            let _ = persist_index_and_state(&self.storage_dir, ids, active).await;
         }
 
         let _ = recover_partials_from_wal(&self.sessions, &self.storage_dir).await;
@@ -547,7 +585,7 @@ impl ChatRuntime {
 
 impl ChatRuntime {
     async fn ensure_project_context_cached(&self, session_id: &str) {
-        let root = {
+        let (root, model_hint) = {
             let guard = self.sessions.read().await;
             let Some(session) = guard.get(session_id) else {
                 return;
@@ -559,14 +597,18 @@ impl ChatRuntime {
             {
                 return;
             }
-            session.project_root.clone()
+            (session.project_root.clone(), session.model.clone())
         };
 
         let Some(project_root) = root else {
             return;
         };
 
-        let context = match build_project_context_for_root(&project_root, self.runtime_config.clone()).await {
+        let context_config = self
+            .runtime_config
+            .effective_for_model(model_hint.as_deref());
+
+        let context = match build_project_context_for_root(&project_root, context_config).await {
             Ok(value) => value,
             Err(err) => {
                 if context_debug_enabled() {
@@ -602,11 +644,27 @@ impl ChatRuntime {
         let mut messages = Vec::new();
         let mut tokens = 0usize;
         let model_hint = session.model.as_deref();
+        let effective_runtime = self.runtime_config.effective_for_model(model_hint);
+        let model_tier = self.runtime_config.tier_for_model(model_hint);
 
         let mut system_content = String::new();
 
+        system_content.push_str("You are a senior software engineer.\n");
+        if model_tier == ModelTier::Small {
+            system_content.push_str(
+                "Use this exact response structure:\n1) Brief answer\n2) Evidence (at least 2 files)\n3) Uncertainties.\n",
+            );
+            system_content.push_str(
+                "Every important claim must reference at least one file from Project Context. If evidence is missing, respond exactly: No tengo suficiente contexto. Do not guess.\n\n",
+            );
+        } else {
+            system_content.push_str(
+                "Every important claim must reference at least one file from Project Context. If evidence is missing, respond exactly: No tengo suficiente contexto.\n\n",
+            );
+        }
+
         if let Some(system_context_path) = &self.system_context_dir {
-            match build_system_context(system_context_path, self.runtime_config.clone()).await {
+            match build_system_context(system_context_path, effective_runtime.clone()).await {
                 Ok(context) => {
                     if context_debug_enabled() {
                         eprintln!(
@@ -616,7 +674,7 @@ impl ChatRuntime {
                             estimate_tokens(&context)
                         );
                     }
-                    system_content.push_str("You are a senior software engineer.\n\nThis conversation is about a project in the following system directory:\n");
+                    system_content.push_str("This conversation is about a project in the following system directory:\n");
                     system_content.push_str(&context);
                     system_content.push('\n');
                 }
@@ -633,18 +691,34 @@ impl ChatRuntime {
                 .filter(|v| !v.trim().is_empty())
             {
                 let context_budget =
-                    self.runtime_config
+                    effective_runtime
                         .max_project_context_tokens
-                        .min(self.runtime_config.max_context_tokens.saturating_sub(tokens));
+                        .min(effective_runtime.max_context_tokens.saturating_sub(tokens));
                 if context_budget > 0 {
-                    let capped_context = if estimate_tokens_for_model(project_context, model_hint) > context_budget {
-                        truncate_to_token_budget(project_context, context_budget, model_hint)
-                    } else {
-                        project_context.clone()
-                    };
-                    system_content.push_str("You are a senior software engineer.\n\nThis conversation is about the following project:\n");
-                    system_content.push_str(&capped_context);
-                    system_content.push('\n');
+                    let retrieval = build_relevant_project_context(
+                        project_context,
+                        &current_prompt,
+                        context_budget,
+                        model_hint,
+                        effective_runtime.context_embeddings_enabled,
+                    )
+                    .await;
+                    if !retrieval.context.trim().is_empty() {
+                        system_content.push_str("This conversation is about the following project:\n");
+                        system_content.push_str(&retrieval.context);
+                        system_content.push('\n');
+                        if context_debug_enabled() {
+                            eprintln!(
+                                "[context] session={} model={:?} top_k={} embeddings={} selected_files={:?} context_tokens={}",
+                                session_id,
+                                model_hint,
+                                retrieval.top_k,
+                                retrieval.embedding_used,
+                                retrieval.selected_files,
+                                retrieval.used_tokens
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -667,7 +741,7 @@ impl ChatRuntime {
         let base_index = session.summarized_messages.min(session.messages.len());
         for msg in session.messages.iter().skip(base_index) {
             let t = estimate_tokens_for_model(&msg.content, model_hint);
-            if tokens + t > self.runtime_config.max_context_tokens {
+            if tokens + t > effective_runtime.max_context_tokens {
                 break;
             }
             tokens += t;
@@ -973,7 +1047,11 @@ fn collect_project_snapshot(
         candidate_paths.push(path.to_path_buf());
     }
 
-    candidate_paths.sort();
+    candidate_paths.sort_by(|a, b| {
+        let pa = project_file_priority(root, a);
+        let pb = project_file_priority(root, b);
+        pb.cmp(&pa).then_with(|| a.cmp(b))
+    });
 
     let mut files = Vec::new();
     let mut total_bytes = 0usize;
@@ -1027,7 +1105,22 @@ fn should_skip_entry(path: &Path, is_dir: bool) -> bool {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
-    matches!(name, ".git" | "node_modules" | "target" | "build")
+    matches!(
+        name,
+        ".git"
+            | "node_modules"
+            | "target"
+            | "build"
+            | ".venv"
+            | "venv"
+            | "env"
+            | "__pycache__"
+            | ".pytest_cache"
+            | ".mypy_cache"
+            | ".idea"
+            | ".vscode"
+            | "dist"
+    )
 }
 
 fn is_allowed_project_file(path: &Path) -> bool {
@@ -1036,16 +1129,39 @@ fn is_allowed_project_file(path: &Path) -> bool {
         Some(
             "rs" | "py"
                 | "js"
+                | "mjs"
+                | "cjs"
+                | "jsx"
                 | "ts"
                 | "tsx"
+                | "dart"
                 | "java"
                 | "kt"
+                | "kts"
+                | "scala"
                 | "cpp"
+                | "c"
+                | "cc"
+                | "cxx"
                 | "h"
+                | "hpp"
+                | "hh"
+                | "cs"
+                | "go"
+                | "swift"
+                | "php"
+                | "rb"
+                | "lua"
+                | "zig"
+                | "sh"
+                | "bash"
                 | "qml"
                 | "json"
                 | "toml"
                 | "md"
+                | "txt"
+                | "yml"
+                | "yaml"
         )
     )
 }
@@ -1055,18 +1171,101 @@ fn code_fence_for_path(path: &Path) -> &'static str {
         Some("rs") => "rust",
         Some("py") => "python",
         Some("js") => "javascript",
+        Some("mjs") => "javascript",
+        Some("cjs") => "javascript",
+        Some("jsx") => "jsx",
         Some("ts") => "typescript",
         Some("tsx") => "tsx",
+        Some("dart") => "dart",
         Some("java") => "java",
         Some("kt") => "kotlin",
+        Some("kts") => "kotlin",
+        Some("scala") => "scala",
         Some("cpp") => "cpp",
+        Some("c") => "c",
+        Some("cc") => "cpp",
+        Some("cxx") => "cpp",
         Some("h") => "c",
+        Some("hpp") => "cpp",
+        Some("hh") => "cpp",
+        Some("cs") => "csharp",
+        Some("go") => "go",
+        Some("swift") => "swift",
+        Some("php") => "php",
+        Some("rb") => "ruby",
+        Some("lua") => "lua",
+        Some("zig") => "zig",
+        Some("sh") => "bash",
+        Some("bash") => "bash",
         Some("qml") => "qml",
         Some("json") => "json",
         Some("toml") => "toml",
         Some("md") => "markdown",
         _ => "text",
     }
+}
+
+fn project_file_priority(root: &Path, file_path: &Path) -> i32 {
+    let mut score = 0i32;
+
+    let rel = file_path.strip_prefix(root).unwrap_or(file_path);
+    let depth = rel.components().count().saturating_sub(1);
+    if depth == 0 {
+        score += 30;
+    } else if depth == 1 {
+        score += 16;
+    } else if depth == 2 {
+        score += 8;
+    }
+
+    let file_name = rel
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let is_readme = file_name == "readme.md" || file_name == "readme.txt" || file_name == "readme";
+    if is_readme {
+        if depth == 0 {
+            score += 50;
+        } else if depth == 1 {
+            score += 8;
+        } else {
+            score -= 8;
+        }
+    }
+    if matches!(
+        file_name.as_str(),
+        "main.py"
+            | "main.rs"
+            | "main.ts"
+            | "main.js"
+            | "app.py"
+            | "app.ts"
+            | "app.js"
+            | "chrome.py"
+            | "tts.py"
+    ) {
+        score += 24;
+    }
+
+    let ext = rel.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    let lang_weight = match ext {
+        "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "java" | "dart" | "cpp" | "c"
+        | "cc" | "cxx" | "cs" | "go" | "swift" | "kt" | "kts" | "php" | "rb"
+        | "scala" | "zig" => 14,
+        "md" => {
+            if depth == 0 {
+                8
+            } else {
+                1
+            }
+        }
+        "toml" | "json" | "yaml" | "yml" => 5,
+        _ => 2,
+    };
+    score += lang_weight;
+
+    score
 }
 
 fn context_debug_enabled() -> bool {
@@ -1189,12 +1388,61 @@ async fn write_atomic_json<T: serde::Serialize>(
     let data = serde_json::to_vec_pretty(value)
         .map_err(|e| ChatRuntimeError::Serialization(e.to_string()))?;
     let temp_path = path.with_extension("tmp");
-    fs::write(&temp_path, data)
+    let mut file = fs::File::create(&temp_path)
         .await
         .map_err(ChatRuntimeError::Io)?;
+    file.write_all(&data)
+        .await
+        .map_err(ChatRuntimeError::Io)?;
+    file.sync_all()
+        .await
+        .map_err(ChatRuntimeError::Io)?;
+    drop(file);
+
     fs::rename(&temp_path, path)
         .await
-        .map_err(ChatRuntimeError::Io)
+        .map_err(ChatRuntimeError::Io)?;
+
+    if let Some(parent) = path.parent() {
+        sync_directory(parent).await?;
+    }
+
+    Ok(())
+}
+
+async fn sync_directory(path: &Path) -> Result<(), ChatRuntimeError> {
+    let dir = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let handle = std::fs::File::open(&dir)?;
+        handle.sync_all()
+    })
+    .await
+    .map_err(|e| ChatRuntimeError::Path(format!("directory sync task failed: {}", e)))?
+    .map_err(ChatRuntimeError::Io)
+}
+
+async fn collect_session_ids_from_storage(storage_dir: &Path) -> Result<Vec<String>, ChatRuntimeError> {
+    let mut entries = fs::read_dir(storage_dir)
+        .await
+        .map_err(ChatRuntimeError::Io)?;
+    let mut ids = Vec::new();
+
+    while let Some(entry) = entries.next_entry().await.map_err(ChatRuntimeError::Io)? {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if file_stem != "index" && file_stem != "state" {
+            ids.push(file_stem.to_string());
+        }
+    }
+
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
 }
 
 async fn remove_partial_file(storage_dir: &Path, session_id: &str) {

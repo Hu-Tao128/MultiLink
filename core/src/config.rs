@@ -47,6 +47,58 @@ pub struct RuntimeConfig {
     pub max_project_file_bytes: usize,
     pub max_project_context_tokens: usize,
     pub max_parallel_streams: usize,
+    pub profiles: RuntimeProfiles,
+    pub context_embeddings_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeProfiles {
+    pub small: RuntimeProfile,
+    pub medium: RuntimeProfile,
+    pub large: RuntimeProfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeProfile {
+    pub max_project_context_tokens: usize,
+    pub max_project_files: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTier {
+    Small,
+    Medium,
+    Large,
+}
+
+impl Default for RuntimeProfiles {
+    fn default() -> Self {
+        Self {
+            small: RuntimeProfile {
+                max_project_context_tokens: 800,
+                max_project_files: 6,
+            },
+            medium: RuntimeProfile {
+                max_project_context_tokens: 2000,
+                max_project_files: 15,
+            },
+            large: RuntimeProfile {
+                max_project_context_tokens: 3500,
+                max_project_files: 30,
+            },
+        }
+    }
+}
+
+impl Default for RuntimeProfile {
+    fn default() -> Self {
+        Self {
+            max_project_context_tokens: 3500,
+            max_project_files: 30,
+        }
+    }
 }
 
 impl Default for RuntimeConfig {
@@ -61,8 +113,79 @@ impl Default for RuntimeConfig {
             max_project_file_bytes: 64 * 1024,
             max_project_context_tokens: 3500,
             max_parallel_streams: 4,
+            profiles: RuntimeProfiles::default(),
+            context_embeddings_enabled: true,
         }
     }
+}
+
+impl RuntimeConfig {
+    pub fn tier_for_model(&self, model: Option<&str>) -> ModelTier {
+        let Some(size_b) = model.and_then(extract_model_size_billions) else {
+            return ModelTier::Medium;
+        };
+
+        if size_b < 4.0 {
+            ModelTier::Small
+        } else if size_b <= 8.0 {
+            ModelTier::Medium
+        } else {
+            ModelTier::Large
+        }
+    }
+
+    pub fn profile_for_model(&self, model: Option<&str>) -> RuntimeProfile {
+        match self.tier_for_model(model) {
+            ModelTier::Small => self.profiles.small.clone(),
+            ModelTier::Medium => self.profiles.medium.clone(),
+            ModelTier::Large => self.profiles.large.clone(),
+        }
+    }
+
+    pub fn effective_for_model(&self, model: Option<&str>) -> Self {
+        let mut next = self.clone();
+        let profile = self.profile_for_model(model);
+        next.max_project_context_tokens = profile.max_project_context_tokens;
+        next.max_project_files = profile.max_project_files;
+        next
+    }
+}
+
+fn extract_model_size_billions(model: &str) -> Option<f32> {
+    let lower = model.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            let mut seen_dot = false;
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i].is_ascii_digit() {
+                    i += 1;
+                    continue;
+                }
+                if bytes[i] == b'.' && !seen_dot {
+                    seen_dot = true;
+                    i += 1;
+                    continue;
+                }
+                break;
+            }
+
+            if i < bytes.len() && bytes[i] == b'b' {
+                let parsed = lower[start..i].parse::<f32>().ok();
+                if parsed.is_some() {
+                    return parsed;
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    None
 }
 
 impl Default for AppConfig {
@@ -139,6 +262,10 @@ impl AppConfig {
 
         if let Ok(value) = std::env::var("MULTILINK_MODELS_DIR") {
             self.storage.models_dir = value;
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_CONTEXT_EMBEDDINGS") {
+            self.runtime.context_embeddings_enabled = value == "1" || value.eq_ignore_ascii_case("true");
         }
 
         if let Ok(value) = std::env::var("MULTILINK_SYSTEM_CONTEXT_DIR") {

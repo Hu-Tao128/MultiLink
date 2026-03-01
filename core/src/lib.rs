@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod chat_runtime;
 pub mod config;
+pub mod context_retrieval;
 pub mod model_manager;
 pub mod providers;
 pub mod router;

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use multilink_core::config::RuntimeConfig;
+use multilink_core::config::{RuntimeConfig, RuntimeProfile, RuntimeProfiles};
 use multilink_core::session::{ChatMessage, SessionState};
 use multilink_core::{
     ChatRuntime, LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities,
@@ -223,6 +223,48 @@ async fn runtime_recovers_partial_wal_on_load() {
 }
 
 #[tokio::test]
+async fn runtime_persists_new_session_metadata_immediately() {
+    let mut router = ProviderRouter::new();
+    router.register(Arc::new(SlowMockProvider));
+
+    let temp = tempfile::tempdir().expect("temp");
+    let storage_dir = temp.path().join("sessions");
+
+    let runtime = ChatRuntime::new(
+        Arc::new(router),
+        storage_dir.clone(),
+        Duration::from_millis(40),
+    );
+
+    let session_id = runtime
+        .create_session(ProviderId::Ollama, Some("mock".to_string()))
+        .await;
+
+    let session_path = storage_dir.join(format!("{}.json", session_id));
+    let index_path = storage_dir.join("index.json");
+    assert!(session_path.exists(), "new session file should be persisted");
+    assert!(index_path.exists(), "session index should be persisted");
+
+    let mut router2 = ProviderRouter::new();
+    router2.register(Arc::new(SlowMockProvider));
+    let runtime_reloaded = ChatRuntime::new(
+        Arc::new(router2),
+        storage_dir.clone(),
+        Duration::from_millis(40),
+    );
+    runtime_reloaded
+        .load_sessions_from_disk()
+        .await
+        .expect("load sessions");
+
+    let sessions = runtime_reloaded.list_sessions().await;
+    assert!(
+        sessions.iter().any(|s| s.id == session_id),
+        "reloaded runtime should include newly created session"
+    );
+}
+
+#[tokio::test]
 async fn runtime_project_context_skips_oversized_files() {
     let mut router = ProviderRouter::new();
     router.register(Arc::new(SlowMockProvider));
@@ -270,6 +312,88 @@ async fn runtime_project_context_skips_oversized_files() {
 
     assert!(context.contains("main.rs"));
     assert!(!context.contains("big.rs"));
+}
+
+#[tokio::test]
+async fn runtime_project_context_ignores_venv_and_prefers_root_files() {
+    let mut router = ProviderRouter::new();
+    router.register(Arc::new(SlowMockProvider));
+
+    let temp = tempfile::tempdir().expect("temp");
+    let storage_dir = temp.path().join("sessions");
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(&project_root)
+        .await
+        .expect("create project root");
+
+    fs::write(project_root.join("README.md"), "# Cast project")
+        .await
+        .expect("write readme");
+    fs::write(project_root.join("chrome.py"), "print('chrome')")
+        .await
+        .expect("write chrome.py");
+    fs::write(project_root.join("tts.py"), "print('tts')")
+        .await
+        .expect("write tts.py");
+
+    let venv_pkg = project_root.join(".venv/lib/python3.13/site-packages/certifi");
+    fs::create_dir_all(&venv_pkg)
+        .await
+        .expect("create venv folder");
+    fs::write(venv_pkg.join("core.py"), "def where(): pass")
+        .await
+        .expect("write venv file");
+
+    let runtime = ChatRuntime::new_with_config(
+        Arc::new(router),
+        storage_dir,
+        Duration::from_millis(40),
+        RuntimeConfig {
+            max_project_files: 2,
+            profiles: RuntimeProfiles {
+                small: RuntimeProfile {
+                    max_project_context_tokens: 800,
+                    max_project_files: 2,
+                },
+                medium: RuntimeProfile {
+                    max_project_context_tokens: 1200,
+                    max_project_files: 2,
+                },
+                large: RuntimeProfile {
+                    max_project_context_tokens: 2000,
+                    max_project_files: 2,
+                },
+            },
+            ..RuntimeConfig::default()
+        },
+        None,
+    );
+
+    let session_id = runtime
+        .create_session(ProviderId::Ollama, Some("deepseek-coder:1.3b".to_string()))
+        .await;
+
+    runtime
+        .set_session_project_root(&session_id, Some(project_root.to_string_lossy().to_string()))
+        .await
+        .expect("set project root");
+
+    let sessions = runtime.list_sessions().await;
+    let session = sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .expect("session exists");
+    let context = session.project_context.clone().unwrap_or_default();
+
+    assert!(context.contains("README.md"), "should include root readme");
+    assert!(
+        context.contains("chrome.py") || context.contains("tts.py"),
+        "should include root code file"
+    );
+    assert!(
+        !context.contains(".venv/") && !context.contains("site-packages"),
+        "should exclude virtualenv/vendor files"
+    );
 }
 
 #[tokio::test]
