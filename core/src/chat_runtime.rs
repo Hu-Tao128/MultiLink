@@ -15,6 +15,9 @@ use walkdir::WalkDir;
 
 use crate::config::{ModelTier, RuntimeConfig};
 use crate::context_retrieval::{build_relevant_project_context, RetrievalConfig};
+use crate::execution::{ExecutionDispatchRequest, ExecutionDispatcher};
+use crate::hardware_profile::{HardwareCaps, HardwareProfile};
+use crate::intent_budget::{budget_for_intent, detect_query_intent};
 use crate::model_profile::{ModelClass, ModelProfile};
 use crate::observability::ExecutionMetrics;
 use crate::providers::{PromptOptions, ProviderId};
@@ -35,8 +38,18 @@ pub enum StreamEvent {
     Error(String),
 }
 
+pub struct ChatResponse {
+    pub events: mpsc::Receiver<StreamEvent>,
+}
+
+pub struct HandleUserMessageRequest {
+    pub session_id: String,
+    pub prompt: String,
+}
+
 pub struct ChatRuntime {
     router: Arc<ProviderRouter>,
+    execution_dispatcher: Arc<ExecutionDispatcher>,
     sessions: Arc<RwLock<HashMap<String, ChatSession>>>,
     active_session_id: Arc<RwLock<Option<String>>>,
     cancellation: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
@@ -63,8 +76,31 @@ impl ChatRuntime {
         runtime_config: RuntimeConfig,
         system_context_dir: Option<PathBuf>,
     ) -> Self {
+        let hardware_caps = cached_hardware_caps();
+        let mut runtime_config = runtime_config;
+        runtime_config.max_parallel_streams = runtime_config
+            .max_parallel_streams
+            .min(hardware_caps.max_parallel_streams)
+            .max(1);
+        runtime_config.max_context_tokens = runtime_config
+            .max_context_tokens
+            .min(hardware_caps.max_context_tokens)
+            .max(1024);
+        runtime_config.max_project_context_tokens = runtime_config
+            .max_project_context_tokens
+            .min(hardware_caps.max_project_tokens)
+            .max(256);
+        runtime_config.context_project_top_k = runtime_config
+            .context_project_top_k
+            .min(hardware_caps.max_project_top_k)
+            .max(2);
+
         Self {
-            router,
+            router: router.clone(),
+            execution_dispatcher: Arc::new(ExecutionDispatcher::new(
+                router.clone(),
+                runtime_config.execution_servers.clone(),
+            )),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             active_session_id: Arc::new(RwLock::new(None)),
             cancellation: Arc::new(Mutex::new(HashMap::new())),
@@ -307,8 +343,23 @@ impl ChatRuntime {
         session_id: &str,
         prompt: String,
     ) -> Result<mpsc::Receiver<StreamEvent>, ChatRuntimeError> {
+        let response = self
+            .handle_user_message(HandleUserMessageRequest {
+                session_id: session_id.to_string(),
+                prompt,
+            })
+            .await?;
+        Ok(response.events)
+    }
+
+    pub async fn handle_user_message(
+        &self,
+        request: HandleUserMessageRequest,
+    ) -> Result<ChatResponse, ChatRuntimeError> {
         const EMIT_INTERVAL: Duration = Duration::from_millis(120);
         let _persist_interval = self.persist_interval;
+        let session_id = request.session_id.as_str();
+        let prompt = request.prompt;
 
         let (provider, model) = {
             let mut guard = self.sessions.write().await;
@@ -331,6 +382,20 @@ impl ChatRuntime {
             .await;
 
         let mut effective_runtime = self.runtime_config.effective_for_model(model.as_deref());
+        let hardware_caps = cached_hardware_caps();
+        effective_runtime.max_context_tokens = effective_runtime
+            .max_context_tokens
+            .min(hardware_caps.max_context_tokens)
+            .max(1024);
+        effective_runtime.max_project_context_tokens = effective_runtime
+            .max_project_context_tokens
+            .min(hardware_caps.max_project_tokens)
+            .max(256);
+        effective_runtime.context_project_top_k = effective_runtime
+            .context_project_top_k
+            .min(hardware_caps.max_project_top_k)
+            .max(2);
+
         let mut model_profile: Option<ModelProfile> = None;
         if let Some(model_name) = model.as_ref() {
             if let Ok(caps) = self.router.get_model_info(provider, model_name).await {
@@ -345,8 +410,46 @@ impl ChatRuntime {
                 effective_runtime.context_project_top_k = effective_runtime
                     .context_project_top_k
                     .min(budget.project_top_k.max(2));
+
+                if model_class_rank(profile.class) > model_class_rank(hardware_caps.max_model_class) {
+                    effective_runtime.max_project_context_tokens = effective_runtime
+                        .max_project_context_tokens
+                        .min(512);
+                    effective_runtime.context_project_top_k = effective_runtime
+                        .context_project_top_k
+                        .min(3)
+                        .max(2);
+                }
                 model_profile = Some(profile);
             }
+        }
+
+        let intent = detect_query_intent(&prompt);
+        let intent_budget = budget_for_intent(intent);
+        let intent_project_cap = effective_runtime
+            .max_context_tokens
+            .saturating_mul(intent_budget.project_budget_ratio as usize)
+            / 100;
+        effective_runtime.max_project_context_tokens = effective_runtime
+            .max_project_context_tokens
+            .min(intent_project_cap.max(128));
+        effective_runtime.context_project_top_k = effective_runtime
+            .context_project_top_k
+            .min(intent_budget.top_k_cap)
+            .max(2);
+
+        if context_debug_enabled(&self.runtime_config) {
+            eprintln!(
+                "[context] session={} intent={:?} hw_caps(ctx={},project={},top_k={}) effective(ctx={},project={},top_k={})",
+                session_id,
+                intent,
+                hardware_caps.max_context_tokens,
+                hardware_caps.max_project_tokens,
+                hardware_caps.max_project_top_k,
+                effective_runtime.max_context_tokens,
+                effective_runtime.max_project_context_tokens,
+                effective_runtime.context_project_top_k,
+            );
         }
 
         let messages = self
@@ -383,13 +486,17 @@ impl ChatRuntime {
             .map_err(|_| ChatRuntimeError::Provider("stream concurrency limiter unavailable".to_string()))?;
 
         let stream_result = self
-            .router
-            .stream_send(provider, prompt.clone(), options.clone())
+            .execution_dispatcher
+            .dispatch(ExecutionDispatchRequest {
+                provider,
+                prompt: prompt.clone(),
+                options: options.clone(),
+            })
             .await;
 
         let mut fallback_retry_used = false;
         let stream = match stream_result {
-            Ok(stream) => stream,
+            Ok(result) => result.stream,
             Err(err) => {
                 let err_text = err.to_string();
                 eprintln!("[provider] stream error: {}", err_text);
@@ -411,9 +518,14 @@ impl ChatRuntime {
                         num_ctx: None,
                         ..PromptOptions::default()
                     };
-                    self.router
-                        .stream_send(provider, prompt, fallback_options)
+                    self.execution_dispatcher
+                        .dispatch(ExecutionDispatchRequest {
+                            provider,
+                            prompt,
+                            options: fallback_options,
+                        })
                         .await
+                        .map(|r| r.stream)
                         .map_err(|e| ChatRuntimeError::Provider(e.to_string()))?
                 } else {
                     return Err(ChatRuntimeError::Provider(err_text));
@@ -550,7 +662,7 @@ impl ChatRuntime {
             cancellation.lock().await.remove(&session_id_owned);
         });
 
-        Ok(event_rx)
+        Ok(ChatResponse { events: event_rx })
     }
 
     pub async fn cancel_stream(&self, session_id: &str) -> Result<(), ChatRuntimeError> {
@@ -720,6 +832,7 @@ impl ChatRuntime {
             Some(ModelClass::Large) => ModelTier::Large,
             None => self.runtime_config.tier_for_model(model_hint),
         };
+        let prompt_intent = detect_query_intent(&current_prompt);
 
         let mut system_content = String::new();
 
@@ -729,12 +842,26 @@ impl ChatRuntime {
                 "Use this exact response structure:\n1) Brief answer\n2) Evidence (at least 2 files)\n3) Uncertainties.\n",
             );
             system_content.push_str(
-                "Every important claim must reference at least one file from Project Context. If evidence is missing, respond exactly: No tengo suficiente contexto. Do not guess.\n\n",
+                "Every important claim must reference at least one file from Project Context. If evidence is missing, respond exactly: No tengo suficiente contexto. Do not guess. Do not suggest external tools/libraries unless they already appear in Project Context files.\n\n",
             );
         } else {
             system_content.push_str(
                 "Every important claim must reference at least one file from Project Context. If evidence is missing, respond exactly: No tengo suficiente contexto.\n\n",
             );
+        }
+
+        match prompt_intent {
+            crate::intent_budget::QueryIntent::FileScoped => {
+                system_content.push_str(
+                    "The user asked about specific file-level changes. Provide concrete edits for the referenced files only, with short actionable bullets. Avoid generic recommendations.\n\n",
+                );
+            }
+            crate::intent_budget::QueryIntent::SymbolScoped => {
+                system_content.push_str(
+                    "The user asked about function/class-level details. Keep the answer tightly scoped to symbols found in context.\n\n",
+                );
+            }
+            _ => {}
         }
 
         if let Some(system_context_path) = &self.system_context_dir {
@@ -1352,6 +1479,23 @@ fn context_debug_enabled(runtime_config: &RuntimeConfig) -> bool {
         return v == "1" || v.eq_ignore_ascii_case("true");
     }
     runtime_config.context_debug
+}
+
+fn cached_hardware_caps() -> HardwareCaps {
+    static CAPS: OnceLock<HardwareCaps> = OnceLock::new();
+    *CAPS.get_or_init(|| {
+        let profile = HardwareProfile::detect();
+        profile.derive_caps()
+    })
+}
+
+fn model_class_rank(class: ModelClass) -> u8 {
+    match class {
+        ModelClass::Tiny => 0,
+        ModelClass::Small => 1,
+        ModelClass::Medium => 2,
+        ModelClass::Large => 3,
+    }
 }
 
 fn app_data_dir() -> Result<PathBuf, ChatRuntimeError> {

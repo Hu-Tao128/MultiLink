@@ -79,6 +79,19 @@ pub struct RuntimeConfig {
     pub context_project_top_k: usize,
     pub context_ollama_base_url: String,
     pub observability_json_logs: bool,
+    #[serde(default)]
+    pub execution_servers: Vec<ExecutionServerRuntime>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExecutionServerRuntime {
+    pub name: String,
+    pub base_url: String,
+    pub default_model: String,
+    pub priority: u8,
+    pub enabled: bool,
+    pub max_concurrency: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +200,20 @@ impl Default for RuntimeConfig {
             context_project_top_k: 8,
             context_ollama_base_url: "http://127.0.0.1:11434".to_string(),
             observability_json_logs: false,
+            execution_servers: Vec::new(),
+        }
+    }
+}
+
+impl Default for ExecutionServerRuntime {
+    fn default() -> Self {
+        Self {
+            name: "Local Ollama".to_string(),
+            base_url: "http://127.0.0.1:11434".to_string(),
+            default_model: "qwen2.5-coder:3b".to_string(),
+            priority: 1,
+            enabled: true,
+            max_concurrency: 1,
         }
     }
 }
@@ -443,6 +470,21 @@ impl AppConfig {
         if let Some(server) = self.primary_server() {
             self.runtime.context_ollama_base_url = server.base_url.clone();
         }
+        let mut execution_servers: Vec<ExecutionServerRuntime> = self
+            .servers
+            .iter()
+            .filter(|s| s.enabled && s.provider == ProviderKind::Ollama)
+            .map(|s| ExecutionServerRuntime {
+                name: s.name.clone(),
+                base_url: s.base_url.clone(),
+                default_model: s.default_model.clone(),
+                priority: s.priority,
+                enabled: s.enabled,
+                max_concurrency: 1,
+            })
+            .collect();
+        execution_servers.sort_by_key(|s| s.priority);
+        self.runtime.execution_servers = execution_servers;
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
