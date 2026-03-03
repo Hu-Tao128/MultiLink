@@ -57,6 +57,7 @@ The executable will be located in the `build/` directory (or `build/Release` on 
 *   **Encrypted Token Storage**: OAuth tokens are securely stored using AES-256-GCM encryption.
 *   **Model Management**: Registry for local model detection, size tracking, migration, and deletion.
 *   **Server Configuration UI**: Manage multiple Ollama servers from the Settings page and test connectivity directly from the app.
+*   **Remote Diagnostics**: If a server test fails, MultiLink surfaces actionable hints (bind/firewall/network) instead of generic errors.
 *   **Model-Aware Context Budgets**: Context budgets are adjusted dynamically using `/api/show` model metadata to improve small-model quality.
 *   **Execution Metrics**: Runtime emits structured generation metrics (tokens, latency, top-k, fallback usage).
 
@@ -91,6 +92,7 @@ Notes:
 
 - Legacy V1 config is migrated automatically to V2.
 - You can still override key values via environment variables for CI/dev workflows.
+- For remote/LAN/Tailscale troubleshooting, see `docs/network-troubleshooting.md`.
 
 ## 🎨 Architecture
 

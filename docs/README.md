@@ -8,6 +8,7 @@ This directory serves as the central repository for comprehensive documentation 
 *   **`providers.md`**: Provides an in-depth look at the LLM provider interface and the expected behavior of provider implementations. It covers the contracts, design principles, and guidelines for integrating new Large Language Model services.
 *   **`auth.md`**: Explains MultiLink's authentication and security model, specifically focusing on the OAuth flow, token management, and strategies for securing user credentials and sensitive data.
 *   **`roadmap.md`**: Outlines the project's implementation timeline, key milestones, and future development plans, giving an overview of where MultiLink is headed.
+*   **`network-troubleshooting.md`**: Practical guide for remote Ollama connectivity (LAN/Tailscale), including bind mode, UFW rules, and verification commands.
 
 ## 🤝 Contribution Guidelines
 
