@@ -1,107 +1,22 @@
 # MultiLink
 
-MultiLink is a Linux-first, truly cross-platform LLM desktop client with a native Qt/QML GUI and a reusable Rust core.
+MultiLink is a cross-platform desktop application for interacting with Large Language Models (LLMs). It uses a native Qt/QML GUI with a reusable Rust core focused on performance, stability, and clear architecture boundaries.
 
-## Current engineering priority
+## 🚀 Getting Started
 
-- Performance and runtime correctness are prioritized over interface polish.
-- The Rust core is treated as the product backbone; GUI changes should not regress stream stability, memory behavior, or context handling.
-- UI improvements are welcome when they preserve low overhead and keep logic in core.
-
-## Architecture decisions
-
-- Rust owns runtime concerns: streaming, session state, persistence, cancellation, and provider routing.
-- QML stays declarative: render state, send user intent, no networking or disk logic.
-- Qt shim (`gui/src/chatcontroller.*`) is intentionally thin and only adapts Rust JSON/FFI data into Qt-friendly properties/signals.
-- Build orchestration is done from CMake; GUI build triggers Rust backend build, then links static library.
-
-## Why Rust backend + Qt shim
-
-- Rust gives predictable async behavior (`tokio`) and safe core logic.
-- Qt provides native cross-platform GUI performance.
-- The shim pattern keeps QML simple while avoiding unstable type-bridge hacks for dynamic Qt collections.
-- Ownership remains in Rust; C++ only translates types and forwards calls/events.
-
-## Why this project
-
-- Native UX without Electron overhead.
-- Clear architecture boundaries for maintainability and interview-ready code.
-- Local-first workflow with Ollama and optional remote OAuth providers.
-
-## Architecture
-
-```text
-GUI (Qt/QML)
-  -> Qt shim (QObject adapter, no business logic)
-    -> Rust backend static lib (FFI)
-      -> Core (Rust)
-        -> providers/ + auth/ + model_manager/ + system/ + config/
-```
-
-Simple runtime flow:
-
-```text
-QML action -> ChatController shim -> Rust backend -> ChatRuntime -> Provider
-Provider stream -> ChatRuntime (throttle/persist) -> Rust callbacks -> Qt signals -> QML render
-```
-
-Detailed design: `docs/architecture.md`
-
-The core now owns streaming state and persistence through `ChatRuntime`.
-`StreamEvent` is emitted over an async channel (`tokio::sync::mpsc`) so UI layers only render and dispatch input.
-QML has no HTTP calls, no streaming parser, and no persistence logic.
-
-## Functional coverage
-
-- Provider routing with runtime switch and fallback to local provider.
-- Provider availability status API (`Available` / `NotAvailable`).
-- Ollama local provider with streaming support.
-- Context builder with bounded token budgets and project-context injection (per session) with defensive fallback when provider context windows are exceeded.
-- OAuth module for Gemini/Codex in core (browser + localhost callback + encrypted token store), pending end-to-end GUI wiring.
-- Model manager registry with local detection, size tracking, migration, and delete support.
-- Guided Ollama installation plan for Linux with explicit consent gating.
-
-## Current behavior notes (important for contributors)
-
-- Runtime classifies connection failures separately from prompt/content failures so provider health is not marked down for non-connectivity errors.
-- Ollama requests now include system prompts explicitly in `messages` for both sync and streaming paths.
-- Streaming parser in Ollama provider handles chunk boundaries safely (line-buffered JSON decode) to avoid partial-frame parse errors.
-- If a stream fails due to likely context overflow, runtime retries without project context before surfacing an error.
-- GUI supports selectable assistant text and copy actions (code block copy + full message copy) without moving clipboard logic into QML.
-- Project context support for models is in progress and intentionally conservative to reduce 500-class startup/send failures.
-
-## Project layout
-
-```text
-.
-├── core/
-│   ├── src/
-│   │   ├── providers/
-│   │   ├── auth/
-│   │   ├── model_manager/
-│   │   ├── system.rs
-│   │   └── config.rs
-│   └── tests/
-├── gui/
-│   ├── qml/
-│   ├── src/
-│   └── assets/
-├── docs/
-├── tests/
-└── config/
-```
-
-## Build
+Follow these steps to get MultiLink up and running on your local machine.
 
 ### Prerequisites
 
-- **Rust**: Stable toolchain (install via [rustup](https://rustup.rs/)).
-- **CMake**: Version 3.21 or higher.
-- **Qt 6**: (6.5+ recommended) with QML and Quick modules.
+Ensure you have the following installed:
 
-### Platform-Specific Dependencies
+*   **Rust**: A stable toolchain (install via [rustup](https://rustup.rs/)).
+*   **CMake**: Version 3.21 or higher.
+*   **Qt 6**: (6.5+ recommended) with `QML` and `Quick` modules.
 
-#### Linux (Ubuntu 24.04+)
+### Platform-Specific Setup
+
+#### Linux (e.g., Ubuntu 24.04+)
 ```bash
 sudo apt update
 sudo apt install -y qt6-base-dev qt6-declarative-dev cmake build-essential libgl1-mesa-dev libxkbcommon-dev
@@ -116,60 +31,175 @@ brew install qt cmake ninja
 Install via [Chocolatey](https://chocolatey.org/):
 ```bash
 choco install cmake ninja -y
-# Qt6 is best installed via the official online installer or 'install-qt-action' in CI.
+# For Qt6, use the official online installer or 'install-qt-action' in CI/CD.
 ```
 
-### Compilation
+### Building and Running
 
-The project uses a unified CMake build that orchestrates the Rust backend automatically.
+From the repository root, execute the following commands to build MultiLink:
 
 ```bash
-# From the repository root
+# Configure the build system (creates 'build' directory)
 cmake -S gui -B build -DCMAKE_BUILD_TYPE=Release
+
+# Compile the project
 cmake --build build --config Release
 ```
 
-The executable will be located in `build/` (or `build/Release` on Windows).
+The executable will be located in the `build/` directory (or `build/Release` on Windows). You can run it directly from there.
 
-## Security notes
+## 🌟 Features
 
-- OAuth tokens are encrypted at rest with AES-256-GCM in the core token store.
-- Config/token files are saved with restrictive permissions on Unix.
-- No privileged install command is run without explicit consent.
-- OAuth logic stays in Rust modules; QML does not handle secrets.
-- System keyring integration and PKCE hardening are planned next.
+*   **Cross-Platform Native UI**: Powered by Qt/QML for a fast and responsive desktop experience.
+*   **Robust Rust Core**: Handles streaming, session state, persistence, cancellation, and provider routing with high performance and memory safety.
+*   **Multiple LLM Providers**: Supports local providers like Ollama and is extensible for remote OAuth providers (e.g., Gemini, OpenAI Codex).
+*   **Context Management**: Intelligent context builder with bounded token budgets and project-context injection.
+*   **Encrypted Token Storage**: OAuth tokens are securely stored using AES-256-GCM encryption.
+*   **Model Management**: Registry for local model detection, size tracking, migration, and deletion.
+*   **Server Configuration UI**: Manage multiple Ollama servers from the Settings page and test connectivity directly from the app.
+*   **Model-Aware Context Budgets**: Context budgets are adjusted dynamically using `/api/show` model metadata to improve small-model quality.
+*   **Execution Metrics**: Runtime emits structured generation metrics (tokens, latency, top-k, fallback usage).
 
-## Performance notes
+## ⚙️ Configuration (V2)
 
-- Streaming UI updates are real-time.
-- During streaming responses, persistence is throttled by time (400 ms) inside the Rust runtime and always flushed on stream completion/error to reduce unnecessary CPU and write pressure.
-- Streaming cancellation is explicit and non-blocking through runtime-owned cancellation handles.
-- Session files are stored in platform data directories resolved via `directories::ProjectDirs`.
-- Context limits are intentionally capped below provider maximums to keep requests resilient under real project payloads.
+By default, MultiLink reads user config from:
 
-## Screenshots
+- `~/.config/multilink/multilink.toml`
 
-Place screenshots in `gui/assets/screenshots/` and reference them here.
+Current schema uses `version = 2` with `[[servers]]`:
 
-- Main chat view: `gui/assets/screenshots/main-chat.png`
-- Sessions and model selector: `gui/assets/screenshots/sessions-models.png`
-- Settings/auth view: `gui/assets/screenshots/settings-auth.png`
+```toml
+version = 2
 
-## Roadmap (8 weeks)
+[[servers]]
+name = "Local Ollama"
+provider = "ollama"
+base_url = "http://127.0.0.1:11434"
+default_model = "qwen2.5-coder:3b"
+priority = 1
+enabled = true
 
-1. Core skeleton and provider contract.
-2. Ollama provider + CLI verification.
-3. Streaming + config + session state machine.
-4. Qt/QML UI and Rust bridge.
-5. Chat UX and model/provider controls.
-6. Gemini/Codex OAuth and remote provider hardening.
-7. Packaging and install guides.
-8. Polish, docs, screenshots, demo script.
+[context]
+embeddings_enabled = true
+embed_model = "embeddinggemma"
+project_top_k = 8
+max_project_tokens = 2000
+debug = false
+```
 
-## Portfolio checklist
+Notes:
 
-- Works without terminal for end users.
-- Uses Ollama through HTTP API, not ad-hoc shell loops.
-- Manages model storage and migration.
-- Implements desktop-friendly OAuth.
-- Keeps core reusable and UI-agnostic.
+- Legacy V1 config is migrated automatically to V2.
+- You can still override key values via environment variables for CI/dev workflows.
+
+## 🎨 Architecture
+
+MultiLink's architecture is designed for clarity, maintainability, and performance:
+
+```text
+GUI (Qt/QML)
+  -> Qt Shim (C++ QObject adapter for Rust FFI, minimal business logic)
+    -> Rust Backend (Static Library via FFI)
+      -> Core (Rust)
+        -> modules: providers/, auth/, model_manager/, system/, config/
+```
+
+### Simplified Runtime Flow
+
+1.  **QML Action**: User interaction in the GUI triggers a signal.
+2.  **ChatController Shim**: The C++ shim (`gui/src/chatcontroller.*`) translates the QML signal into a Rust FFI call.
+3.  **Rust Backend**: The Rust core processes the request (e.g., interacts with an LLM provider).
+4.  **Provider Stream**: LLM responses are streamed back.
+5.  **ChatRuntime**: Rust runtime throttles/persists stream events.
+6.  **Rust Callbacks**: Processed data is sent back via Rust callbacks.
+7.  **Qt Signals**: The C++ shim converts Rust callbacks into Qt signals.
+8.  **QML Render**: The GUI updates in real-time.
+
+For a detailed design overview, refer to `docs/architecture.md`.
+
+## ⚙️ Development
+
+### Engineering Principles
+
+*   **Performance and Correctness First**: Prioritized over immediate interface polish.
+*   **Rust Core as Backbone**: Core logic for streaming, memory, and context handling resides in Rust.
+*   **Declarative QML**: UI layers focus on rendering state and dispatching user intent, without networking or disk logic.
+*   **Thin Qt Shim**: Minimizes C++ adapter logic, focusing solely on data adaptation between Rust FFI and Qt properties/signals.
+
+### Project Layout
+
+```text
+.
+├── core/             # Core Rust backend logic, LLM integrations, auth, config
+│   ├── src/
+│   │   ├── providers/    # Integrations with various LLM providers (Ollama, Gemini, etc.)
+│   │   ├── auth/         # Authentication mechanisms (OAuth, token storage)
+│   │   ├── model_manager/# Local LLM model discovery and management
+│   │   ├── system/       # System-level utilities and platform interactions
+│   │   └── config/       # Configuration handling
+│   └── tests/        # Unit and integration tests for the Rust core
+├── gui/              # Qt/QML graphical user interface
+│   ├── qml/          # QML files defining the UI
+│   ├── src/          # C++ source for the Qt shim and main application
+│   └── assets/       # Static assets like images and screenshots
+├── docs/             # Project documentation (architecture, roadmap, etc.)
+├── tests/            # High-level project tests (e.g., end-to-end if implemented)
+└── config/           # Default configuration files
+```
+
+### Running Tests
+
+To ensure code quality and correctness, run the tests:
+
+*   **Rust Core Tests**: Navigate to the `core/` directory and run:
+    ```bash
+    cargo test
+    ```
+*   **Rust GUI Backend Tests**: Navigate to `gui/rust/chat_controller/` and run:
+    ```bash
+    cargo test
+    ```
+
+*(Note: Ensure you have `cargo` installed via `rustup`.)*
+
+## 🔒 Security Considerations
+
+*   **Encrypted Data at Rest**: OAuth tokens are encrypted using AES-256-GCM.
+*   **Restrictive Permissions**: Configuration and token files are saved with appropriate, restrictive file permissions on Unix-like systems.
+*   **Consent-Gated Operations**: No privileged installation commands are executed without explicit user consent.
+*   **Separation of Concerns**: OAuth logic and secret handling are strictly confined to Rust modules; QML never directly handles sensitive information.
+*   **Future Enhancements**: Planned integration with system keyrings and PKCE hardening.
+
+## ⚡ Performance Optimizations
+
+*   **Real-time UI Updates**: Achieved through efficient streaming of UI events.
+*   **Throttled Persistence**: During LLM response streaming, data persistence is throttled (e.g., every 400ms) to reduce CPU and disk I/O, with a guaranteed flush on stream completion or error.
+*   **Non-blocking Cancellation**: Streaming operations can be explicitly and non-blockingly cancelled via runtime-owned handles.
+*   **Context Limits**: LLM context windows are intentionally capped below provider maximums to enhance request resilience, especially with large payloads.
+
+## 🖼️ Screenshots
+
+Screenshots provide a visual overview of MultiLink's interface. Please place actual screenshots in `gui/assets/screenshots/` and update these references.
+
+*   Main chat view: `gui/assets/screenshots/main-chat.png`
+*   Sessions and model selector: `gui/assets/screenshots/sessions-models.png`
+*   Settings/auth view: `gui/assets/screenshots/settings-auth.png`
+
+## 🗺️ Roadmap (8 weeks)
+
+1.  Core skeleton and provider contract establishment.
+2.  Ollama provider integration and CLI verification.
+3.  Development of streaming, configuration, and session state machine.
+4.  Initial Qt/QML UI implementation and Rust bridge development.
+5.  Refinement of chat UX and implementation of model/provider controls.
+6.  Hardening of Gemini/Codex OAuth and remote provider integrations.
+7.  Development of packaging and installation guides.
+8.  Final polish, comprehensive documentation, updated screenshots, and demo script creation.
+
+## ✅ Portfolio Checklist
+
+*   Provides a full-fledged desktop experience without relying on terminal interaction for end-users.
+*   Integrates with Ollama via its HTTP API, avoiding ad-hoc shell scripting.
+*   Features robust management of LLM model storage and migration.
+*   Implements desktop-friendly OAuth for seamless authentication.
+*   Maintains a reusable and UI-agnostic core for flexibility and future expansion.

@@ -1,16 +1,32 @@
-preferred_provider = "ollama"
+version = 2
 
-[ollama]
+[[servers]]
+name = "Local Ollama"
+provider = "ollama"
 base_url = "http://127.0.0.1:11434"
-default_model = "llama3.2"
-
-[gemini]
+default_model = "qwen2.5-coder:3b"
+priority = 1
 enabled = true
-timeout_secs = 20
 
-[codex]
-enabled = true
-timeout_secs = 20
+[context]
+embeddings_enabled = true
+embed_model = "embeddinggemma"
+project_top_k = 8
+max_project_tokens = 2000
+debug = false
+
+[performance]
+profile = "auto"
+max_parallel_streams = 4
+
+[network]
+allow_remote = false
+shared_secret = ""
+allowed_ips = []
+
+[ui]
+streaming = true
+json_logs = false
 
 [storage]
 models_dir = "~/.local/share/multilink/models"

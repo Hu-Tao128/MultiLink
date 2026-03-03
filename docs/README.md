@@ -1,14 +1,17 @@
-# Docs (`docs/`)
+# `docs/` - Project Documentation
 
-Project documentation for architecture and contributors.
+This directory serves as the central repository for comprehensive documentation related to the MultiLink project. It provides in-depth insights into the application's architecture, design decisions, specific module behaviors, security models, and future development plans. This documentation is invaluable for both new contributors seeking to understand the project and existing developers needing detailed references.
 
-## Files
+## 🗄️ Documentation Files
 
-- `architecture.md`: layered architecture and flow diagrams.
-- `providers.md`: provider interface and behavior.
-- `auth.md`: OAuth/token security model.
-- `roadmap.md`: implementation timeline and milestones.
+*   **`architecture.md`**: Delve into the core architectural design of MultiLink. This document details the layered structure, component interactions, and includes flow diagrams to visually explain how different parts of the application communicate and operate.
+*   **`providers.md`**: Provides an in-depth look at the LLM provider interface and the expected behavior of provider implementations. It covers the contracts, design principles, and guidelines for integrating new Large Language Model services.
+*   **`auth.md`**: Explains MultiLink's authentication and security model, specifically focusing on the OAuth flow, token management, and strategies for securing user credentials and sensitive data.
+*   **`roadmap.md`**: Outlines the project's implementation timeline, key milestones, and future development plans, giving an overview of where MultiLink is headed.
 
-## Contributor tip
+## 🤝 Contribution Guidelines
 
-When changing architecture or contracts, update docs in the same PR.
+When making changes that affect the architectural design, core contracts, or significant features of MultiLink, it is crucial to:
+
+*   **Update Relevant Documentation**: Ensure that all related documentation files within this `docs/` directory are updated in the same Pull Request. This practice helps maintain consistency and ensures that the documentation accurately reflects the current state of the codebase.
+*   **Clarity and Detail**: Strive for clarity, accuracy, and sufficient detail in your documentation updates, making it easy for other contributors to understand the changes and their implications.
