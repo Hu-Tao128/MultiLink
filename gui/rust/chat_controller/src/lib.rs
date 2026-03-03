@@ -72,6 +72,7 @@ struct ServerTestResult {
     model_count: usize,
     models: Vec<String>,
     error: String,
+    hint: String,
 }
 
 pub struct BackendHandle {
@@ -666,6 +667,19 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
     if url.is_empty() {
         return into_c_string("{\"ok\":false,\"error\":\"empty base_url\"}".to_string());
     }
+    if base_url_is_wildcard(&url) {
+        let result = ServerTestResult {
+            ok: false,
+            model_count: 0,
+            models: Vec::new(),
+            error: "0.0.0.0 no es una direccion de destino valida para cliente".to_string(),
+            hint: "Usa la IP real del servidor (ej. 192.168.x.x o 100.x.x.x) o http://127.0.0.1:11434 si es esta misma maquina.".to_string(),
+        };
+        return into_c_string(
+            serde_json::to_string(&result)
+                .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialization failed\"}".to_string()),
+        );
+    }
 
     let result = backend.runtime.block_on(async move {
         let client = reqwest::Client::builder()
@@ -678,6 +692,7 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
                 model_count: 0,
                 models: Vec::new(),
                 error: "failed to create HTTP client".to_string(),
+                hint: String::new(),
             };
         };
 
@@ -685,11 +700,13 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
         let response = match client.get(endpoint).send().await {
             Ok(v) => v,
             Err(err) => {
+                let err_text = err.to_string();
                 return ServerTestResult {
                     ok: false,
                     model_count: 0,
                     models: Vec::new(),
-                    error: err.to_string(),
+                    error: err_text.clone(),
+                    hint: connection_hint_for_error(&url, &err_text),
                 }
             }
         };
@@ -700,6 +717,7 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
                 model_count: 0,
                 models: Vec::new(),
                 error: format!("http status {}", response.status()),
+                hint: String::new(),
             };
         }
 
@@ -711,6 +729,7 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
                     model_count: 0,
                     models: Vec::new(),
                     error: format!("invalid response: {}", err),
+                    hint: String::new(),
                 }
             }
         };
@@ -721,6 +740,7 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
             model_count: models.len(),
             models,
             error: String::new(),
+            hint: String::new(),
         }
     });
 
@@ -1183,6 +1203,40 @@ fn normalize_base_url(input: &str) -> String {
         return trimmed.to_string();
     }
     format!("http://{}", trimmed)
+}
+
+fn base_url_is_wildcard(url: &str) -> bool {
+    if let Ok(parsed) = reqwest::Url::parse(url) {
+        if let Some(host) = parsed.host_str() {
+            return host == "0.0.0.0" || host == "::";
+        }
+    }
+    false
+}
+
+fn connection_hint_for_error(url: &str, err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|v| v.to_string()))
+        .unwrap_or_else(|| "<server-ip>".to_string());
+
+    if lower.contains("connection refused") {
+        return format!(
+            "El host responde, pero Ollama no escucha en 11434. En el servidor ejecuta:\n1) OLLAMA_HOST=0.0.0.0:11434 ollama serve\n2) sudo systemctl edit ollama (agrega Environment=\"OLLAMA_HOST=0.0.0.0:11434\")\n3) sudo systemctl daemon-reload && sudo systemctl restart ollama\n4) sudo ss -tlnp | grep 11434\n5) sudo ufw allow from 192.168.0.0/24 to any port 11434 proto tcp\n6) sudo ufw allow from 100.64.0.0/10 to any port 11434 proto tcp\n7) desde cliente: curl http://{}:11434/api/tags",
+            host
+        );
+    }
+
+    if lower.contains("timed out") || lower.contains("operation timed out") {
+        return "Timeout de red: probable firewall/ruta. Revisa UFW/iptables y que el puerto 11434 este abierto para tu LAN/Tailscale.".to_string();
+    }
+
+    if lower.contains("dns") || lower.contains("name or service not known") {
+        return "No se pudo resolver el host. Usa IP directa (ej. 192.168.x.x:11434 o 100.x.x.x:11434).".to_string();
+    }
+
+    String::new()
 }
 
 fn resolve_active_base_url_from_path(config_path: &PathBuf, fallback: &str) -> String {

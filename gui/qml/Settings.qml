@@ -164,14 +164,14 @@ Page {
                                 text: "Probar conexion"
                                 onClicked: {
                                     const raw = controller.testServerConnection(model.base_url)
-                                    let parsed = { ok: false, model_count: 0, error: "respuesta invalida" }
+                                    let parsed = { ok: false, model_count: 0, error: "respuesta invalida", hint: "" }
                                     try {
                                         parsed = JSON.parse(raw)
                                     } catch (e) {
                                     }
                                     const text = parsed.ok
                                         ? ("OK - modelos detectados: " + parsed.model_count)
-                                        : ("Error: " + parsed.error)
+                                        : ("Error: " + parsed.error + (parsed.hint && parsed.hint.length > 0 ? "\n\nSugerencia:\n" + parsed.hint : ""))
                                     serversModel.setProperty(index, "test_result", text)
                                 }
                             }
