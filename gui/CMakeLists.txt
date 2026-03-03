@@ -12,9 +12,7 @@ if(COMMAND qt_policy)
     if(DEFINED Qt6Core_VERSION AND Qt6Core_VERSION VERSION_GREATER_EQUAL "6.5")
         qt_policy(SET QTP0001 NEW)
     endif()
-    if(DEFINED Qt6Core_VERSION AND Qt6Core_VERSION VERSION_GREATER_EQUAL "6.6")
-        qt_policy(SET QTP0004 NEW)
-    endif()
+    #    qt_policy(SET QTP0004 NEW)
 endif()
 
 add_custom_target(chat_controller_rust

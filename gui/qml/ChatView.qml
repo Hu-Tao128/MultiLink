@@ -225,6 +225,9 @@ Page {
 
     Component.onCompleted: {
         hydrateCurrentSession()
+        if (controller && controller.startupNotice.length > 0) {
+            configErrorDialog.open()
+        }
     }
 
     onVisibleChanged: {
@@ -255,6 +258,25 @@ Page {
         }
         onRejected: {
             pendingDeleteSessionId = ""
+        }
+    }
+
+    MessageDialog {
+        id: configErrorDialog
+        title: "Error de configuracion"
+        text: controller ? controller.startupNotice : ""
+        buttons: MessageDialog.Ok
+        onAccepted: {
+            if (controller) controller.clearStartupNotice()
+        }
+    }
+
+    Connections {
+        target: controller
+        function onStartupNoticeChanged() {
+            if (controller && controller.startupNotice.length > 0) {
+                configErrorDialog.open()
+            }
         }
     }
 

@@ -42,6 +42,11 @@ char *chat_backend_get_active_model(void *backend);
 char *chat_backend_get_provider_scope(void *backend);
 char *chat_backend_get_provider_health(void *backend);
 bool chat_backend_get_is_loading(void *backend);
+char *chat_backend_get_startup_notice(void *backend);
+void chat_backend_clear_startup_notice(void *backend);
+char *chat_backend_servers_config_json(void *backend);
+bool chat_backend_save_servers_config_json(void *backend, const char *servers_json);
+char *chat_backend_test_server_connection(void *backend, const char *base_url);
 void chat_backend_string_free(char *ptr);
 }
 
@@ -153,6 +158,11 @@ ChatController::ChatController(QObject *parent)
     m_backend = chat_backend_create(callbacks, this);
     refreshSnapshot();
     refreshCollections();
+    const QString startupNotice = takeRustString(chat_backend_get_startup_notice(m_backend));
+    if (!startupNotice.trimmed().isEmpty()) {
+        m_startupNotice = startupNotice;
+        emit startupNoticeChanged();
+    }
 }
 
 ChatController::~ChatController() {
@@ -170,6 +180,7 @@ bool ChatController::isLoading() const { return m_isLoading; }
 QString ChatController::selectedSessionId() const { return m_selectedSessionId; }
 QString ChatController::streamingSessionId() const { return m_streamingSessionId; }
 QString ChatController::selectedProjectRoot() const { return m_selectedProjectRoot; }
+QString ChatController::startupNotice() const { return m_startupNotice; }
 QVariantList ChatController::sessions() const { return m_sessions; }
 QVariantList ChatController::availableModelsDetailed() const { return m_models; }
 
@@ -398,6 +409,43 @@ void ChatController::copyText(const QString &text) {
     if (auto *clipboard = QGuiApplication::clipboard()) {
         clipboard->setText(text);
     }
+}
+
+void ChatController::clearStartupNotice() {
+    if (!m_backend || m_startupNotice.isEmpty()) {
+        return;
+    }
+    m_startupNotice.clear();
+    chat_backend_clear_startup_notice(m_backend);
+    emit startupNoticeChanged();
+}
+
+QString ChatController::serversConfigJson() {
+    if (!m_backend) {
+        return "[]";
+    }
+    return takeRustString(chat_backend_servers_config_json(m_backend));
+}
+
+bool ChatController::saveServersConfigJson(const QString &json) {
+    if (!m_backend) {
+        return false;
+    }
+    const QByteArray encoded = json.toUtf8();
+    const bool ok = chat_backend_save_servers_config_json(m_backend, encoded.constData());
+    if (ok) {
+        refreshSnapshot();
+        requestModels();
+    }
+    return ok;
+}
+
+QString ChatController::testServerConnection(const QString &baseUrl) {
+    if (!m_backend) {
+        return QStringLiteral("{\"ok\":false,\"error\":\"backend unavailable\"}");
+    }
+    const QByteArray encoded = baseUrl.toUtf8();
+    return takeRustString(chat_backend_test_server_connection(m_backend, encoded.constData()));
 }
 
 

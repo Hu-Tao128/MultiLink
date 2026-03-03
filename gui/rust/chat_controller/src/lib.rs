@@ -1,10 +1,14 @@
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use multilink_core::config::ServerConfig;
 use multilink_core::providers::ollama::OllamaProvider;
-use multilink_core::{AppConfig, ChatRuntime, ProviderId, ProviderRouter, StreamEvent};
+use multilink_core::{
+    AppConfig, ChatRuntime, ProviderId, ProviderKind, ProviderRouter, StreamEvent,
+};
 use serde_json::json;
 use tokio::runtime::Runtime;
 
@@ -35,6 +39,7 @@ struct UiState {
     provider_scope: String,
     provider_health: String,
     is_loading: bool,
+    startup_notice: String,
 }
 
 impl Default for UiState {
@@ -45,6 +50,7 @@ impl Default for UiState {
             provider_scope: "LOCAL".to_string(),
             provider_health: "unavailable".to_string(),
             is_loading: false,
+            startup_notice: String::new(),
         }
     }
 }
@@ -60,6 +66,14 @@ struct OllamaModelInfo {
     size: Option<u64>,
 }
 
+#[derive(serde::Serialize)]
+struct ServerTestResult {
+    ok: bool,
+    model_count: usize,
+    models: Vec<String>,
+    error: String,
+}
+
 pub struct BackendHandle {
     runtime: Runtime,
     chat_runtime: Arc<ChatRuntime>,
@@ -67,6 +81,8 @@ pub struct BackendHandle {
     callback_ctx: usize,
     active_session_id: Arc<Mutex<String>>,
     ui_state: Arc<Mutex<UiState>>,
+    ollama_base_url: String,
+    config_path: PathBuf,
 }
 
 #[unsafe(no_mangle)]
@@ -80,16 +96,25 @@ pub extern "C" fn chat_backend_create(
     };
 
     let config_path = AppConfig::default_user_config_path();
-    let config = runtime
-        .block_on(AppConfig::load_or_create(&config_path))
-        .unwrap_or_default();
+    let (config, startup_notice) = load_config_with_recovery(&runtime, &config_path);
 
-    std::env::set_var("MULTILINK_OLLAMA_BASE_URL", config.ollama.base_url.clone());
+    let mut selected_server = config
+        .primary_server()
+        .cloned()
+        .unwrap_or_else(|| multilink_core::config::ServerConfig {
+            name: "Local Ollama".to_string(),
+            provider: ProviderKind::Ollama,
+            base_url: "http://127.0.0.1:11434".to_string(),
+            default_model: "qwen2.5-coder:3b".to_string(),
+            priority: 1,
+            enabled: true,
+        });
+    selected_server.base_url = normalize_base_url(&selected_server.base_url);
 
     let mut router = ProviderRouter::new();
     router.register(Arc::new(OllamaProvider::new(
-        config.ollama.base_url.clone(),
-        config.ollama.default_model.clone(),
+        selected_server.base_url.clone(),
+        selected_server.default_model.clone(),
     )));
 
     let chat_runtime = Arc::new(
@@ -120,23 +145,32 @@ pub extern "C" fn chat_backend_create(
         }
 
         chat_runtime
-            .create_session(ProviderId::Ollama, Some(config.ollama.default_model.clone()))
+            .create_session(ProviderId::Ollama, Some(selected_server.default_model.clone()))
             .await
     });
 
     let active_model = runtime.block_on(async {
         let sessions = chat_runtime.list_sessions().await;
         if let Some(session) = sessions.iter().find(|s| s.id == active_session_id) {
-            return session
+            let model = session
                 .model
                 .clone()
-                .unwrap_or_else(|| config.ollama.default_model.clone());
+                .unwrap_or_else(|| selected_server.default_model.clone());
+            if is_embedding_like_model(&model) {
+                let fallback = selected_server.default_model.clone();
+                let _ = chat_runtime
+                    .update_session_model(&active_session_id, Some(fallback.clone()))
+                    .await;
+                return fallback;
+            }
+            return model;
         }
-        config.ollama.default_model.clone()
+        selected_server.default_model.clone()
     });
 
     let ui = UiState {
         active_model,
+        startup_notice,
         ..UiState::default()
     };
 
@@ -147,6 +181,8 @@ pub extern "C" fn chat_backend_create(
         callback_ctx: callback_ctx as usize,
         active_session_id: Arc::new(Mutex::new(active_session_id)),
         ui_state: Arc::new(Mutex::new(ui)),
+        ollama_base_url: selected_server.base_url,
+        config_path,
     }))
 }
 
@@ -423,12 +459,29 @@ pub unsafe extern "C" fn chat_backend_select_session(
         return;
     };
     let id = id_cstr.to_string_lossy().to_string();
+    let fallback_model = backend
+        .ui_state
+        .lock()
+        .ok()
+        .map(|ui| ui.active_model.clone())
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "llama3.2".to_string());
     let runtime = backend.runtime.handle().clone();
     let chat_runtime = backend.chat_runtime.clone();
     let active_session_id = backend.active_session_id.clone();
 
     runtime.spawn(async move {
         if chat_runtime.select_session(&id).await.is_ok() {
+            let sessions = chat_runtime.list_sessions().await;
+            if let Some(session) = sessions.iter().find(|s| s.id == id) {
+                if let Some(model) = session.model.as_ref() {
+                    if is_embedding_like_model(model) {
+                        let _ = chat_runtime
+                            .update_session_model(&id, Some(fallback_model.clone()))
+                            .await;
+                    }
+                }
+            }
             if let Ok(mut active) = active_session_id.lock() {
                 *active = id;
             }
@@ -448,6 +501,9 @@ pub unsafe extern "C" fn chat_backend_select_model(
         return;
     };
     let value = model_cstr.to_string_lossy().to_string();
+    if is_embedding_like_model(&value) {
+        return;
+    }
     let active_session = backend
         .active_session_id
         .lock()
@@ -531,8 +587,144 @@ pub unsafe extern "C" fn chat_backend_models_json(handle: *mut BackendHandle) ->
 
     let payload = backend
         .runtime
-        .block_on(async { build_models_json().await });
+        .block_on(async {
+            let base_url = resolve_active_base_url_from_path(
+                &backend.config_path,
+                &backend.ollama_base_url,
+            );
+            build_models_json(&backend.config_path, &base_url).await
+        });
     into_c_string(payload)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_servers_config_json(
+    handle: *mut BackendHandle,
+) -> *mut c_char {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return into_c_string("[]".to_string());
+    };
+
+    let payload = backend.runtime.block_on(async {
+        match AppConfig::load_or_create(&backend.config_path).await {
+            Ok(cfg) => serde_json::to_string(&cfg.servers).unwrap_or_else(|_| "[]".to_string()),
+            Err(_) => "[]".to_string(),
+        }
+    });
+
+    into_c_string(payload)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_save_servers_config_json(
+    handle: *mut BackendHandle,
+    servers_json: *const c_char,
+) -> bool {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return false;
+    };
+    let Some(raw) = (!servers_json.is_null()).then(|| unsafe { CStr::from_ptr(servers_json) })
+    else {
+        return false;
+    };
+    let payload = raw.to_string_lossy().to_string();
+    let parsed: Vec<ServerConfig> = match serde_json::from_str(&payload) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let mut parsed = parsed;
+    for server in &mut parsed {
+        server.base_url = normalize_base_url(&server.base_url);
+    }
+
+    backend.runtime.block_on(async {
+        let mut cfg = match AppConfig::load_or_create(&backend.config_path).await {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        cfg.servers = parsed;
+        let content = match toml::to_string_pretty(&cfg) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        std::fs::write(&backend.config_path, content).is_ok()
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_test_server_connection(
+    handle: *mut BackendHandle,
+    base_url: *const c_char,
+) -> *mut c_char {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return into_c_string("{\"ok\":false,\"error\":\"backend unavailable\"}".to_string());
+    };
+    let Some(raw) = (!base_url.is_null()).then(|| unsafe { CStr::from_ptr(base_url) }) else {
+        return into_c_string("{\"ok\":false,\"error\":\"missing base_url\"}".to_string());
+    };
+    let url = normalize_base_url(raw.to_string_lossy().as_ref());
+    if url.is_empty() {
+        return into_c_string("{\"ok\":false,\"error\":\"empty base_url\"}".to_string());
+    }
+
+    let result = backend.runtime.block_on(async move {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(10))
+            .build();
+        let Ok(client) = client else {
+            return ServerTestResult {
+                ok: false,
+                model_count: 0,
+                models: Vec::new(),
+                error: "failed to create HTTP client".to_string(),
+            };
+        };
+
+        let endpoint = format!("{}/api/tags", url);
+        let response = match client.get(endpoint).send().await {
+            Ok(v) => v,
+            Err(err) => {
+                return ServerTestResult {
+                    ok: false,
+                    model_count: 0,
+                    models: Vec::new(),
+                    error: err.to_string(),
+                }
+            }
+        };
+
+        if !response.status().is_success() {
+            return ServerTestResult {
+                ok: false,
+                model_count: 0,
+                models: Vec::new(),
+                error: format!("http status {}", response.status()),
+            };
+        }
+
+        let tags = match response.json::<OllamaTagsResponse>().await {
+            Ok(v) => v,
+            Err(err) => {
+                return ServerTestResult {
+                    ok: false,
+                    model_count: 0,
+                    models: Vec::new(),
+                    error: format!("invalid response: {}", err),
+                }
+            }
+        };
+
+        let models: Vec<String> = tags.models.into_iter().map(|m| m.name).collect();
+        ServerTestResult {
+            ok: true,
+            model_count: models.len(),
+            models,
+            error: String::new(),
+        }
+    });
+
+    into_c_string(serde_json::to_string(&result).unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialization failed\"}".to_string()))
 }
 
 #[unsafe(no_mangle)]
@@ -561,9 +753,12 @@ pub unsafe extern "C" fn chat_backend_request_models(handle: *mut BackendHandle)
     let runtime = backend.runtime.handle().clone();
     let callbacks = backend.callbacks;
     let ctx = backend.callback_ctx;
+    let config_path = backend.config_path.clone();
+    let fallback_base_url = backend.ollama_base_url.clone();
 
     runtime.spawn(async move {
-        let payload = build_models_json().await;
+        let base_url = resolve_active_base_url_from_path(&config_path, &fallback_base_url);
+        let payload = build_models_json(&config_path, &base_url).await;
         emit_string(callbacks.on_models_updated, ctx as *mut c_void, &payload);
     });
 }
@@ -661,6 +856,31 @@ pub unsafe extern "C" fn chat_backend_get_is_loading(handle: *mut BackendHandle)
         .lock()
         .map(|s| s.is_loading)
         .unwrap_or(false)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_get_startup_notice(
+    handle: *mut BackendHandle,
+) -> *mut c_char {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    let value = backend
+        .ui_state
+        .lock()
+        .map(|s| s.startup_notice.clone())
+        .unwrap_or_default();
+    into_c_string(value)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_clear_startup_notice(handle: *mut BackendHandle) {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return;
+    };
+    if let Ok(mut state) = backend.ui_state.lock() {
+        state.startup_notice.clear();
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -815,25 +1035,64 @@ async fn build_sessions_json(chat_runtime: &ChatRuntime) -> String {
     serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string())
 }
 
-async fn build_models_json() -> String {
+async fn build_models_json(config_path: &PathBuf, fallback_base_url: &str) -> String {
+    let mut servers = load_enabled_ollama_servers(config_path);
+    if servers.is_empty() {
+        servers.push(("Primary".to_string(), normalize_base_url(fallback_base_url)));
+    }
+
+    let mut rows = Vec::new();
+    for (server_name, base_url) in servers {
+        let models = fetch_models_for_server(&server_name, &base_url).await;
+        rows.extend(models);
+    }
+
+    serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn load_enabled_ollama_servers(config_path: &PathBuf) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Ok(raw) = std::fs::read_to_string(config_path) {
+        if let Ok(cfg) = toml::from_str::<AppConfig>(&raw) {
+            let mut servers = cfg
+                .servers
+                .into_iter()
+                .filter(|s| s.enabled && s.provider == ProviderKind::Ollama)
+                .collect::<Vec<_>>();
+            servers.sort_by_key(|s| s.priority);
+            for server in servers {
+                out.push((server.name, normalize_base_url(&server.base_url)));
+            }
+        }
+    }
+    out
+}
+
+async fn fetch_models_for_server(server_name: &str, base_url: &str) -> Vec<serde_json::Value> {
+    let base_url = normalize_base_url(base_url);
     let client = reqwest::Client::new();
-    let response = match client.get("http://127.0.0.1:11434/api/tags").send().await {
+    let response = match client
+        .get(format!("{}/api/tags", base_url.trim_end_matches('/')))
+        .send()
+        .await
+    {
         Ok(res) => res,
-        Err(_) => return "[]".to_string(),
+        Err(_) => return Vec::new(),
     };
 
     if !response.status().is_success() {
-        return "[]".to_string();
+        return Vec::new();
     }
 
     let tags = match response.json::<OllamaTagsResponse>().await {
         Ok(t) => t,
-        Err(_) => return "[]".to_string(),
+        Err(_) => return Vec::new(),
     };
 
-    let rows: Vec<_> = tags
+    tags
         .models
         .into_iter()
+        .filter(|m| !is_embedding_like_model(&m.name))
         .map(|m| {
             let size_bytes = m.size.unwrap_or(0);
             let size_label = if size_bytes > 0 {
@@ -842,15 +1101,15 @@ async fn build_models_json() -> String {
                 "size unknown".to_string()
             };
             json!({
-                "provider": "ollama",
+                "provider": format!("ollama@{}", server_name),
                 "name": m.name,
-                "label": format!("{} ({})", m.name, size_label),
+                "label": format!("{} ({}) [{}]", m.name, size_label, server_name),
+                "serverName": server_name,
+                "serverUrl": base_url,
                 "sizeBytes": size_bytes,
             })
         })
-        .collect();
-
-    serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
+        .collect()
 }
 
 async fn build_messages_json(chat_runtime: &ChatRuntime, session_id: &str) -> String {
@@ -910,6 +1169,86 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn is_embedding_like_model(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("embed") || lower.contains("embedding")
+}
+
+fn normalize_base_url(input: &str) -> String {
+    let trimmed = input.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+    format!("http://{}", trimmed)
+}
+
+fn resolve_active_base_url_from_path(config_path: &PathBuf, fallback: &str) -> String {
+    if let Ok(cfg) = std::fs::read_to_string(config_path) {
+        if let Ok(app) = toml::from_str::<AppConfig>(&cfg) {
+            if let Some(server) = app.primary_server() {
+                let normalized = normalize_base_url(&server.base_url);
+                if !normalized.is_empty() {
+                    return normalized;
+                }
+            }
+        }
+    }
+    normalize_base_url(fallback)
+}
+
+fn load_config_with_recovery(runtime: &Runtime, config_path: &PathBuf) -> (AppConfig, String) {
+    match runtime.block_on(AppConfig::load_or_create(config_path)) {
+        Ok(cfg) => (cfg, String::new()),
+        Err(err) => {
+            let backup_path = backup_invalid_config(config_path).ok();
+            let default_cfg = AppConfig::default();
+            if let Some(parent) = config_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(body) = toml::to_string_pretty(&default_cfg) {
+                let _ = std::fs::write(config_path, body);
+            }
+
+            let mut notice = format!(
+                "Tu archivo de configuracion tiene un error. Se restauro la configuracion por defecto.\n\nArchivo: {}\nError: {}",
+                config_path.display(),
+                err
+            );
+            if let Some(backup) = backup_path {
+                notice.push_str(&format!("\nRespaldo: {}", backup.display()));
+            }
+
+            match runtime.block_on(AppConfig::load_or_create(config_path)) {
+                Ok(cfg) => (cfg, notice),
+                Err(_) => (default_cfg, notice),
+            }
+        }
+    }
+}
+
+fn backup_invalid_config(config_path: &PathBuf) -> Result<PathBuf, std::io::Error> {
+    if !config_path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "config does not exist",
+        ));
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let backup_name = format!("multilink.invalid-{}.toml", stamp);
+    let backup = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(backup_name);
+    std::fs::rename(config_path, &backup)?;
+    Ok(backup)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,6 +1260,7 @@ mod tests {
             on_stream_chunk: None,
             on_stream_finished: None,
             on_stream_error: None,
+            on_token_usage: None,
             on_sessions_updated: None,
             on_models_updated: None,
             on_messages_updated: None,

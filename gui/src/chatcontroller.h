@@ -13,6 +13,7 @@ class ChatController : public QObject {
     Q_PROPERTY(QString selectedSessionId READ selectedSessionId NOTIFY selectedSessionIdChanged)
     Q_PROPERTY(QString streamingSessionId READ streamingSessionId NOTIFY streamingSessionIdChanged)
     Q_PROPERTY(QString selectedProjectRoot READ selectedProjectRoot NOTIFY selectedProjectRootChanged)
+    Q_PROPERTY(QString startupNotice READ startupNotice NOTIFY startupNoticeChanged)
     Q_PROPERTY(QVariantList sessions READ sessions NOTIFY sessionsChanged)
     Q_PROPERTY(QVariantList availableModelsDetailed READ availableModelsDetailed NOTIFY modelsChanged)
 
@@ -28,6 +29,7 @@ public:
     QString selectedSessionId() const;
     QString streamingSessionId() const;
     QString selectedProjectRoot() const;
+    QString startupNotice() const;
     QVariantList sessions() const;
     QVariantList availableModelsDetailed() const;
 
@@ -46,6 +48,10 @@ public:
     Q_INVOKABLE void setSessionProjectRoot(const QString &sessionId, const QString &projectRoot);
     Q_INVOKABLE void setSelectedSessionProjectRoot(const QString &projectRoot);
     Q_INVOKABLE void copyText(const QString &text);
+    Q_INVOKABLE void clearStartupNotice();
+    Q_INVOKABLE QString serversConfigJson();
+    Q_INVOKABLE bool saveServersConfigJson(const QString &json);
+    Q_INVOKABLE QString testServerConnection(const QString &baseUrl);
 
     void refreshSnapshot();
     void refreshCollections();
@@ -70,6 +76,7 @@ signals:
     void selectedSessionIdChanged();
     void streamingSessionIdChanged();
     void selectedProjectRootChanged();
+    void startupNoticeChanged();
     void sessionsChanged();
     void modelsChanged();
     void messagesHydrated(const QVariantList &messages);
@@ -86,6 +93,7 @@ private:
     QString m_selectedSessionId;
     QString m_streamingSessionId;
     QString m_selectedProjectRoot;
+    QString m_startupNotice;
     QVariantList m_sessions;
     QVariantList m_models;
 };
