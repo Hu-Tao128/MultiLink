@@ -135,6 +135,14 @@ pub struct ProviderCapabilities {
     pub fim: bool,
     pub vision: bool,
     pub max_context_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameter_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantization_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_length: Option<usize>,
+    #[serde(default)]
+    pub capability_tags: Vec<String>,
 }
 
 impl ProviderCapabilities {
@@ -145,6 +153,10 @@ impl ProviderCapabilities {
             fim: false,
             vision: false,
             max_context_tokens: context_tokens,
+            parameter_count: None,
+            quantization_level: None,
+            embedding_length: None,
+            capability_tags: Vec::new(),
         }
     }
 }

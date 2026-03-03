@@ -3,6 +3,8 @@ pub mod chat_runtime;
 pub mod config;
 pub mod context_retrieval;
 pub mod model_manager;
+pub mod model_profile;
+pub mod observability;
 pub mod providers;
 pub mod router;
 pub mod session;
@@ -10,8 +12,10 @@ pub mod system;
 
 pub use auth::{AuthProvider, AuthService, OAuthConfig, OAuthFlow, StoredToken, TokenStore};
 pub use chat_runtime::{ChatRuntime, ChatRuntimeError, StreamEvent};
-pub use config::AppConfig;
+pub use config::{AppConfig, ProviderKind};
 pub use model_manager::{ModelInfo, ModelManager, ModelStatus, ProviderType};
+pub use model_profile::{ModelClass, ModelProfile, RetrievalBudget};
+pub use observability::ExecutionMetrics;
 pub use providers::{
     LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId,
     TokenEvent, TokenStream,

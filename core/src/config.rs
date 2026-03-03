@@ -3,36 +3,61 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::providers::ProviderId;
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppConfig {
-    pub preferred_provider: ProviderId,
-    pub ollama: OllamaConfig,
-    pub gemini: RemoteProviderConfig,
-    pub codex: RemoteProviderConfig,
-    pub storage: StorageConfig,
-    #[serde(default)]
-    pub runtime: RuntimeConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_context_dir: Option<PathBuf>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    Ollama,
+    Gemini,
+    Codex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OllamaConfig {
+pub struct ServerConfig {
+    pub name: String,
+    pub provider: ProviderKind,
     pub base_url: String,
     pub default_model: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteProviderConfig {
+    pub priority: u8,
     pub enabled: bool,
-    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     pub models_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextConfig {
+    pub embeddings_enabled: bool,
+    pub embed_model: String,
+    pub project_top_k: usize,
+    pub max_project_tokens: usize,
+    pub debug: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerformanceConfig {
+    pub profile: String,
+    pub max_parallel_streams: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkConfig {
+    pub allow_remote: bool,
+    pub shared_secret: String,
+    pub allowed_ips: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    pub streaming: bool,
+    pub json_logs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +74,11 @@ pub struct RuntimeConfig {
     pub max_parallel_streams: usize,
     pub profiles: RuntimeProfiles,
     pub context_embeddings_enabled: bool,
+    pub context_debug: bool,
+    pub context_embed_model: String,
+    pub context_project_top_k: usize,
+    pub context_ollama_base_url: String,
+    pub observability_json_logs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +101,43 @@ pub enum ModelTier {
     Small,
     Medium,
     Large,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    #[serde(default = "default_config_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub servers: Vec<ServerConfig>,
+    #[serde(default)]
+    pub context: ContextConfig,
+    #[serde(default)]
+    pub performance: PerformanceConfig,
+    #[serde(default)]
+    pub network: NetworkConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
+    pub storage: StorageConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_context_dir: Option<PathBuf>,
+
+    // legacy v1 fields, kept for migration only
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama: Option<LegacyOllamaConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegacyOllamaConfig {
+    pub base_url: String,
+    pub default_model: String,
+}
+
+fn default_config_version() -> u32 {
+    CURRENT_CONFIG_VERSION
 }
 
 impl Default for RuntimeProfiles {
@@ -115,6 +182,51 @@ impl Default for RuntimeConfig {
             max_parallel_streams: 4,
             profiles: RuntimeProfiles::default(),
             context_embeddings_enabled: true,
+            context_debug: false,
+            context_embed_model: "embeddinggemma".to_string(),
+            context_project_top_k: 8,
+            context_ollama_base_url: "http://127.0.0.1:11434".to_string(),
+            observability_json_logs: false,
+        }
+    }
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            embeddings_enabled: true,
+            embed_model: "embeddinggemma".to_string(),
+            project_top_k: 8,
+            max_project_tokens: 2000,
+            debug: false,
+        }
+    }
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            profile: "auto".to_string(),
+            max_parallel_streams: 4,
+        }
+    }
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            allow_remote: false,
+            shared_secret: String::new(),
+            allowed_ips: Vec::new(),
+        }
+    }
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            streaming: true,
+            json_logs: false,
         }
     }
 }
@@ -191,24 +303,26 @@ fn extract_model_size_billions(model: &str) -> Option<f32> {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            preferred_provider: ProviderId::Ollama,
-            ollama: OllamaConfig {
+            version: CURRENT_CONFIG_VERSION,
+            servers: vec![ServerConfig {
+                name: "Local Ollama".to_string(),
+                provider: ProviderKind::Ollama,
                 base_url: "http://127.0.0.1:11434".to_string(),
-                default_model: "llama3.2".to_string(),
-            },
-            gemini: RemoteProviderConfig {
+                default_model: "qwen2.5-coder:3b".to_string(),
+                priority: 1,
                 enabled: true,
-                timeout_secs: 20,
-            },
-            codex: RemoteProviderConfig {
-                enabled: true,
-                timeout_secs: 20,
-            },
+            }],
+            context: ContextConfig::default(),
+            performance: PerformanceConfig::default(),
+            network: NetworkConfig::default(),
+            ui: UiConfig::default(),
             storage: StorageConfig {
                 models_dir: "~/.local/share/multilink/models".to_string(),
             },
             runtime: RuntimeConfig::default(),
             system_context_dir: None,
+            preferred_provider: None,
+            ollama: None,
         }
     }
 }
@@ -218,7 +332,14 @@ impl AppConfig {
         if path.exists() {
             let content = fs::read_to_string(path).await?;
             let mut parsed = toml::from_str::<Self>(&content)?;
+            if parsed.migrate_to_current()? {
+                let rewritten = toml::to_string_pretty(&parsed)?;
+                fs::write(path, rewritten).await?;
+                restrict_permissions(path)?;
+            }
+            parsed.sync_runtime_from_sections();
             parsed.apply_env_overrides();
+            parsed.validate()?;
             return Ok(parsed);
         }
 
@@ -226,38 +347,60 @@ impl AppConfig {
             fs::create_dir_all(parent).await?;
         }
 
-        let default = Self::default();
+        let mut default = Self::default();
+        default.sync_runtime_from_sections();
         let content = toml::to_string_pretty(&default)?;
         fs::write(path, content).await?;
         restrict_permissions(path)?;
 
         let mut loaded = default;
         loaded.apply_env_overrides();
+        loaded.validate()?;
         Ok(loaded)
     }
 
     pub fn default_user_config_path() -> PathBuf {
         if let Some(config_dir) = dirs::config_dir() {
-            return config_dir.join("multilink").join("config.toml");
+            let folder = config_dir.join("multilink");
+            let preferred = folder.join("multilink.toml");
+            let legacy = folder.join("config.toml");
+            if preferred.exists() {
+                return preferred;
+            }
+            if legacy.exists() {
+                return legacy;
+            }
+            return preferred;
         }
         PathBuf::from("./config/default.toml")
     }
 
-    pub fn apply_env_overrides(&mut self) {
-        if let Ok(value) = std::env::var("MULTILINK_PROVIDER") {
-            self.preferred_provider = match value.to_ascii_lowercase().as_str() {
-                "gemini" => ProviderId::Gemini,
-                "codex" => ProviderId::Codex,
-                _ => ProviderId::Ollama,
-            };
-        }
+    pub fn primary_server(&self) -> Option<&ServerConfig> {
+        self.servers
+            .iter()
+            .filter(|s| s.enabled)
+            .min_by_key(|s| s.priority)
+    }
 
+    pub fn apply_env_overrides(&mut self) {
         if let Ok(value) = std::env::var("MULTILINK_OLLAMA_BASE_URL") {
-            self.ollama.base_url = value;
+            if let Some(server) = self
+                .servers
+                .iter_mut()
+                .find(|s| s.provider == ProviderKind::Ollama)
+            {
+                server.base_url = value;
+            }
         }
 
         if let Ok(value) = std::env::var("MULTILINK_OLLAMA_MODEL") {
-            self.ollama.default_model = value;
+            if let Some(server) = self
+                .servers
+                .iter_mut()
+                .find(|s| s.provider == ProviderKind::Ollama)
+            {
+                server.default_model = value;
+            }
         }
 
         if let Ok(value) = std::env::var("MULTILINK_MODELS_DIR") {
@@ -265,12 +408,134 @@ impl AppConfig {
         }
 
         if let Ok(value) = std::env::var("MULTILINK_CONTEXT_EMBEDDINGS") {
-            self.runtime.context_embeddings_enabled = value == "1" || value.eq_ignore_ascii_case("true");
+            self.context.embeddings_enabled = value == "1" || value.eq_ignore_ascii_case("true");
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_EMBED_MODEL") {
+            self.context.embed_model = value;
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_PROJECT_TOPK") {
+            if let Ok(parsed) = value.parse::<usize>() {
+                self.context.project_top_k = parsed.clamp(2, 24);
+            }
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_DEBUG_CONTEXT") {
+            self.context.debug = value == "1" || value.eq_ignore_ascii_case("true");
         }
 
         if let Ok(value) = std::env::var("MULTILINK_SYSTEM_CONTEXT_DIR") {
             self.system_context_dir = Some(PathBuf::from(value));
         }
+
+        self.sync_runtime_from_sections();
+    }
+
+    fn sync_runtime_from_sections(&mut self) {
+        self.runtime.context_embeddings_enabled = self.context.embeddings_enabled;
+        self.runtime.context_debug = self.context.debug;
+        self.runtime.context_embed_model = self.context.embed_model.clone();
+        self.runtime.context_project_top_k = self.context.project_top_k.clamp(2, 24);
+        self.runtime.max_project_context_tokens = self.context.max_project_tokens.max(512);
+        self.runtime.max_parallel_streams = self.performance.max_parallel_streams.max(1);
+        self.runtime.observability_json_logs = self.ui.json_logs;
+        if let Some(server) = self.primary_server() {
+            self.runtime.context_ollama_base_url = server.base_url.clone();
+        }
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.version != CURRENT_CONFIG_VERSION {
+            return Err(ConfigError::Invalid(format!(
+                "unsupported config version; expected {}",
+                CURRENT_CONFIG_VERSION
+            )));
+        }
+
+        if self.servers.is_empty() {
+            return Err(ConfigError::Invalid("at least one server is required".to_string()));
+        }
+
+        if !self.servers.iter().any(|s| s.enabled) {
+            return Err(ConfigError::Invalid("at least one server must be enabled".to_string()));
+        }
+
+        for server in &self.servers {
+            if server.name.trim().is_empty() {
+                return Err(ConfigError::Invalid("server.name cannot be empty".to_string()));
+            }
+            if !server.base_url.starts_with("http://") && !server.base_url.starts_with("https://") {
+                return Err(ConfigError::Invalid(format!(
+                    "server '{}' base_url must start with http:// or https://",
+                    server.name
+                )));
+            }
+            if server.default_model.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "server '{}' default_model cannot be empty",
+                    server.name
+                )));
+            }
+        }
+
+        if self.context.embeddings_enabled && self.context.embed_model.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "context.embed_model cannot be empty when embeddings are enabled".to_string(),
+            ));
+        }
+
+        if !(2..=24).contains(&self.context.project_top_k) {
+            return Err(ConfigError::Invalid(
+                "context.project_top_k must be in range 2..=24".to_string(),
+            ));
+        }
+
+        if self.performance.max_parallel_streams == 0 {
+            return Err(ConfigError::Invalid(
+                "performance.max_parallel_streams must be greater than zero".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn migrate_to_current(&mut self) -> Result<bool, ConfigError> {
+        if self.version > CURRENT_CONFIG_VERSION {
+            return Err(ConfigError::Invalid(format!(
+                "config version {} is newer than supported {}",
+                self.version, CURRENT_CONFIG_VERSION
+            )));
+        }
+
+        let mut changed = false;
+        if self.version < 2 {
+            let legacy_ollama = self
+                .ollama
+                .clone()
+                .unwrap_or(LegacyOllamaConfig {
+                    base_url: "http://127.0.0.1:11434".to_string(),
+                    default_model: "qwen2.5-coder:3b".to_string(),
+                });
+
+            if self.servers.is_empty() {
+                self.servers = vec![ServerConfig {
+                    name: "Local Ollama".to_string(),
+                    provider: ProviderKind::Ollama,
+                    base_url: legacy_ollama.base_url,
+                    default_model: legacy_ollama.default_model,
+                    priority: 1,
+                    enabled: true,
+                }];
+            }
+
+            self.version = 2;
+            self.preferred_provider = None;
+            self.ollama = None;
+            changed = true;
+        }
+
+        Ok(changed)
     }
 }
 
@@ -293,4 +558,6 @@ pub enum ConfigError {
     TomlDe(#[from] toml::de::Error),
     #[error("toml serialize error: {0}")]
     TomlSer(#[from] toml::ser::Error),
+    #[error("invalid config: {0}")]
+    Invalid(String),
 }

@@ -125,12 +125,20 @@ impl OllamaProvider {
                 m.keys().any(|k| k.contains("vision") || k.contains("mm."))
             });
 
+        let parameter_count = model_info.and_then(extract_parameter_count);
+        let quantization_level = model_info.and_then(extract_quantization_level);
+        let embedding_length = model_info.and_then(extract_embedding_length);
+
         ProviderCapabilities {
             chat: true,
             tools: supports_tools,
             fim: supports_fim,
             vision: supports_vision,
             max_context_tokens: context_length,
+            parameter_count,
+            quantization_level,
+            embedding_length,
+            capability_tags: capabilities_raw.to_vec(),
         }
     }
 
@@ -243,6 +251,29 @@ fn jitter_millis(max: u64) -> u64 {
         .map(|d: std::time::Duration| d.subsec_nanos() as u64)
         .unwrap_or(0);
     nanos % (max + 1)
+}
+
+fn extract_parameter_count(model_info: &HashMap<String, serde_json::Value>) -> Option<u64> {
+    model_info
+        .iter()
+        .find(|(k, _)| k.ends_with(".parameter_count"))
+        .and_then(|(_, v)| v.as_u64())
+}
+
+fn extract_quantization_level(model_info: &HashMap<String, serde_json::Value>) -> Option<String> {
+    model_info
+        .iter()
+        .find(|(k, _)| k.ends_with(".quantization_level"))
+        .and_then(|(_, v)| v.as_str())
+        .map(|v| v.to_string())
+}
+
+fn extract_embedding_length(model_info: &HashMap<String, serde_json::Value>) -> Option<usize> {
+    model_info
+        .iter()
+        .find(|(k, _)| k.ends_with(".embedding_length"))
+        .and_then(|(_, v)| v.as_u64())
+        .map(|v| v as usize)
 }
 
 fn is_transient_status(status: reqwest::StatusCode) -> bool {

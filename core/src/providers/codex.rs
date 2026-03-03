@@ -153,6 +153,10 @@ impl LLMProvider for CodexProvider {
             fim: true,
             vision: false,
             max_context_tokens: 128_000,
+            parameter_count: None,
+            quantization_level: None,
+            embedding_length: None,
+            capability_tags: Vec::new(),
         })
     }
 }

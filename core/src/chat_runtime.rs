@@ -14,7 +14,9 @@ use tokio::sync::{mpsc, watch, Mutex, RwLock, Semaphore};
 use walkdir::WalkDir;
 
 use crate::config::{ModelTier, RuntimeConfig};
-use crate::context_retrieval::build_relevant_project_context;
+use crate::context_retrieval::{build_relevant_project_context, RetrievalConfig};
+use crate::model_profile::{ModelClass, ModelProfile};
+use crate::observability::ExecutionMetrics;
 use crate::providers::{PromptOptions, ProviderId};
 use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
@@ -269,7 +271,7 @@ impl ChatRuntime {
         let cached_context = if let Some(root) = project_root.as_ref() {
             match build_project_context_for_root(root, context_config).await {
                 Ok(context) => {
-                    if context_debug_enabled() {
+                    if context_debug_enabled(&self.runtime_config) {
                         eprintln!(
                             "[context] session={} project_root_set files_context_tokens={}",
                             session_id,
@@ -328,12 +330,40 @@ impl ChatRuntime {
         self.maybe_summarize_session(session_id, provider, model.clone())
             .await;
 
-        let messages = self.build_messages(session_id, prompt.clone(), true).await?;
-        if context_debug_enabled() {
+        let mut effective_runtime = self.runtime_config.effective_for_model(model.as_deref());
+        let mut model_profile: Option<ModelProfile> = None;
+        if let Some(model_name) = model.as_ref() {
+            if let Ok(caps) = self.router.get_model_info(provider, model_name).await {
+                let profile = ModelProfile::from_capabilities(model_name.clone(), &caps);
+                let budget = profile.retrieval_budget();
+                effective_runtime.max_context_tokens = effective_runtime
+                    .max_context_tokens
+                    .min(budget.safe_budget.max(1024));
+                effective_runtime.max_project_context_tokens = effective_runtime
+                    .max_project_context_tokens
+                    .min(budget.project_budget.max(256));
+                effective_runtime.context_project_top_k = effective_runtime
+                    .context_project_top_k
+                    .min(budget.project_top_k.max(2));
+                model_profile = Some(profile);
+            }
+        }
+
+        let messages = self
+            .build_messages(
+                session_id,
+                prompt.clone(),
+                true,
+                &effective_runtime,
+                model_profile.as_ref(),
+            )
+            .await?;
+        let context_tokens: usize = messages.iter().map(|m| estimate_tokens(&m.content)).sum();
+        if context_debug_enabled(&self.runtime_config) {
             let context_tokens: usize = messages.iter().map(|m| estimate_tokens(&m.content)).sum();
             eprintln!(
                 "[context] session={} context_tokens={} max_tokens={} message_count={}",
-                session_id, context_tokens, self.runtime_config.max_context_tokens,
+                session_id, context_tokens, effective_runtime.max_context_tokens,
                 messages.len()
             );
         }
@@ -357,14 +387,24 @@ impl ChatRuntime {
             .stream_send(provider, prompt.clone(), options.clone())
             .await;
 
+        let mut fallback_retry_used = false;
         let stream = match stream_result {
             Ok(stream) => stream,
             Err(err) => {
                 let err_text = err.to_string();
                 eprintln!("[provider] stream error: {}", err_text);
                 if likely_context_overflow(&err_text) {
+                    fallback_retry_used = true;
                     eprintln!("[provider] retrying without project context (possible context overflow)");
-                    let fallback_messages = self.build_messages(session_id, prompt.clone(), false).await?;
+                    let fallback_messages = self
+                        .build_messages(
+                            session_id,
+                            prompt.clone(),
+                            false,
+                            &effective_runtime,
+                            model_profile.as_ref(),
+                        )
+                        .await?;
                     let fallback_options = PromptOptions {
                         model: options.model.clone(),
                         messages: Some(fallback_messages),
@@ -392,6 +432,16 @@ impl ChatRuntime {
         let storage_dir = self.storage_dir.clone();
         let cancellation = self.cancellation.clone();
         let session_id_owned = session_id.to_string();
+        let model_used = options
+            .model
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let metrics_server = effective_runtime.context_ollama_base_url.clone();
+        let metrics_top_k = effective_runtime.context_project_top_k;
+        let metrics_json = effective_runtime.observability_json_logs;
+        let metrics_context_tokens = context_tokens;
+        let started_at = Instant::now();
+        let retries: usize = if fallback_retry_used { 1 } else { 0 };
 
         tokio::spawn(async move {
             let _permit = stream_permit;
@@ -408,6 +458,8 @@ impl ChatRuntime {
             let mut full_output = String::new();
             let mut pending_emit = String::new();
             let mut last_emit = Instant::now();
+            let mut usage_prompt_tokens = 0usize;
+            let mut usage_completion_tokens = 0usize;
 
             loop {
                 tokio::select! {
@@ -445,6 +497,8 @@ impl ChatRuntime {
                                 break;
                             }
                             Some(Ok(crate::providers::TokenEvent::Usage(usage))) => {
+                                usage_prompt_tokens = usage.prompt_tokens;
+                                usage_completion_tokens = usage.completion_tokens;
                                 let _ = event_tx.send(StreamEvent::Usage {
                                     prompt_tokens: usage.prompt_tokens,
                                     completion_tokens: usage.completion_tokens,
@@ -478,6 +532,20 @@ impl ChatRuntime {
                     }
                 }
             }
+
+            let metrics = ExecutionMetrics {
+                timestamp_ms: ExecutionMetrics::now_timestamp_ms(),
+                model: model_used,
+                server: metrics_server,
+                tokens_in: usage_prompt_tokens,
+                tokens_out: usage_completion_tokens,
+                context_tokens: metrics_context_tokens,
+                top_k_applied: metrics_top_k,
+                latency_ms: started_at.elapsed().as_millis(),
+                fallback_used: fallback_retry_used,
+                retries,
+            };
+            metrics.emit(metrics_json);
 
             cancellation.lock().await.remove(&session_id_owned);
         });
@@ -611,7 +679,7 @@ impl ChatRuntime {
         let context = match build_project_context_for_root(&project_root, context_config).await {
             Ok(value) => value,
             Err(err) => {
-                if context_debug_enabled() {
+                if context_debug_enabled(&self.runtime_config) {
                     eprintln!(
                         "[context] session={} project_context=error error={}",
                         session_id, err
@@ -632,6 +700,8 @@ impl ChatRuntime {
         session_id: &str,
         current_prompt: String,
         include_project_context: bool,
+        effective_runtime: &RuntimeConfig,
+        model_profile: Option<&ModelProfile>,
     ) -> Result<Vec<ChatMessage>, ChatRuntimeError> {
         let session = {
             let guard = self.sessions.read().await;
@@ -644,8 +714,12 @@ impl ChatRuntime {
         let mut messages = Vec::new();
         let mut tokens = 0usize;
         let model_hint = session.model.as_deref();
-        let effective_runtime = self.runtime_config.effective_for_model(model_hint);
-        let model_tier = self.runtime_config.tier_for_model(model_hint);
+        let model_tier = match model_profile.map(|p| p.class) {
+            Some(ModelClass::Tiny | ModelClass::Small) => ModelTier::Small,
+            Some(ModelClass::Medium) => ModelTier::Medium,
+            Some(ModelClass::Large) => ModelTier::Large,
+            None => self.runtime_config.tier_for_model(model_hint),
+        };
 
         let mut system_content = String::new();
 
@@ -666,7 +740,7 @@ impl ChatRuntime {
         if let Some(system_context_path) = &self.system_context_dir {
             match build_system_context(system_context_path, effective_runtime.clone()).await {
                 Ok(context) => {
-                    if context_debug_enabled() {
+                    if context_debug_enabled(&self.runtime_config) {
                         eprintln!(
                             "[context] session={} system_context_dir={} files_context_tokens={}",
                             session_id,
@@ -700,14 +774,19 @@ impl ChatRuntime {
                         &current_prompt,
                         context_budget,
                         model_hint,
-                        effective_runtime.context_embeddings_enabled,
+                        RetrievalConfig {
+                            embeddings_enabled: effective_runtime.context_embeddings_enabled,
+                            embed_model: effective_runtime.context_embed_model.clone(),
+                            ollama_base_url: effective_runtime.context_ollama_base_url.clone(),
+                            top_k: effective_runtime.context_project_top_k,
+                        },
                     )
                     .await;
                     if !retrieval.context.trim().is_empty() {
                         system_content.push_str("This conversation is about the following project:\n");
                         system_content.push_str(&retrieval.context);
                         system_content.push('\n');
-                        if context_debug_enabled() {
+                        if context_debug_enabled(&self.runtime_config) {
                             eprintln!(
                                 "[context] session={} model={:?} top_k={} embeddings={} selected_files={:?} context_tokens={}",
                                 session_id,
@@ -772,7 +851,7 @@ impl ChatRuntime {
         };
 
         if estimate_session_tokens(&session) <= self.runtime_config.summary_trigger_tokens {
-            if context_debug_enabled() {
+            if context_debug_enabled(&self.runtime_config) {
                 eprintln!(
                     "[context] session={} summarize=no estimated_tokens={} trigger={}",
                     session_id,
@@ -825,7 +904,7 @@ impl ChatRuntime {
         let new_summary = match self.router.send(provider, summary_prompt, options).await {
             Ok(response) => response.text.trim().to_string(),
             Err(err) => {
-                if context_debug_enabled() {
+                if context_debug_enabled(&self.runtime_config) {
                     eprintln!(
                         "[context] session={} summarize=error error={}",
                         session_id, err
@@ -835,7 +914,7 @@ impl ChatRuntime {
             }
         };
         if new_summary.is_empty() {
-            if context_debug_enabled() {
+            if context_debug_enabled(&self.runtime_config) {
                 eprintln!("[context] session={} summarize=empty", session_id);
             }
             return;
@@ -864,7 +943,7 @@ impl ChatRuntime {
         };
 
         let _ = persist_session(&self.storage_dir, &snapshot).await;
-        if context_debug_enabled() {
+        if context_debug_enabled(&self.runtime_config) {
             eprintln!(
                 "[context] session={} summarize=yes summarized_messages={} summary_tokens={}",
                 session_id,
@@ -1268,10 +1347,11 @@ fn project_file_priority(root: &Path, file_path: &Path) -> i32 {
     score
 }
 
-fn context_debug_enabled() -> bool {
-    std::env::var("MULTILINK_DEBUG_CONTEXT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+fn context_debug_enabled(runtime_config: &RuntimeConfig) -> bool {
+    if let Ok(v) = std::env::var("MULTILINK_DEBUG_CONTEXT") {
+        return v == "1" || v.eq_ignore_ascii_case("true");
+    }
+    runtime_config.context_debug
 }
 
 fn app_data_dir() -> Result<PathBuf, ChatRuntimeError> {

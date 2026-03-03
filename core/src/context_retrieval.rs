@@ -4,6 +4,14 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
+pub struct RetrievalConfig {
+    pub embeddings_enabled: bool,
+    pub embed_model: String,
+    pub ollama_base_url: String,
+    pub top_k: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct RetrievalResult {
     pub context: String,
     pub selected_files: Vec<String>,
@@ -24,14 +32,14 @@ pub async fn build_relevant_project_context(
     prompt: &str,
     token_budget: usize,
     model_hint: Option<&str>,
-    embeddings_enabled: bool,
+    config: RetrievalConfig,
 ) -> RetrievalResult {
     if raw_context.trim().is_empty() || token_budget == 0 {
         return RetrievalResult {
             context: String::new(),
             selected_files: Vec::new(),
             used_tokens: 0,
-            top_k: context_topk(),
+            top_k: config.top_k,
             embedding_used: false,
         };
     }
@@ -44,13 +52,13 @@ pub async fn build_relevant_project_context(
             context,
             selected_files: Vec::new(),
             used_tokens,
-            top_k: context_topk(),
+            top_k: config.top_k,
             embedding_used: false,
         };
     }
 
     let lexical = lexical_scores(prompt, &chunks);
-    let embedding = maybe_embedding_scores(prompt, &chunks, embeddings_enabled).await;
+    let embedding = maybe_embedding_scores(prompt, &chunks, &config).await;
     let embedding_used = embedding.is_some();
     let mut ranked: Vec<(usize, f32)> = lexical
         .into_iter()
@@ -66,7 +74,7 @@ pub async fn build_relevant_project_context(
         .collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
 
-    let top_k = context_topk();
+    let top_k = config.top_k.clamp(2, 24);
     let mut selected_blocks = Vec::new();
     let mut selected_files = Vec::new();
     let mut used_tokens = 0usize;
@@ -316,32 +324,17 @@ fn query_terms(prompt: &str) -> HashSet<String> {
         .collect()
 }
 
-fn context_topk() -> usize {
-    std::env::var("MULTILINK_PROJECT_TOPK")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .map(|v| v.clamp(2, 24))
-        .unwrap_or(8)
-}
-
 async fn maybe_embedding_scores(
     prompt: &str,
     chunks: &[ProjectChunk],
-    embeddings_enabled: bool,
+    config: &RetrievalConfig,
 ) -> Option<Vec<f32>> {
-    if !embeddings_enabled || chunks.is_empty() {
+    if !config.embeddings_enabled || chunks.is_empty() {
         return None;
     }
 
-    let model = std::env::var("MULTILINK_EMBED_MODEL")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "embeddinggemma".to_string());
-
-    let base_url = std::env::var("MULTILINK_OLLAMA_BASE_URL")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
+    let model = config.embed_model.as_str();
+    let base_url = config.ollama_base_url.as_str();
 
     let chunk_inputs: Vec<String> = chunks
         .iter()
@@ -355,11 +348,11 @@ async fn maybe_embedding_scores(
         })
         .collect();
 
-    let query_vector = embed_inputs(&base_url, &model, vec![prompt.to_string()])
+    let query_vector = embed_inputs(base_url, model, vec![prompt.to_string()])
         .await?
         .into_iter()
         .next()?;
-    let chunk_vectors = embed_inputs(&base_url, &model, chunk_inputs).await?;
+    let chunk_vectors = embed_inputs(base_url, model, chunk_inputs).await?;
 
     Some(
         chunk_vectors

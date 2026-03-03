@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::providers::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderId, TokenStream};
+use crate::providers::{
+    LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId,
+    TokenStream,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderAvailability {
@@ -112,6 +115,31 @@ impl ProviderRouter {
             if let Some(provider) = self.providers.get(provider_id) {
                 if provider.is_available() {
                     return provider.stream_send(prompt.clone(), options.clone()).await;
+                }
+            }
+        }
+
+        Err(LLMError::Unavailable)
+    }
+
+    pub async fn get_model_info(
+        &self,
+        preferred: ProviderId,
+        model: &str,
+    ) -> Result<ProviderCapabilities, LLMError> {
+        if let Some(provider) = self.providers.get(&preferred) {
+            if provider.is_available() {
+                return provider.get_model_info(model).await;
+            }
+        }
+
+        for provider_id in &self.order {
+            if *provider_id == preferred {
+                continue;
+            }
+            if let Some(provider) = self.providers.get(provider_id) {
+                if provider.is_available() {
+                    return provider.get_model_info(model).await;
                 }
             }
         }
