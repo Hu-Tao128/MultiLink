@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact_name: multilink-linux-x64
+            ext: ''
+          - os: macos-14
+            artifact_name: multilink-macos-arm64
+            ext: ''
+          - os: windows-latest
+            artifact_name: multilink-windows-x64
+            ext: '.exe'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Qt (Linux)
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-base-dev qt6-declarative-dev cmake build-essential libgl1-mesa-dev libxkbcommon-dev
+
+      - name: Install Qt (macOS)
+        if: matrix.os == 'macos-14'
+        run: |
+          brew install qt cmake ninja
+
+      - name: Install Qt (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          choco install cmake ninja -y
+
+      - name: Build GUI
+        run: |
+          cmake -S gui -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel
+
+      - name: Find binary
+        id: binary
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            echo "path=$(ls build/gui/Release/multilink.exe)" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.os }}" = "macos-14" ]; then
+            echo "path=$(ls build/gui/multilink)" >> $GITHUB_OUTPUT
+          else
+            echo "path=$(ls build/gui/multilink)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ steps.binary.outputs.path }}
+
+  create-release:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            artifacts/multilink-linux-x64/*
+            artifacts/multilink-macos-arm64/*
+            artifacts/multilink-windows-x64/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
