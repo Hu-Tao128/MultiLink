@@ -1,5 +1,10 @@
 # MultiLink
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Build Status](https://github.com/multilink-dev/multilink/actions/workflows/rust.yml/badge.svg)](https://github.com/multilink-dev/multilink/actions)
+[![Rust Version](https://img.shields.io/badge/Rust-1.75%2B-blue.svg)](https://rustup.rs/)
+[![Qt Version](https://img.shields.io/badge/Qt-6.5%2B-purple.svg)](https://www.qt.io/)
+
 MultiLink is a cross-platform desktop application for interacting with Large Language Models (LLMs). It uses a native Qt/QML GUI with a reusable Rust core focused on performance, stability, and clear architecture boundaries.
 
 ## 🚀 Getting Started
@@ -181,27 +186,9 @@ To ensure code quality and correctness, run the tests:
 
 ## 🖼️ Screenshots
 
-Screenshots provide a visual overview of MultiLink's interface. Please place actual screenshots in `gui/assets/screenshots/` and update these references.
-
-*   Main chat view: `gui/assets/screenshots/main-chat.png`
-*   Sessions and model selector: `gui/assets/screenshots/sessions-models.png`
-*   Settings/auth view: `gui/assets/screenshots/settings-auth.png`
-
-## 🗺️ Roadmap (8 weeks)
-
-1.  Core skeleton and provider contract establishment.
-2.  Ollama provider integration and CLI verification.
-3.  Development of streaming, configuration, and session state machine.
-4.  Initial Qt/QML UI implementation and Rust bridge development.
-5.  Refinement of chat UX and implementation of model/provider controls.
-6.  Hardening of Gemini/Codex OAuth and remote provider integrations.
-7.  Development of packaging and installation guides.
-8.  Final polish, comprehensive documentation, updated screenshots, and demo script creation.
-
-## ✅ Portfolio Checklist
-
-*   Provides a full-fledged desktop experience without relying on terminal interaction for end-users.
-*   Integrates with Ollama via its HTTP API, avoiding ad-hoc shell scripting.
-*   Features robust management of LLM model storage and migration.
-*   Implements desktop-friendly OAuth for seamless authentication.
-*   Maintains a reusable and UI-agnostic core for flexibility and future expansion.
+| | |
+|---|---|
+| **Main Chat** | **Servers** |
+| ![Main Chat](gui/assets/screenshots/main-chat.png) | ![Servers](gui/assets/screenshots/servers.png) |
+| **Sessions & Models** | |
+| ![Sessions](gui/assets/screenshots/sessions-models.png) | |

@@ -1,35 +1,49 @@
 # Roadmap
 
-## Week 1
-- Repository bootstrap.
-- Core provider traits and router skeleton.
+## ✅ Completed
 
-## Week 2
-- Ollama provider (request + response path).
-- Core smoke tests.
+### Week 1-3: Foundation
+- [x] Repository bootstrap
+- [x] Core provider traits and router skeleton
+- [x] Ollama provider (request + response path)
+- [x] Streaming pipeline and session states
+- [x] Config loading and environment overrides
 
-## Week 3
-- Streaming pipeline and session states.
-- Config loading and environment overrides.
+### Week 4-5: GUI Development
+- [x] Qt/QML shell and CXX-Qt bridge
+- [x] Token event rendering in chat view
+- [x] Provider/model switch UX
+- [x] Session restoration
+- [x] Server settings panel
+- [x] Multi-server model listing
 
-## Week 4
-- Qt/QML shell and CXX-Qt bridge.
-- Token event rendering in chat view.
+### Week 6-7: Integrations & CI
+- [x] OAuth scaffolding for remote providers
+- [x] Token encryption (AES-256-GCM)
+- [x] Cross-platform build hardening
+- [x] CI/CD automation (GitHub Actions)
+- [x] Install scripts
 
-## Week 5
-- Provider/model switch UX.
-- Loading/error feedback and keyboard flow.
+## 🚧 In Progress
 
-## Week 6
-- OAuth hardening for remote providers.
-- Refresh and logout/revoke support.
+- [ ] OAuth hardening (refresh token lifecycle)
+- [ ] Remote provider auth UI wiring
+- [ ] Model registry external sources
 
-## Week 7
-- Packaging strategy and install scripts.
-- Platform-specific docs.
-- CI/CD automation for Windows, Linux, and macOS (completed).
-- Cross-platform build hardening for Qt6 and Rust (completed).
+## 📋 Backlog
 
-## Week 8
-- Final polish.
-- README, screenshots, and demo script.
+- [ ] Windows installer (.msi)
+- [ ] macOS installer (.dmg)
+- [ ] Linux packaging (AppImage, .deb)
+- [ ] Auto-update mechanism
+- [ ] System tray support
+- [ ] Keyboard shortcuts
+- [ ] Export/import sessions
+- [ ] Plugin system for custom providers
+
+## 🔮 Long Term
+
+- [ ] WebAssembly core for browser demo
+- [ ] Mobile companion app
+- [ ] Team/enterprise features (shared configs)
+- [ ] Telemetry dashboard
