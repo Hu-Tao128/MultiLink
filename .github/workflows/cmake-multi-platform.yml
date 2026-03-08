@@ -58,9 +58,20 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install cmake ninja -y
 
-      - name: Build Rust Backend
+      - name: Build Rust Backend (macOS)
+        if: runner.os == 'macOS'
         env:
           MACOSX_DEPLOYMENT_TARGET: "14.0"
+        run: |
+          echo '[target.aarch64-apple-darwin]' >> ~/.cargo/config.toml
+          echo 'linker = "clang"' >> ~/.cargo/config.toml
+          echo 'rustflags = "-C link-arg=-mmacosx-version-min=14.0"' >> ~/.cargo/config.toml
+          rustup target add aarch64-apple-darwin
+          cargo build --release --manifest-path gui/rust/chat_controller/Cargo.toml \
+            --target aarch64-apple-darwin
+
+      - name: Build Rust Backend
+        if: runner.os != 'macOS'
         run: cargo build --release --manifest-path gui/rust/chat_controller/Cargo.toml
 
       - name: Configure CMake (Linux)
