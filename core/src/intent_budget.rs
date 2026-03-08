@@ -1,3 +1,5 @@
+use crate::config::TaskWeight;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryIntent {
     ProjectWide,
@@ -63,5 +65,45 @@ pub fn budget_for_intent(intent: QueryIntent) -> IntentBudget {
             project_budget_ratio: 20,
             top_k_cap: 4,
         },
+    }
+}
+
+pub fn task_weight_for_prompt(prompt: &str, intent: QueryIntent) -> TaskWeight {
+    let p = prompt.to_ascii_lowercase();
+    let token_count = p.split_whitespace().count();
+
+    let heavy_markers = [
+        "arquitectura",
+        "architecture",
+        "distributed",
+        "orchestrator",
+        "deep analysis",
+        "critical",
+        "seguridad",
+    ];
+    if heavy_markers.iter().any(|m| p.contains(m)) || token_count > 180 {
+        return if token_count > 300 {
+            TaskWeight::Critical
+        } else {
+            TaskWeight::Heavy
+        };
+    }
+
+    match intent {
+        QueryIntent::Conversational => {
+            if token_count < 20 {
+                TaskWeight::Light
+            } else {
+                TaskWeight::Medium
+            }
+        }
+        QueryIntent::FileScoped | QueryIntent::SymbolScoped => {
+            if token_count < 35 {
+                TaskWeight::Light
+            } else {
+                TaskWeight::Medium
+            }
+        }
+        QueryIntent::ProjectWide => TaskWeight::Medium,
     }
 }

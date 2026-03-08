@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::fs as stdfs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use directories::ProjectDirs;
@@ -17,7 +17,7 @@ use crate::config::{ModelTier, RuntimeConfig};
 use crate::context_retrieval::{build_relevant_project_context, RetrievalConfig};
 use crate::execution::{ExecutionDispatchRequest, ExecutionDispatcher};
 use crate::hardware_profile::{HardwareCaps, HardwareProfile};
-use crate::intent_budget::{budget_for_intent, detect_query_intent};
+use crate::intent_budget::{budget_for_intent, detect_query_intent, task_weight_for_prompt};
 use crate::model_profile::{ModelClass, ModelProfile};
 use crate::observability::ExecutionMetrics;
 use crate::providers::{PromptOptions, ProviderId};
@@ -66,7 +66,13 @@ impl ChatRuntime {
         storage_dir: PathBuf,
         persist_interval: Duration,
     ) -> Self {
-        Self::new_with_config(router, storage_dir, persist_interval, RuntimeConfig::default(), None)
+        Self::new_with_config(
+            router,
+            storage_dir,
+            persist_interval,
+            RuntimeConfig::default(),
+            None,
+        )
     }
 
     pub fn new_with_config(
@@ -317,7 +323,10 @@ impl ChatRuntime {
                     Some(context)
                 }
                 Err(e) => {
-                    eprintln!("[context error] session={} failed to build project context: {:?}", session_id, e);
+                    eprintln!(
+                        "[context error] session={} failed to build project context: {:?}",
+                        session_id, e
+                    );
                     return Err(e);
                 }
             }
@@ -411,21 +420,23 @@ impl ChatRuntime {
                     .context_project_top_k
                     .min(budget.project_top_k.max(2));
 
-                if model_class_rank(profile.class) > model_class_rank(hardware_caps.max_model_class) {
-                    effective_runtime.max_project_context_tokens = effective_runtime
-                        .max_project_context_tokens
-                        .min(512);
-                    effective_runtime.context_project_top_k = effective_runtime
-                        .context_project_top_k
-                        .min(3)
-                        .max(2);
+                if model_class_rank(profile.class) > model_class_rank(hardware_caps.max_model_class)
+                {
+                    effective_runtime.max_project_context_tokens =
+                        effective_runtime.max_project_context_tokens.min(512);
+                    effective_runtime.context_project_top_k =
+                        effective_runtime.context_project_top_k.min(3).max(2);
                 }
                 model_profile = Some(profile);
             }
         }
 
         let intent = detect_query_intent(&prompt);
+        let task_weight = task_weight_for_prompt(&prompt, intent);
         let intent_budget = budget_for_intent(intent);
+        let allow_remote_fallback = effective_runtime
+            .remote_threshold
+            .allows_remote(task_weight);
         let intent_project_cap = effective_runtime
             .max_context_tokens
             .saturating_mul(intent_budget.project_budget_ratio as usize)
@@ -466,7 +477,9 @@ impl ChatRuntime {
             let context_tokens: usize = messages.iter().map(|m| estimate_tokens(&m.content)).sum();
             eprintln!(
                 "[context] session={} context_tokens={} max_tokens={} message_count={}",
-                session_id, context_tokens, effective_runtime.max_context_tokens,
+                session_id,
+                context_tokens,
+                effective_runtime.max_context_tokens,
                 messages.len()
             );
         }
@@ -483,7 +496,9 @@ impl ChatRuntime {
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| ChatRuntimeError::Provider("stream concurrency limiter unavailable".to_string()))?;
+            .map_err(|_| {
+                ChatRuntimeError::Provider("stream concurrency limiter unavailable".to_string())
+            })?;
 
         let stream_result = self
             .execution_dispatcher
@@ -491,6 +506,7 @@ impl ChatRuntime {
                 provider,
                 prompt: prompt.clone(),
                 options: options.clone(),
+                allow_remote_fallback,
             })
             .await;
 
@@ -502,7 +518,9 @@ impl ChatRuntime {
                 eprintln!("[provider] stream error: {}", err_text);
                 if likely_context_overflow(&err_text) {
                     fallback_retry_used = true;
-                    eprintln!("[provider] retrying without project context (possible context overflow)");
+                    eprintln!(
+                        "[provider] retrying without project context (possible context overflow)"
+                    );
                     let fallback_messages = self
                         .build_messages(
                             session_id,
@@ -523,6 +541,7 @@ impl ChatRuntime {
                             provider,
                             prompt,
                             options: fallback_options,
+                            allow_remote_fallback,
                         })
                         .await
                         .map(|r| r.stream)
@@ -875,12 +894,17 @@ impl ChatRuntime {
                             estimate_tokens(&context)
                         );
                     }
-                    system_content.push_str("This conversation is about a project in the following system directory:\n");
+                    system_content.push_str(
+                        "This conversation is about a project in the following system directory:\n",
+                    );
                     system_content.push_str(&context);
                     system_content.push('\n');
                 }
                 Err(e) => {
-                    eprintln!("[context error] session={} failed to build system context: {:?}", session_id, e);
+                    eprintln!(
+                        "[context error] session={} failed to build system context: {:?}",
+                        session_id, e
+                    );
                 }
             }
         }
@@ -891,10 +915,9 @@ impl ChatRuntime {
                 .as_ref()
                 .filter(|v| !v.trim().is_empty())
             {
-                let context_budget =
-                    effective_runtime
-                        .max_project_context_tokens
-                        .min(effective_runtime.max_context_tokens.saturating_sub(tokens));
+                let context_budget = effective_runtime
+                    .max_project_context_tokens
+                    .min(effective_runtime.max_context_tokens.saturating_sub(tokens));
                 if context_budget > 0 {
                     let retrieval = build_relevant_project_context(
                         project_context,
@@ -910,7 +933,8 @@ impl ChatRuntime {
                     )
                     .await;
                     if !retrieval.context.trim().is_empty() {
-                        system_content.push_str("This conversation is about the following project:\n");
+                        system_content
+                            .push_str("This conversation is about the following project:\n");
                         system_content.push_str(&retrieval.context);
                         system_content.push('\n');
                         if context_debug_enabled(&self.runtime_config) {
@@ -1456,9 +1480,8 @@ fn project_file_priority(root: &Path, file_path: &Path) -> i32 {
 
     let ext = rel.extension().and_then(|e| e.to_str()).unwrap_or_default();
     let lang_weight = match ext {
-        "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "java" | "dart" | "cpp" | "c"
-        | "cc" | "cxx" | "cs" | "go" | "swift" | "kt" | "kts" | "php" | "rb"
-        | "scala" | "zig" => 14,
+        "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "java" | "dart" | "cpp" | "c" | "cc"
+        | "cxx" | "cs" | "go" | "swift" | "kt" | "kts" | "php" | "rb" | "scala" | "zig" => 14,
         "md" => {
             if depth == 0 {
                 8
@@ -1615,12 +1638,8 @@ async fn write_atomic_json<T: serde::Serialize>(
     let mut file = fs::File::create(&temp_path)
         .await
         .map_err(ChatRuntimeError::Io)?;
-    file.write_all(&data)
-        .await
-        .map_err(ChatRuntimeError::Io)?;
-    file.sync_all()
-        .await
-        .map_err(ChatRuntimeError::Io)?;
+    file.write_all(&data).await.map_err(ChatRuntimeError::Io)?;
+    file.sync_all().await.map_err(ChatRuntimeError::Io)?;
     drop(file);
 
     fs::rename(&temp_path, path)
@@ -1645,7 +1664,9 @@ async fn sync_directory(path: &Path) -> Result<(), ChatRuntimeError> {
     .map_err(ChatRuntimeError::Io)
 }
 
-async fn collect_session_ids_from_storage(storage_dir: &Path) -> Result<Vec<String>, ChatRuntimeError> {
+async fn collect_session_ids_from_storage(
+    storage_dir: &Path,
+) -> Result<Vec<String>, ChatRuntimeError> {
     let mut entries = fs::read_dir(storage_dir)
         .await
         .map_err(ChatRuntimeError::Io)?;

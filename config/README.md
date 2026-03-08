@@ -7,7 +7,7 @@ This directory contains default configuration templates for the MultiLink applic
 *   **`default.toml`**: Baseline template used when a user config is missing.
     *   Uses schema `version = 2`.
     *   Defines one or more `[[servers]]` entries.
-    *   Includes `[context]`, `[performance]`, `[network]`, `[ui]`, and `[storage]` sections.
+    *   Includes `[context]`, `[performance]`, `[routing]`, `[network]`, `[ui]`, and `[storage]` sections.
 
 ## 📍 User Config Location
 

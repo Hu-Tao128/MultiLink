@@ -17,10 +17,14 @@ pub use auth::{AuthProvider, AuthService, OAuthConfig, OAuthFlow, StoredToken, T
 pub use chat_runtime::{
     ChatResponse, ChatRuntime, ChatRuntimeError, HandleUserMessageRequest, StreamEvent,
 };
-pub use config::{AppConfig, ProviderKind};
+pub use config::{AppConfig, ProviderKind, RemoteThreshold, TaskWeight};
+pub use execution::{
+    ExecutionDispatchRequest, ExecutionDispatchResult, ExecutionDispatcher, ServerStatus,
+};
 pub use hardware_profile::{HardwareCaps, HardwareProfile};
-pub use intent_budget::{budget_for_intent, detect_query_intent, IntentBudget, QueryIntent};
-pub use execution::{ExecutionDispatchRequest, ExecutionDispatchResult, ExecutionDispatcher, ServerStatus};
+pub use intent_budget::{
+    budget_for_intent, detect_query_intent, task_weight_for_prompt, IntentBudget, QueryIntent,
+};
 pub use model_manager::{ModelInfo, ModelManager, ModelStatus, ProviderType};
 pub use model_profile::{ModelClass, ModelProfile, RetrievalBudget};
 pub use observability::ExecutionMetrics;

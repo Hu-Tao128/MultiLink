@@ -91,12 +91,16 @@ embed_model = "embeddinggemma"
 project_top_k = 8
 max_project_tokens = 2000
 debug = false
+
+[routing]
+remote_threshold = "heavy"
 ```
 
 Notes:
 
 - Legacy V1 config is migrated automatically to V2.
 - You can still override key values via environment variables for CI/dev workflows.
+- `routing.remote_threshold` also supports `MULTILINK_REMOTE_THRESHOLD` (`auto|light|medium|heavy|critical`).
 - For remote/LAN/Tailscale troubleshooting, see `docs/network-troubleshooting.md`.
 
 ## 🎨 Architecture

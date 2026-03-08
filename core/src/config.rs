@@ -60,6 +60,32 @@ pub struct UiConfig {
     pub json_logs: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskWeight {
+    Trivial,
+    Light,
+    Medium,
+    Heavy,
+    Critical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteThreshold {
+    Auto,
+    Light,
+    Medium,
+    Heavy,
+    Critical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RoutingConfig {
+    pub remote_threshold: RemoteThreshold,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RuntimeConfig {
@@ -81,6 +107,7 @@ pub struct RuntimeConfig {
     pub observability_json_logs: bool,
     #[serde(default)]
     pub execution_servers: Vec<ExecutionServerRuntime>,
+    pub remote_threshold: RemoteThreshold,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +157,8 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub routing: RoutingConfig,
     pub storage: StorageConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
@@ -201,6 +230,7 @@ impl Default for RuntimeConfig {
             context_ollama_base_url: "http://127.0.0.1:11434".to_string(),
             observability_json_logs: false,
             execution_servers: Vec::new(),
+            remote_threshold: RemoteThreshold::Heavy,
         }
     }
 }
@@ -254,6 +284,14 @@ impl Default for UiConfig {
         Self {
             streaming: true,
             json_logs: false,
+        }
+    }
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            remote_threshold: RemoteThreshold::Heavy,
         }
     }
 }
@@ -343,6 +381,7 @@ impl Default for AppConfig {
             performance: PerformanceConfig::default(),
             network: NetworkConfig::default(),
             ui: UiConfig::default(),
+            routing: RoutingConfig::default(),
             storage: StorageConfig {
                 models_dir: "~/.local/share/multilink/models".to_string(),
             },
@@ -456,6 +495,10 @@ impl AppConfig {
             self.system_context_dir = Some(PathBuf::from(value));
         }
 
+        if let Ok(value) = std::env::var("MULTILINK_REMOTE_THRESHOLD") {
+            self.routing.remote_threshold = parse_remote_threshold(&value);
+        }
+
         self.sync_runtime_from_sections();
     }
 
@@ -467,6 +510,7 @@ impl AppConfig {
         self.runtime.max_project_context_tokens = self.context.max_project_tokens.max(512);
         self.runtime.max_parallel_streams = self.performance.max_parallel_streams.max(1);
         self.runtime.observability_json_logs = self.ui.json_logs;
+        self.runtime.remote_threshold = self.routing.remote_threshold;
         if let Some(server) = self.primary_server() {
             self.runtime.context_ollama_base_url = server.base_url.clone();
         }
@@ -496,16 +540,22 @@ impl AppConfig {
         }
 
         if self.servers.is_empty() {
-            return Err(ConfigError::Invalid("at least one server is required".to_string()));
+            return Err(ConfigError::Invalid(
+                "at least one server is required".to_string(),
+            ));
         }
 
         if !self.servers.iter().any(|s| s.enabled) {
-            return Err(ConfigError::Invalid("at least one server must be enabled".to_string()));
+            return Err(ConfigError::Invalid(
+                "at least one server must be enabled".to_string(),
+            ));
         }
 
         for server in &self.servers {
             if server.name.trim().is_empty() {
-                return Err(ConfigError::Invalid("server.name cannot be empty".to_string()));
+                return Err(ConfigError::Invalid(
+                    "server.name cannot be empty".to_string(),
+                ));
             }
             if !server.base_url.starts_with("http://") && !server.base_url.starts_with("https://") {
                 return Err(ConfigError::Invalid(format!(
@@ -552,13 +602,10 @@ impl AppConfig {
 
         let mut changed = false;
         if self.version < 2 {
-            let legacy_ollama = self
-                .ollama
-                .clone()
-                .unwrap_or(LegacyOllamaConfig {
-                    base_url: "http://127.0.0.1:11434".to_string(),
-                    default_model: "qwen2.5-coder:3b".to_string(),
-                });
+            let legacy_ollama = self.ollama.clone().unwrap_or(LegacyOllamaConfig {
+                base_url: "http://127.0.0.1:11434".to_string(),
+                default_model: "qwen2.5-coder:3b".to_string(),
+            });
 
             if self.servers.is_empty() {
                 self.servers = vec![ServerConfig {
@@ -578,6 +625,71 @@ impl AppConfig {
         }
 
         Ok(changed)
+    }
+}
+
+impl RemoteThreshold {
+    pub fn allows_remote(self, weight: TaskWeight) -> bool {
+        let threshold = match self {
+            RemoteThreshold::Auto => TaskWeight::Heavy,
+            RemoteThreshold::Light => TaskWeight::Light,
+            RemoteThreshold::Medium => TaskWeight::Medium,
+            RemoteThreshold::Heavy => TaskWeight::Heavy,
+            RemoteThreshold::Critical => TaskWeight::Critical,
+        };
+        task_weight_rank(weight) >= task_weight_rank(threshold)
+    }
+}
+
+pub fn task_weight_rank(weight: TaskWeight) -> u8 {
+    match weight {
+        TaskWeight::Trivial => 0,
+        TaskWeight::Light => 1,
+        TaskWeight::Medium => 2,
+        TaskWeight::Heavy => 3,
+        TaskWeight::Critical => 4,
+    }
+}
+
+fn parse_remote_threshold(value: &str) -> RemoteThreshold {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "light" => RemoteThreshold::Light,
+        "medium" => RemoteThreshold::Medium,
+        "heavy" => RemoteThreshold::Heavy,
+        "critical" => RemoteThreshold::Critical,
+        "auto" => RemoteThreshold::Auto,
+        _ => RemoteThreshold::Auto,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_remote_threshold, RemoteThreshold, TaskWeight};
+
+    #[test]
+    fn remote_threshold_parser_accepts_known_values() {
+        assert_eq!(parse_remote_threshold("light"), RemoteThreshold::Light);
+        assert_eq!(parse_remote_threshold("Medium"), RemoteThreshold::Medium);
+        assert_eq!(parse_remote_threshold("HEAVY"), RemoteThreshold::Heavy);
+        assert_eq!(
+            parse_remote_threshold("critical"),
+            RemoteThreshold::Critical
+        );
+        assert_eq!(parse_remote_threshold(" auto "), RemoteThreshold::Auto);
+    }
+
+    #[test]
+    fn remote_threshold_parser_defaults_to_auto_for_unknown_values() {
+        assert_eq!(parse_remote_threshold("invalid"), RemoteThreshold::Auto);
+        assert_eq!(parse_remote_threshold(""), RemoteThreshold::Auto);
+    }
+
+    #[test]
+    fn remote_threshold_auto_only_allows_heavy_or_more() {
+        assert!(!RemoteThreshold::Auto.allows_remote(TaskWeight::Light));
+        assert!(!RemoteThreshold::Auto.allows_remote(TaskWeight::Medium));
+        assert!(RemoteThreshold::Auto.allows_remote(TaskWeight::Heavy));
+        assert!(RemoteThreshold::Auto.allows_remote(TaskWeight::Critical));
     }
 }
 

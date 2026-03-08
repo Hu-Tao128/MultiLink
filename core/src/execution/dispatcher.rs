@@ -20,6 +20,7 @@ pub struct ExecutionDispatchRequest {
     pub provider: ProviderId,
     pub prompt: String,
     pub options: PromptOptions,
+    pub allow_remote_fallback: bool,
 }
 
 pub struct ExecutionDispatchResult {
@@ -85,7 +86,10 @@ impl ExecutionDispatcher {
                 self.record_status(primary_key.clone(), false, started.elapsed().as_millis(), 0)
                     .await;
 
-                if request.provider != ProviderId::Ollama || self.servers.is_empty() {
+                if !request.allow_remote_fallback
+                    || request.provider != ProviderId::Ollama
+                    || self.servers.is_empty()
+                {
                     return Err(primary_err);
                 }
 

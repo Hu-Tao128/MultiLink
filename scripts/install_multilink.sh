@@ -44,6 +44,9 @@ debug = false
 profile = "auto"
 max_parallel_streams = 4
 
+[routing]
+remote_threshold = "heavy"
+
 [network]
 allow_remote = false
 shared_secret = ""
