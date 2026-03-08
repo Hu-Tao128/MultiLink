@@ -63,12 +63,8 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: "14.0"
         run: |
-          echo '[target.aarch64-apple-darwin]' >> ~/.cargo/config.toml
-          echo 'linker = "clang"' >> ~/.cargo/config.toml
-          echo 'rustflags = "-C link-arg=-mmacosx-version-min=14.0"' >> ~/.cargo/config.toml
-          rustup target add aarch64-apple-darwin
-          cargo build --release --manifest-path gui/rust/chat_controller/Cargo.toml \
-            --target aarch64-apple-darwin
+          export RUSTFLAGS="-C link-arg=-mmacosx-version-min=14.0 -C link-arg=-arch -C link-arg=arm64"
+          cargo build --release --manifest-path gui/rust/chat_controller/Cargo.toml
 
       - name: Build Rust Backend
         if: runner.os != 'macOS'
