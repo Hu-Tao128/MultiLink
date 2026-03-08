@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod chat_runtime;
 pub mod config;
+pub mod context_engine;
 pub mod context_retrieval;
 pub mod execution;
 pub mod hardware_profile;
@@ -12,6 +13,11 @@ pub mod providers;
 pub mod router;
 pub mod session;
 pub mod system;
+
+pub use context_engine::{
+    ContextEngine, ContextEngineV1, ContextEngineV2, ContextEngineVersion, ContextRetrievalConfig,
+    RetrievalResult,
+};
 
 pub use auth::{AuthProvider, AuthService, OAuthConfig, OAuthFlow, StoredToken, TokenStore};
 pub use chat_runtime::{

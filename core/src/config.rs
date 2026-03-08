@@ -36,6 +36,7 @@ pub struct ContextConfig {
     pub project_top_k: usize,
     pub max_project_tokens: usize,
     pub debug: bool,
+    pub engine: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,6 +257,7 @@ impl Default for ContextConfig {
             project_top_k: 8,
             max_project_tokens: 2000,
             debug: false,
+            engine: "v1".to_string(),
         }
     }
 }
