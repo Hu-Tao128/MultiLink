@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, watch, Mutex, RwLock, Semaphore};
 use walkdir::WalkDir;
 
 use crate::config::{ModelTier, RuntimeConfig};
+use crate::context_engine::{ContextEngine, ContextEngineVersion, ContextRetrievalConfig, ContextEngineV1, ContextEngineV2, RetrievalResult};
 use crate::context_retrieval::{build_relevant_project_context, RetrievalConfig};
 use crate::execution::{ExecutionDispatchRequest, ExecutionDispatcher};
 use crate::hardware_profile::{HardwareCaps, HardwareProfile};
@@ -919,33 +920,67 @@ impl ChatRuntime {
                     .max_project_context_tokens
                     .min(effective_runtime.max_context_tokens.saturating_sub(tokens));
                 if context_budget > 0 {
-                    let retrieval = build_relevant_project_context(
-                        project_context,
-                        &current_prompt,
-                        context_budget,
-                        model_hint,
-                        RetrievalConfig {
+                    let retrieval: RetrievalResult = if effective_runtime.context_engine == "v2" {
+                        let engine = ContextEngineV2::new(
+                            dirs::data_local_dir()
+                                .unwrap_or_else(|| PathBuf::from(".multilink"))
+                                .join("multilink")
+                                .join("index"),
+                        );
+                        let config = ContextRetrievalConfig {
                             embeddings_enabled: effective_runtime.context_embeddings_enabled,
                             embed_model: effective_runtime.context_embed_model.clone(),
                             ollama_base_url: effective_runtime.context_ollama_base_url.clone(),
                             top_k: effective_runtime.context_project_top_k,
-                        },
-                    )
-                    .await;
+                            version: ContextEngineVersion::V2,
+                        };
+                        engine
+                            .retrieve(project_context, &current_prompt, context_budget, model_hint, &config)
+                            .await
+                    } else {
+                        let v1_result = build_relevant_project_context(
+                            project_context,
+                            &current_prompt,
+                            context_budget,
+                            model_hint,
+                            RetrievalConfig {
+                                embeddings_enabled: effective_runtime.context_embeddings_enabled,
+                                embed_model: effective_runtime.context_embed_model.clone(),
+                                ollama_base_url: effective_runtime.context_ollama_base_url.clone(),
+                                top_k: effective_runtime.context_project_top_k,
+                            },
+                        )
+                        .await;
+                        RetrievalResult {
+                            context: v1_result.context,
+                            selected_files: v1_result.selected_files,
+                            used_tokens: v1_result.used_tokens,
+                            top_k: v1_result.top_k,
+                            embedding_used: v1_result.embedding_used,
+                            is_truncated: false,
+                            budget_used: v1_result.used_tokens,
+                        }
+                    };
+
                     if !retrieval.context.trim().is_empty() {
+                        if retrieval.is_truncated {
+                            system_content.push_str("[WARNING: Context was truncated due to token budget limits. Some relevant files may have been omitted.]\n");
+                        }
                         system_content
                             .push_str("This conversation is about the following project:\n");
                         system_content.push_str(&retrieval.context);
                         system_content.push('\n');
                         if context_debug_enabled(&self.runtime_config) {
                             eprintln!(
-                                "[context] session={} model={:?} top_k={} embeddings={} selected_files={:?} context_tokens={}",
+                                "[context] session={} model={:?} engine={} top_k={} embeddings={} is_truncated={} selected_files={:?} context_tokens={}",
                                 session_id,
                                 model_hint,
+                                effective_runtime.context_engine,
                                 retrieval.top_k,
                                 retrieval.embedding_used,
+                                retrieval.is_truncated,
                                 retrieval.selected_files,
-                                retrieval.used_tokens
+                                retrieval.budget_used
                             );
                         }
                     }

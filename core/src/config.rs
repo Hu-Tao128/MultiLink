@@ -105,10 +105,14 @@ pub struct RuntimeConfig {
     pub context_embed_model: String,
     pub context_project_top_k: usize,
     pub context_ollama_base_url: String,
+    pub context_engine: String,
     pub observability_json_logs: bool,
     #[serde(default)]
     pub execution_servers: Vec<ExecutionServerRuntime>,
     pub remote_threshold: RemoteThreshold,
+    pub network_allow_remote: bool,
+    pub network_shared_secret: String,
+    pub network_allowed_ips: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,9 +233,13 @@ impl Default for RuntimeConfig {
             context_embed_model: "embeddinggemma".to_string(),
             context_project_top_k: 8,
             context_ollama_base_url: "http://127.0.0.1:11434".to_string(),
+            context_engine: "v1".to_string(),
             observability_json_logs: false,
             execution_servers: Vec::new(),
             remote_threshold: RemoteThreshold::Heavy,
+            network_allow_remote: false,
+            network_shared_secret: String::new(),
+            network_allowed_ips: Vec::new(),
         }
     }
 }
@@ -513,6 +521,10 @@ impl AppConfig {
         self.runtime.max_parallel_streams = self.performance.max_parallel_streams.max(1);
         self.runtime.observability_json_logs = self.ui.json_logs;
         self.runtime.remote_threshold = self.routing.remote_threshold;
+        self.runtime.context_engine = self.context.engine.clone();
+        self.runtime.network_allow_remote = self.network.allow_remote;
+        self.runtime.network_shared_secret = self.network.shared_secret.clone();
+        self.runtime.network_allowed_ips = self.network.allowed_ips.clone();
         if let Some(server) = self.primary_server() {
             self.runtime.context_ollama_base_url = server.base_url.clone();
         }

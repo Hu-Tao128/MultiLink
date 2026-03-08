@@ -39,6 +39,7 @@ embed_model = "embeddinggemma"
 project_top_k = 8
 max_project_tokens = 2000
 debug = false
+engine = "v1"
 
 [performance]
 profile = "auto"
