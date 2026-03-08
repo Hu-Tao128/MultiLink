@@ -64,7 +64,11 @@ impl OAuthFlow {
         Ok(format!("http://127.0.0.1:{}/callback", cfg.redirect_port))
     }
 
-    pub fn authorization_url(&self, provider: AuthProvider, state: &str) -> Result<String, OAuthError> {
+    pub fn authorization_url(
+        &self,
+        provider: AuthProvider,
+        state: &str,
+    ) -> Result<String, OAuthError> {
         let cfg = self
             .configs
             .get(&provider)
@@ -162,7 +166,9 @@ impl OAuthFlow {
             .map_err(|e| OAuthError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(OAuthError::TokenExchangeFailed(response.status().to_string()));
+            return Err(OAuthError::TokenExchangeFailed(
+                response.status().to_string(),
+            ));
         }
 
         let token_payload = response
@@ -173,7 +179,9 @@ impl OAuthFlow {
         Ok(StoredToken {
             access_token: token_payload.access_token,
             refresh_token: token_payload.refresh_token,
-            expires_at: token_payload.expires_in.map(|seconds| unix_now().saturating_add(seconds)),
+            expires_at: token_payload
+                .expires_in
+                .map(|seconds| unix_now().saturating_add(seconds)),
             token_type: token_payload.token_type,
         })
     }
@@ -219,7 +227,9 @@ impl OAuthFlow {
             refresh_token: token_payload
                 .refresh_token
                 .or(Some(refresh_token.to_string())),
-            expires_at: token_payload.expires_in.map(|seconds| unix_now().saturating_add(seconds)),
+            expires_at: token_payload
+                .expires_in
+                .map(|seconds| unix_now().saturating_add(seconds)),
             token_type: token_payload.token_type,
         })
     }
@@ -233,7 +243,10 @@ impl OAuthFlow {
             .configs
             .get(&provider)
             .ok_or(OAuthError::ProviderNotRegistered)?;
-        let revoke_url = cfg.revoke_url.as_ref().ok_or(OAuthError::RevokeUnsupported)?;
+        let revoke_url = cfg
+            .revoke_url
+            .as_ref()
+            .ok_or(OAuthError::RevokeUnsupported)?;
 
         let response = self
             .client
@@ -258,7 +271,9 @@ fn parse_callback_path(path: &str) -> Result<CallbackPayload, OAuthError> {
         .next()
         .ok_or_else(|| OAuthError::InvalidCallback("missing query string".to_string()))?;
     if route != "/callback" {
-        return Err(OAuthError::InvalidCallback("unexpected callback route".to_string()));
+        return Err(OAuthError::InvalidCallback(
+            "unexpected callback route".to_string(),
+        ));
     }
 
     let mut code = None;
@@ -301,7 +316,9 @@ fn url_decode(input: &str) -> Result<String, OAuthError> {
         match bytes[index] {
             b'%' => {
                 if index + 2 >= bytes.len() {
-                    return Err(OAuthError::InvalidCallback("invalid percent encoding".to_string()));
+                    return Err(OAuthError::InvalidCallback(
+                        "invalid percent encoding".to_string(),
+                    ));
                 }
                 let hex = &input[index + 1..index + 3];
                 let value = u8::from_str_radix(hex, 16)

@@ -66,7 +66,11 @@ impl AuthService {
         provider: AuthProvider,
     ) -> Result<Option<String>, AuthServiceError> {
         let key = Self::provider_key(provider);
-        let current = self.store.load(key).await.map_err(AuthServiceError::Store)?;
+        let current = self
+            .store
+            .load(key)
+            .await
+            .map_err(AuthServiceError::Store)?;
         let Some(token) = current else {
             return Ok(None);
         };
@@ -95,7 +99,12 @@ impl AuthService {
 
     pub async fn logout(&self, provider: AuthProvider) -> Result<(), AuthServiceError> {
         let key = Self::provider_key(provider);
-        if let Some(token) = self.store.load(key).await.map_err(AuthServiceError::Store)? {
+        if let Some(token) = self
+            .store
+            .load(key)
+            .await
+            .map_err(AuthServiceError::Store)?
+        {
             let _ = self.oauth.revoke_token(provider, &token.access_token).await;
         }
         self.store.clear(key).await.map_err(AuthServiceError::Store)

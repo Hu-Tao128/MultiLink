@@ -32,10 +32,7 @@ async fn ollama_send_retries_transient_server_error() {
     let listener = TokioTcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
-    let port = listener
-        .local_addr()
-        .expect("read local addr")
-        .port();
+    let port = listener.local_addr().expect("read local addr").port();
 
     let server = tokio::spawn(async move {
         for attempt in 0..2 {
@@ -65,10 +62,7 @@ async fn ollama_send_retries_transient_server_error() {
         }
     });
 
-    let provider = OllamaProvider::new(
-        format!("http://127.0.0.1:{port}"),
-        "llama3.2".to_string(),
-    );
+    let provider = OllamaProvider::new(format!("http://127.0.0.1:{port}"), "llama3.2".to_string());
 
     let response = provider
         .send("hello".to_string(), PromptOptions::default())

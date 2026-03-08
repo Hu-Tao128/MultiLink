@@ -216,7 +216,8 @@ fn lexical_scores(prompt: &str, chunks: &[ProjectChunk]) -> Vec<(usize, f32)> {
             .next()
             .unwrap_or(chunk.path.as_str())
             .to_ascii_lowercase();
-        let is_readme = file_name == "readme.md" || file_name == "readme.txt" || file_name == "readme";
+        let is_readme =
+            file_name == "readme.md" || file_name == "readme.txt" || file_name == "readme";
         let ext = chunk
             .path
             .rsplit('.')
@@ -225,8 +226,7 @@ fn lexical_scores(prompt: &str, chunks: &[ProjectChunk]) -> Vec<(usize, f32)> {
             .to_ascii_lowercase();
         let is_code_ext = matches!(
             ext.as_str(),
-            "rs"
-                | "py"
+            "rs" | "py"
                 | "js"
                 | "jsx"
                 | "ts"
@@ -297,7 +297,10 @@ fn lexical_scores(prompt: &str, chunks: &[ProjectChunk]) -> Vec<(usize, f32)> {
                     score += 1.0;
                 }
             }
-            if path_l.ends_with("readme.md") || path_l.ends_with("main.rs") || path_l.ends_with("main.py") {
+            if path_l.ends_with("readme.md")
+                || path_l.ends_with("main.rs")
+                || path_l.ends_with("main.py")
+            {
                 score += 1.0;
             }
             if depth <= 1 {

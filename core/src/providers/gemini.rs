@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId, TokenEvent, TokenStream, TokenUsage};
+use super::{
+    LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId,
+    TokenEvent, TokenStream, TokenUsage,
+};
 
 #[derive(Clone)]
 pub struct GeminiProvider {
@@ -14,7 +17,11 @@ pub struct GeminiProvider {
 }
 
 impl GeminiProvider {
-    pub fn new(endpoint: String, access_token: Option<String>, timeout_secs: u64) -> Result<Self, LLMError> {
+    pub fn new(
+        endpoint: String,
+        access_token: Option<String>,
+        timeout_secs: u64,
+    ) -> Result<Self, LLMError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .build()
@@ -70,8 +77,11 @@ impl LLMProvider for GeminiProvider {
     }
 
     async fn send(&self, prompt: String, options: PromptOptions) -> Result<LLMResponse, LLMError> {
-        let token = self.access_token.as_deref().ok_or(LLMError::NotConfigured)?;
-        
+        let token = self
+            .access_token
+            .as_deref()
+            .ok_or(LLMError::NotConfigured)?;
+
         let final_prompt = if let Some(messages) = options.messages {
             let mut content = String::new();
             for msg in messages {
@@ -92,7 +102,7 @@ impl LLMProvider for GeminiProvider {
             p.push_str(&prompt);
             p
         };
-        
+
         let response = self
             .client
             .post(&self.endpoint)
@@ -132,7 +142,11 @@ impl LLMProvider for GeminiProvider {
         })
     }
 
-    async fn stream_send(&self, prompt: String, options: PromptOptions) -> Result<TokenStream, LLMError> {
+    async fn stream_send(
+        &self,
+        prompt: String,
+        options: PromptOptions,
+    ) -> Result<TokenStream, LLMError> {
         let full = self.send(prompt, options).await?;
         let mut events = vec![
             Ok(TokenEvent::Started),

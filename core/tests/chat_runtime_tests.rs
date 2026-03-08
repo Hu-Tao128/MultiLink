@@ -242,7 +242,10 @@ async fn runtime_persists_new_session_metadata_immediately() {
 
     let session_path = storage_dir.join(format!("{}.json", session_id));
     let index_path = storage_dir.join("index.json");
-    assert!(session_path.exists(), "new session file should be persisted");
+    assert!(
+        session_path.exists(),
+        "new session file should be persisted"
+    );
     assert!(index_path.exists(), "session index should be persisted");
 
     let mut router2 = ProviderRouter::new();
@@ -299,7 +302,10 @@ async fn runtime_project_context_skips_oversized_files() {
         .await;
 
     runtime
-        .set_session_project_root(&session_id, Some(project_root.to_string_lossy().to_string()))
+        .set_session_project_root(
+            &session_id,
+            Some(project_root.to_string_lossy().to_string()),
+        )
         .await
         .expect("set project root");
 
@@ -374,7 +380,10 @@ async fn runtime_project_context_ignores_venv_and_prefers_root_files() {
         .await;
 
     runtime
-        .set_session_project_root(&session_id, Some(project_root.to_string_lossy().to_string()))
+        .set_session_project_root(
+            &session_id,
+            Some(project_root.to_string_lossy().to_string()),
+        )
         .await
         .expect("set project root");
 
@@ -443,5 +452,8 @@ async fn runtime_limits_parallel_streams() {
         runtime.send_message(&second, "two".to_string()),
     )
     .await;
-    assert!(second_start.is_ok(), "second send should proceed after slot frees");
+    assert!(
+        second_start.is_ok(),
+        "second send should proceed after slot frees"
+    );
 }

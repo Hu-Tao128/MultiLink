@@ -9,7 +9,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
-use super::{LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId, TokenEvent, TokenStream, TokenUsage};
+use super::{
+    LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId,
+    TokenEvent, TokenStream, TokenUsage,
+};
 use crate::session::ChatMessage;
 
 #[derive(Clone)]
@@ -179,7 +182,10 @@ impl OllamaProvider {
         }
     }
 
-    async fn post_chat_with_retry<T: Serialize>(&self, body: &T) -> Result<reqwest::Response, LLMError> {
+    async fn post_chat_with_retry<T: Serialize>(
+        &self,
+        body: &T,
+    ) -> Result<reqwest::Response, LLMError> {
         let mut backoff = Duration::from_millis(200);
         let mut last_error: Option<LLMError> = None;
 
@@ -210,14 +216,21 @@ impl OllamaProvider {
                 }
                 Err(err) => {
                     let error_str = err.to_string();
-                    if error_str.contains("decoding response body") || error_str.contains("connection closed") {
+                    if error_str.contains("decoding response body")
+                        || error_str.contains("connection closed")
+                    {
                         if attempt + 1 == Self::RETRY_ATTEMPTS {
                             return Err(LLMError::Http(format!(
                                 "server connection failed: the stream was interrupted. This may be due to server overload, timeout, or network issues. Original error: {}",
                                 error_str
                             )));
                         }
-                        last_error = Some(LLMError::Http(format!("stream interrupted (attempt {}/{}): {}", attempt + 1, Self::RETRY_ATTEMPTS, error_str)));
+                        last_error = Some(LLMError::Http(format!(
+                            "stream interrupted (attempt {}/{}): {}",
+                            attempt + 1,
+                            Self::RETRY_ATTEMPTS,
+                            error_str
+                        )));
                     } else if err.is_timeout() {
                         if attempt + 1 == Self::RETRY_ATTEMPTS {
                             return Err(LLMError::Timeout);
@@ -238,7 +251,8 @@ impl OllamaProvider {
             backoff = (backoff * 2).min(Duration::from_secs(2));
         }
 
-        Err(last_error.unwrap_or_else(|| LLMError::Unexpected("request failed after retries".to_string())))
+        Err(last_error
+            .unwrap_or_else(|| LLMError::Unexpected("request failed after retries".to_string())))
     }
 }
 
@@ -368,7 +382,7 @@ impl LLMProvider for OllamaProvider {
             num_ctx: options.num_ctx,
             temperature: options.temperature,
         };
-        
+
         let messages = if let Some(chat_messages) = options.messages {
             chat_messages
                 .into_iter()
@@ -433,7 +447,7 @@ impl LLMProvider for OllamaProvider {
             num_ctx: options.num_ctx,
             temperature: options.temperature,
         };
-        
+
         let messages = if let Some(chat_messages) = options.messages {
             chat_messages
         } else {
@@ -486,7 +500,10 @@ impl LLMProvider for OllamaProvider {
                         return Err(e);
                     }
                     let err_str = e.to_string();
-                    if err_str.contains("connection") || err_str.contains("timeout") || err_str.contains("closed") {
+                    if err_str.contains("connection")
+                        || err_str.contains("timeout")
+                        || err_str.contains("closed")
+                    {
                         continue;
                     }
                     return Err(e);
@@ -495,7 +512,7 @@ impl LLMProvider for OllamaProvider {
 
             let byte_stream = response.bytes_stream();
             let attempt_num = attempt;
-            
+
             let stream = tokio_stream::wrappers::ReceiverStream::new({
                 let (tx, rx) = tokio::sync::mpsc::channel(64);
                 tokio::spawn(async move {
@@ -518,7 +535,7 @@ impl LLMProvider for OllamaProvider {
                                 match item {
                                     Some(Ok(bytes)) => {
                                         last_data_time = Instant::now();
-                                        
+
                                         if pending.len().saturating_add(bytes.len()) > MAX_PENDING_STREAM_BYTES {
                                             let _ = tx.send(Err(LLMError::Unexpected("stream buffer exceeded maximum size".to_string()))).await;
                                             return;
@@ -566,7 +583,7 @@ impl LLMProvider for OllamaProvider {
                                     }
                                     Some(Err(err)) => {
                                         let error_msg = err.to_string();
-                                        let is_retryable = error_msg.contains("decoding response body") 
+                                        let is_retryable = error_msg.contains("decoding response body")
                                             || error_msg.contains("connection closed")
                                             || error_msg.contains("reset");
 
@@ -586,7 +603,7 @@ impl LLMProvider for OllamaProvider {
                                         } else {
                                             LLMError::Http(error_msg)
                                         };
-                                        
+
                                         if is_retryable && attempt_num < STREAM_RETRIES {
                                             let _ = tx.send(Err(enhanced_error)).await;
                                         } else {
@@ -635,7 +652,9 @@ impl LLMProvider for OllamaProvider {
             return Ok(Box::pin(stream));
         }
 
-        Err(LLMError::Http("stream failed after all retries".to_string()))
+        Err(LLMError::Http(
+            "stream failed after all retries".to_string(),
+        ))
     }
 
     async fn get_model_info(&self, model: &str) -> Result<ProviderCapabilities, LLMError> {

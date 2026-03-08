@@ -57,7 +57,9 @@ observability_json_logs = false
 [storage]
 models_dir = "~/.local/share/multilink/models"
 "#;
-    fs::write(&file_path, legacy).await.expect("write legacy config");
+    fs::write(&file_path, legacy)
+        .await
+        .expect("write legacy config");
 
     let config = AppConfig::load_or_create(Path::new(&file_path))
         .await

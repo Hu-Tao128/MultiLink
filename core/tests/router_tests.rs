@@ -25,7 +25,11 @@ impl LLMProvider for MockProvider {
         self.available
     }
 
-    async fn send(&self, _prompt: String, _options: PromptOptions) -> Result<LLMResponse, LLMError> {
+    async fn send(
+        &self,
+        _prompt: String,
+        _options: PromptOptions,
+    ) -> Result<LLMResponse, LLMError> {
         Ok(LLMResponse {
             text: "ok".to_string(),
             provider: self.id,
