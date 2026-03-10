@@ -58,16 +58,7 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install cmake ninja -y
 
-      - name: Build Rust Backend (macOS)
-        if: runner.os == 'macOS'
-        env:
-          MACOSX_DEPLOYMENT_TARGET: "14.0"
-        run: |
-          export RUSTFLAGS="-C link-arg=-mmacosx-version-min=14.0 -C link-arg=-arch -C link-arg=arm64"
-          cargo build --release --manifest-path gui/rust/chat_controller/Cargo.toml
-
       - name: Build Rust Backend
-        if: runner.os != 'macOS'
         run: cargo build --release --manifest-path gui/rust/chat_controller/Cargo.toml
 
       - name: Configure CMake (Linux)
@@ -97,6 +88,16 @@ jobs:
       - name: Build
         run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
 
+      - name: Find binary
+        id: binary
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            echo "path=${{ steps.strings.outputs.build-output-dir }}/Release/multilink.exe" >> $GITHUB_OUTPUT
+          else
+            echo "path=${{ steps.strings.outputs.build-output-dir }}/multilink" >> $GITHUB_OUTPUT
+          fi
+
       - name: Test
         working-directory: ${{ steps.strings.outputs.build-output-dir }}
         run: ctest --build-config ${{ matrix.build_type }}
@@ -105,4 +106,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: MultiLink-${{ matrix.os }}
-          path: ${{ steps.strings.outputs.build-output-dir }}
+          path: ${{ steps.binary.outputs.path }}
