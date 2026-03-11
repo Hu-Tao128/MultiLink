@@ -60,6 +60,7 @@ endif()
 qt_add_qml_module(multilink_gui
     URI MultiLink
     VERSION 1.0
+    RESOURCE_PREFIX "/qt/qml"
     QML_FILES
         qml/Main.qml
         qml/ChatView.qml
