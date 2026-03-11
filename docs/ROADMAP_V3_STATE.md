@@ -25,6 +25,20 @@ NEXT_PHASE = 8 (Router hardening)
 2. Phase 8.5: LAN Agent protocol implementation.
 3. MCP adapter as thin external layer.
 
+## Recovery Plan (Pre-test execution)
+
+- [ ] CI stabilization for GUI build matrix (Linux/macOS/Windows) with smoke-run fallback when CTest suites are not present.
+- [ ] Phase 8 hardening closure: health monitor, circuit breaker, backoff/retry policy.
+- [ ] Phase 8.5 bootstrap: LAN Agent protocol (MessagePack streaming) + MCP thin adapter (no core logic move).
+- [ ] Exit criteria definition before Phase 9 start: runtime fallback validated, network security hooks connected, adapter E2E request/response path verified.
+
+## What is behind
+
+- Phase 7 is still partial because enforcement completion depends on 8.5 integration.
+- Phase 8 is partial and blocks the guardrail to start Phase 9.
+- Phase 8.5 is not started and is currently the main critical path item.
+- Phase 9 and 10 are blocked by design (not sequencing errors, but dependency debt).
+
 ## MCP Strategy
 
 - MCP as external adapter layer (not core)
