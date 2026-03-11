@@ -11,10 +11,15 @@ enabled = true
 [context]
 embeddings_enabled = true
 embed_model = "embeddinggemma"
+# embed_base_url = "http://127.0.0.1:11434"  # URL para embeddings. Si no se especifica, usa el servidor primario
+# embed_connect_timeout_ms = 2000
+# embed_request_timeout_ms = 12000
+# embed_max_retries = 1
+# embed_batch_size = 24
 project_top_k = 8
 max_project_tokens = 2000
 debug = false
-engine = "v1"
+engine = "v2"
 
 [performance]
 profile = "auto"

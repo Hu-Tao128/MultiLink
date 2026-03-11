@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::context_engine::chunker::SemanticChunk;
 
@@ -13,6 +14,11 @@ struct EmbeddingCacheFile {
 pub struct EmbeddingBlendResult {
     pub scores: HashMap<String, f32>,
     pub used_embeddings: bool,
+    pub reason: String,
+    pub latency_ms: u128,
+    pub attempts: u8,
+    pub base_url: String,
+    pub model: String,
 }
 
 pub async fn blend_embedding_scores(
@@ -20,26 +26,52 @@ pub async fn blend_embedding_scores(
     candidates: &[SemanticChunk],
     base_url: &str,
     model: &str,
+    connect_timeout_ms: u64,
+    request_timeout_ms: u64,
+    max_retries: u8,
+    batch_size: usize,
     cache_dir: &Path,
 ) -> EmbeddingBlendResult {
+    let started = Instant::now();
     if candidates.is_empty() {
         return EmbeddingBlendResult {
             scores: HashMap::new(),
             used_embeddings: false,
+            reason: "no_candidates".to_string(),
+            latency_ms: 0,
+            attempts: 0,
+            base_url: base_url.to_string(),
+            model: model.to_string(),
         };
     }
 
     let cache_path = cache_dir.join("embeddings.json");
     let mut cache = load_cache(&cache_path);
 
-    let query_vec = match embed_inputs(base_url, model, vec![prompt.to_string()]).await {
+    let mut attempts = 0u8;
+    let query_vec = match embed_inputs(
+        base_url,
+        model,
+        vec![prompt.to_string()],
+        connect_timeout_ms,
+        request_timeout_ms,
+        max_retries,
+    )
+    .await
+    {
         Some(v) => v.into_iter().next(),
         None => None,
     };
+    attempts = attempts.saturating_add(1);
     let Some(query_vec) = query_vec else {
         return EmbeddingBlendResult {
             scores: HashMap::new(),
             used_embeddings: false,
+            reason: "query_embedding_failed".to_string(),
+            latency_ms: started.elapsed().as_millis(),
+            attempts,
+            base_url: base_url.to_string(),
+            model: model.to_string(),
         };
     };
 
@@ -57,13 +89,39 @@ pub async fn blend_embedding_scores(
     }
 
     if !missing.is_empty() {
-        if let Some(vectors) = embed_inputs(base_url, model, missing).await {
-            for (idx, vec) in vectors.into_iter().enumerate() {
-                if let Some(hash) = missing_ids.get(idx) {
-                    cache.vectors.insert(hash.clone(), vec);
+        let safe_batch_size = batch_size.max(1);
+        let mut offset = 0usize;
+        let mut failed_batches = 0usize;
+        while offset < missing.len() {
+            let end = (offset + safe_batch_size).min(missing.len());
+            let batch = missing[offset..end].to_vec();
+            if let Some(vectors) = embed_inputs(
+                base_url,
+                model,
+                batch,
+                connect_timeout_ms,
+                request_timeout_ms,
+                max_retries,
+            )
+            .await
+            {
+                attempts = attempts.saturating_add(1);
+                for (idx, vec) in vectors.into_iter().enumerate() {
+                    if let Some(hash) = missing_ids.get(offset + idx) {
+                        cache.vectors.insert(hash.clone(), vec);
+                    }
                 }
+            } else {
+                failed_batches += 1;
             }
-            let _ = save_cache(&cache_path, &cache);
+            offset = end;
+        }
+        let _ = save_cache(&cache_path, &cache);
+
+        if failed_batches > 0 {
+            // Do not fail hard when some chunk batches timeout/fail.
+            // Use partial cached/new vectors and continue with hybrid ranking.
+            // This keeps context quality acceptable instead of collapsing to lexical-only.
         }
     }
 
@@ -74,9 +132,19 @@ pub async fn blend_embedding_scores(
         }
     }
 
+    let used_embeddings = !scores.is_empty();
     EmbeddingBlendResult {
         scores,
-        used_embeddings: true,
+        used_embeddings,
+        reason: if used_embeddings {
+            "ok".to_string()
+        } else {
+            "chunk_embedding_failed".to_string()
+        },
+        latency_ms: started.elapsed().as_millis(),
+        attempts,
+        base_url: base_url.to_string(),
+        model: model.to_string(),
     }
 }
 
@@ -108,14 +176,21 @@ struct OllamaEmbedResponse {
     embeddings: Vec<Vec<f32>>,
 }
 
-async fn embed_inputs(base_url: &str, model: &str, input: Vec<String>) -> Option<Vec<Vec<f32>>> {
+async fn embed_inputs(
+    base_url: &str,
+    model: &str,
+    input: Vec<String>,
+    connect_timeout_ms: u64,
+    request_timeout_ms: u64,
+    max_retries: u8,
+) -> Option<Vec<Vec<f32>>> {
     if input.is_empty() {
         return Some(Vec::new());
     }
 
     let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(12))
+        .connect_timeout(Duration::from_millis(connect_timeout_ms))
+        .timeout(Duration::from_millis(request_timeout_ms))
         .build()
         .ok()?;
 
@@ -126,15 +201,43 @@ async fn embed_inputs(base_url: &str, model: &str, input: Vec<String>) -> Option
         keep_alive: "10m".to_string(),
     };
     let url = format!("{}/api/embed", base_url.trim_end_matches('/'));
-    let resp = client.post(url).json(&body).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
+    let mut attempt = 0u8;
+    let max_attempts = max_retries.saturating_add(1);
+    while attempt < max_attempts {
+        attempt = attempt.saturating_add(1);
+        let resp = match client.post(&url).json(&body).send().await {
+            Ok(v) => v,
+            Err(_) => {
+                if attempt < max_attempts {
+                    tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
+                    continue;
+                }
+                return None;
+            }
+        };
+        if !resp.status().is_success() {
+            if attempt < max_attempts {
+                tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
+                continue;
+            }
+            return None;
+        }
+        let parsed = match resp.json::<OllamaEmbedResponse>().await {
+            Ok(v) => v,
+            Err(_) => {
+                if attempt < max_attempts {
+                    tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
+                    continue;
+                }
+                return None;
+            }
+        };
+        if parsed.embeddings.is_empty() {
+            return None;
+        }
+        return Some(parsed.embeddings);
     }
-    let parsed = resp.json::<OllamaEmbedResponse>().await.ok()?;
-    if parsed.embeddings.is_empty() {
-        return None;
-    }
-    Some(parsed.embeddings)
+    None
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -168,9 +271,7 @@ mod tests {
         let path = temp.path().join("embeddings.json");
 
         let mut cache = EmbeddingCacheFile::default();
-        cache
-            .vectors
-            .insert("abc".to_string(), vec![0.1, 0.2, 0.3]);
+        cache.vectors.insert("abc".to_string(), vec![0.1, 0.2, 0.3]);
         save_cache(&path, &cache).expect("save");
         assert!(fs::metadata(&path).is_ok());
 

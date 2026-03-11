@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs as stdfs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -14,7 +14,9 @@ use tokio::sync::{mpsc, watch, Mutex, RwLock, Semaphore};
 use walkdir::WalkDir;
 
 use crate::config::{ModelTier, RuntimeConfig};
-use crate::context_engine::{ContextEngine, ContextEngineVersion, ContextRetrievalConfig, ContextEngineV1, ContextEngineV2, RetrievalResult};
+use crate::context_engine::{
+    ContextEngine, ContextEngineV2, ContextEngineVersion, ContextRetrievalConfig, RetrievalResult,
+};
 use crate::context_retrieval::{build_relevant_project_context, RetrievalConfig};
 use crate::execution::{ExecutionDispatchRequest, ExecutionDispatcher};
 use crate::hardware_profile::{HardwareCaps, HardwareProfile};
@@ -371,7 +373,54 @@ impl ChatRuntime {
         let session_id = request.session_id.as_str();
         let prompt = request.prompt;
 
-        let (provider, model) = {
+        if let Some(write_cmd) = parse_write_file_command(&prompt) {
+            let (project_root, user_snapshot) = {
+                let mut guard = self.sessions.write().await;
+                let session = guard
+                    .get_mut(session_id)
+                    .ok_or(ChatRuntimeError::SessionNotFound)?;
+                session.add_user_message(prompt.clone());
+                session.set_state(SessionState::Sending);
+                let project_root = session.project_root.clone();
+                let snapshot = session.clone();
+                (project_root, snapshot)
+            };
+            persist_session(&self.storage_dir, &user_snapshot).await?;
+
+            let write_result = execute_write_file_command(project_root.as_deref(), &write_cmd).await;
+            let (assistant_text, final_state) = match write_result {
+                Ok(written_path) => (
+                    format!(
+                        "Archivo creado correctamente: `{}`",
+                        written_path.display()
+                    ),
+                    SessionState::Done,
+                ),
+                Err(err) => (
+                    format!("No se pudo crear el archivo: {}", err),
+                    SessionState::Error(err.to_string()),
+                ),
+            };
+
+            let snapshot = {
+                let mut guard = self.sessions.write().await;
+                let session = guard
+                    .get_mut(session_id)
+                    .ok_or(ChatRuntimeError::SessionNotFound)?;
+                session.add_assistant_message(assistant_text.clone());
+                session.set_state(final_state);
+                session.clone()
+            };
+            persist_session(&self.storage_dir, &snapshot).await?;
+
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let _ = event_tx.send(StreamEvent::Started).await;
+            let _ = event_tx.send(StreamEvent::Chunk(assistant_text)).await;
+            let _ = event_tx.send(StreamEvent::Finished).await;
+            return Ok(ChatResponse { events: event_rx });
+        }
+
+        let (provider, model, session_project_root) = {
             let mut guard = self.sessions.write().await;
             let session = guard
                 .get_mut(session_id)
@@ -380,11 +429,13 @@ impl ChatRuntime {
             session.set_state(SessionState::Sending);
             let provider = session.provider;
             let model = session.model.clone();
+            let project_root = session.project_root.clone();
             let snapshot = session.clone();
             drop(guard);
             persist_session(&self.storage_dir, &snapshot).await?;
-            (provider, model)
+            (provider, model, project_root)
         };
+        let natural_write_target = detect_natural_write_target(&prompt);
 
         self.ensure_project_context_cached(session_id).await;
 
@@ -438,6 +489,15 @@ impl ChatRuntime {
         let allow_remote_fallback = effective_runtime
             .remote_threshold
             .allows_remote(task_weight);
+        if context_debug_enabled(&self.runtime_config) {
+            eprintln!(
+                "[routing] session={} task_weight={:?} remote_threshold={:?} allow_remote_fallback={}",
+                session_id,
+                task_weight,
+                effective_runtime.remote_threshold,
+                allow_remote_fallback
+            );
+        }
         let intent_project_cap = effective_runtime
             .max_context_tokens
             .saturating_mul(intent_budget.project_budget_ratio as usize)
@@ -512,8 +572,15 @@ impl ChatRuntime {
             .await;
 
         let mut fallback_retry_used = false;
-        let stream = match stream_result {
-            Ok(result) => result.stream,
+        let (stream, dispatcher_fallback_used, dispatcher_retries, dispatcher_server_used) = match stream_result {
+            Ok(result) => {
+                let server_used = if let Some((_, url)) = result.server_used.rsplit_once('@') {
+                    url.to_string()
+                } else {
+                    effective_runtime.context_ollama_base_url.clone()
+                };
+                (result.stream, result.fallback_used, result.retries, server_used)
+            }
             Err(err) => {
                 let err_text = err.to_string();
                 eprintln!("[provider] stream error: {}", err_text);
@@ -537,16 +604,27 @@ impl ChatRuntime {
                         num_ctx: None,
                         ..PromptOptions::default()
                     };
-                    self.execution_dispatcher
+                    let retry_result = self
+                        .execution_dispatcher
                         .dispatch(ExecutionDispatchRequest {
                             provider,
-                            prompt,
+                            prompt: prompt.clone(),
                             options: fallback_options,
                             allow_remote_fallback,
                         })
                         .await
-                        .map(|r| r.stream)
-                        .map_err(|e| ChatRuntimeError::Provider(e.to_string()))?
+                        .map_err(|e| ChatRuntimeError::Provider(e.to_string()))?;
+                    let server_used = if let Some((_, url)) = retry_result.server_used.rsplit_once('@') {
+                        url.to_string()
+                    } else {
+                        effective_runtime.context_ollama_base_url.clone()
+                    };
+                    (
+                        retry_result.stream,
+                        retry_result.fallback_used,
+                        retry_result.retries,
+                        server_used,
+                    )
                 } else {
                     return Err(ChatRuntimeError::Provider(err_text));
                 }
@@ -568,15 +646,38 @@ impl ChatRuntime {
             .model
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
-        let metrics_server = effective_runtime.context_ollama_base_url.clone();
+        let metrics_server = dispatcher_server_used;
         let metrics_top_k = effective_runtime.context_project_top_k;
         let metrics_json = effective_runtime.observability_json_logs;
         let metrics_context_tokens = context_tokens;
         let started_at = Instant::now();
-        let retries: usize = if fallback_retry_used { 1 } else { 0 };
+        let retries: usize = dispatcher_retries + usize::from(fallback_retry_used);
+        let execution_dispatcher = self.execution_dispatcher.clone();
+        let resilience_provider = provider;
+        let resilience_prompt = prompt.clone();
+        let resilience_base_options = options.clone();
+        let resilience_local_model = effective_runtime
+            .execution_servers
+            .iter()
+            .filter(|s| s.enabled)
+            .find(|s| {
+                s.base_url.contains("127.0.0.1")
+                    || s.base_url.contains("localhost")
+                    || s.name.to_ascii_lowercase().contains("local")
+            })
+            .or_else(|| effective_runtime.execution_servers.iter().find(|s| s.enabled))
+            .and_then(|s| {
+                let model = s.default_model.trim();
+                if model.is_empty() || model.eq_ignore_ascii_case("auto") {
+                    None
+                } else {
+                    Some(model.to_string())
+                }
+            });
 
         tokio::spawn(async move {
             let _permit = stream_permit;
+            const RESILIENCE_MAX_RETRIES: usize = 3;
 
             let _ = event_tx.send(StreamEvent::Started).await;
             {
@@ -592,6 +693,10 @@ impl ChatRuntime {
             let mut last_emit = Instant::now();
             let mut usage_prompt_tokens = 0usize;
             let mut usage_completion_tokens = 0usize;
+            let mut metrics_server_value = metrics_server;
+            let mut total_retries = retries;
+            let mut resilience_retries = 0usize;
+            let mut file_write_done = false;
 
             loop {
                 tokio::select! {
@@ -619,6 +724,28 @@ impl ChatRuntime {
                                 }
                             }
                             Some(Ok(crate::providers::TokenEvent::Completed)) => {
+                                if let Some(target_path) = natural_write_target.as_ref() {
+                                    if !file_write_done {
+                                        let payload = extract_file_payload_from_assistant(&full_output);
+                                        let write_cmd = WriteFileCommand {
+                                            relative_path: target_path.clone(),
+                                            content: payload,
+                                        };
+                                        match execute_write_file_command(session_project_root.as_deref(), &write_cmd).await {
+                                            Ok(written_path) => {
+                                                file_write_done = true;
+                                                let notice = format!("\n\n[archivo creado: `{}`]", written_path.display());
+                                                full_output.push_str(&notice);
+                                                let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
+                                            }
+                                            Err(err) => {
+                                                let notice = format!("\n\n[no se pudo crear archivo: {}]", err);
+                                                full_output.push_str(&notice);
+                                                let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
+                                            }
+                                        }
+                                    }
+                                }
                                 if !pending_emit.is_empty() {
                                     let out = pending_emit.clone();
                                     pending_emit.clear();
@@ -641,16 +768,125 @@ impl ChatRuntime {
                             Some(Ok(crate::providers::TokenEvent::Started)) => {}
                             Some(Err(err)) => {
                                 let message = err.to_string();
+
+                                let retryable_stream_close = message.contains("stream interrupted")
+                                    || message.contains("server closed connection")
+                                    || message.contains("connection closed");
+
+                                if retryable_stream_close
+                                    && full_output.is_empty()
+                                    && resilience_retries < RESILIENCE_MAX_RETRIES
+                                {
+                                    resilience_retries += 1;
+                                    total_retries = total_retries.saturating_add(1);
+
+                                    let mut retry_options = resilience_base_options.clone();
+                                    if let Some(local_model) = resilience_local_model.clone() {
+                                        retry_options.model = Some(local_model.clone());
+                                        let _ = event_tx
+                                            .send(StreamEvent::Chunk(format!(
+                                                "\n[notice] remote stream interrupted, retrying on local model '{}' ({}/{})...\n",
+                                                local_model,
+                                                resilience_retries,
+                                                RESILIENCE_MAX_RETRIES
+                                            )))
+                                            .await;
+                                    } else {
+                                        let _ = event_tx
+                                            .send(StreamEvent::Chunk(format!(
+                                                "\n[notice] remote stream interrupted, retrying generation ({}/{})...\n",
+                                                resilience_retries,
+                                                RESILIENCE_MAX_RETRIES
+                                            )))
+                                            .await;
+                                    }
+
+                                    match execution_dispatcher
+                                        .dispatch(ExecutionDispatchRequest {
+                                            provider: resilience_provider,
+                                            prompt: resilience_prompt.clone(),
+                                            options: retry_options,
+                                            allow_remote_fallback: false,
+                                        })
+                                        .await
+                                    {
+                                        Ok(retry_dispatch) => {
+                                            if let Some((_, url)) = retry_dispatch.server_used.rsplit_once('@') {
+                                                metrics_server_value = url.to_string();
+                                            }
+                                            stream = retry_dispatch.stream;
+                                            continue;
+                                        }
+                                        Err(dispatch_err) => {
+                                            let _ = event_tx
+                                                .send(StreamEvent::Chunk(format!(
+                                                    "\n[notice] resilience retry failed: {}\n",
+                                                    dispatch_err
+                                                )))
+                                                .await;
+                                        }
+                                    }
+                                }
+
                                 if !pending_emit.is_empty() {
                                     let out = pending_emit.clone();
                                     pending_emit.clear();
                                     let _ = event_tx.send(StreamEvent::Chunk(out)).await;
+                                }
+                                if let Some(target_path) = natural_write_target.as_ref() {
+                                    if !file_write_done {
+                                        let payload = extract_file_payload_from_assistant(&full_output);
+                                        if !payload.trim().is_empty() {
+                                            let write_cmd = WriteFileCommand {
+                                                relative_path: target_path.clone(),
+                                                content: payload,
+                                            };
+                                            match execute_write_file_command(session_project_root.as_deref(), &write_cmd).await {
+                                                Ok(written_path) => {
+                                                    file_write_done = true;
+                                                    let notice = format!(
+                                                        "\n\n[archivo parcial creado pese al corte de stream: `{}`]",
+                                                        written_path.display()
+                                                    );
+                                                    full_output.push_str(&notice);
+                                                    let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
+                                                }
+                                                Err(write_err) => {
+                                                    let notice = format!("\n\n[no se pudo crear archivo parcial: {}]", write_err);
+                                                    full_output.push_str(&notice);
+                                                    let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 let _ = event_tx.send(StreamEvent::Error(message.clone())).await;
                                 let _ = finalize_error(&sessions, &storage_dir, &session_id_owned, &message).await;
                                 break;
                             }
                             None => {
+                                if let Some(target_path) = natural_write_target.as_ref() {
+                                    if !file_write_done {
+                                        let payload = extract_file_payload_from_assistant(&full_output);
+                                        let write_cmd = WriteFileCommand {
+                                            relative_path: target_path.clone(),
+                                            content: payload,
+                                        };
+                                        match execute_write_file_command(session_project_root.as_deref(), &write_cmd).await {
+                                            Ok(written_path) => {
+                                                file_write_done = true;
+                                                let notice = format!("\n\n[archivo creado: `{}`]", written_path.display());
+                                                full_output.push_str(&notice);
+                                                let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
+                                            }
+                                            Err(err) => {
+                                                let notice = format!("\n\n[no se pudo crear archivo: {}]", err);
+                                                full_output.push_str(&notice);
+                                                let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
+                                            }
+                                        }
+                                    }
+                                }
                                 if !pending_emit.is_empty() {
                                     let out = pending_emit.clone();
                                     pending_emit.clear();
@@ -668,14 +904,14 @@ impl ChatRuntime {
             let metrics = ExecutionMetrics {
                 timestamp_ms: ExecutionMetrics::now_timestamp_ms(),
                 model: model_used,
-                server: metrics_server,
+                server: metrics_server_value,
                 tokens_in: usage_prompt_tokens,
                 tokens_out: usage_completion_tokens,
                 context_tokens: metrics_context_tokens,
                 top_k_applied: metrics_top_k,
                 latency_ms: started_at.elapsed().as_millis(),
-                fallback_used: fallback_retry_used,
-                retries,
+                fallback_used: fallback_retry_used || dispatcher_fallback_used,
+                retries: total_retries,
             };
             metrics.emit(metrics_json);
 
@@ -857,16 +1093,19 @@ impl ChatRuntime {
         let mut system_content = String::new();
 
         system_content.push_str("You are a senior software engineer.\n");
+        system_content.push_str(
+            "Do not claim that files were created/modified or commands were executed unless a tool/result in this chat explicitly confirms success. If direct file actions are unavailable, say so clearly and provide the file content or exact patch instead.\n",
+        );
         if model_tier == ModelTier::Small {
             system_content.push_str(
-                "Use this exact response structure:\n1) Brief answer\n2) Evidence (at least 2 files)\n3) Uncertainties.\n",
+                "Prefer concise natural-language answers. Use numbered structure only when the user explicitly asks for a list.\n",
             );
             system_content.push_str(
-                "Every important claim must reference at least one file from Project Context. If evidence is missing, respond exactly: No tengo suficiente contexto. Do not guess. Do not suggest external tools/libraries unless they already appear in Project Context files.\n\n",
+                "Ground important claims in Project Context files. If evidence is missing for one part, say: No tengo suficiente contexto para esa parte, then continue with what is supported. Do not guess. Do not suggest external tools/libraries unless they already appear in Project Context files.\n\n",
             );
         } else {
             system_content.push_str(
-                "Every important claim must reference at least one file from Project Context. If evidence is missing, respond exactly: No tengo suficiente contexto.\n\n",
+                "Ground important claims in Project Context files. If evidence is missing for one part, say: No tengo suficiente contexto para esa parte, then continue with what is supported. Do not guess.\n\n",
             );
         }
 
@@ -882,6 +1121,19 @@ impl ChatRuntime {
                 );
             }
             _ => {}
+        }
+
+        if looks_like_project_overview_prompt(&current_prompt) {
+            system_content.push_str(
+                "For project-overview questions, give a concrete summary from files in Project Context: purpose, architecture style, and languages/frameworks actually present in those files. Keep it direct, avoid boilerplate advice, and avoid saying there is no context unless Project Context is empty.\n\n",
+            );
+        }
+
+        if let Some(target) = detect_natural_write_target(&current_prompt) {
+            system_content.push_str(&format!(
+                "The user asked to create `{}`. Return file-ready content only (prefer a single Markdown body), with no preamble like 'A continuacion...'. Keep recommendations concrete and grounded in Project Context.\n\n",
+                target
+            ));
         }
 
         if let Some(system_context_path) = &self.system_context_dir {
@@ -930,12 +1182,23 @@ impl ChatRuntime {
                         let config = ContextRetrievalConfig {
                             embeddings_enabled: effective_runtime.context_embeddings_enabled,
                             embed_model: effective_runtime.context_embed_model.clone(),
+                            embed_base_url: effective_runtime.embed_base_url.clone(),
                             ollama_base_url: effective_runtime.context_ollama_base_url.clone(),
+                            embed_connect_timeout_ms: effective_runtime.embed_connect_timeout_ms,
+                            embed_request_timeout_ms: effective_runtime.embed_request_timeout_ms,
+                            embed_max_retries: effective_runtime.embed_max_retries,
+                            embed_batch_size: effective_runtime.embed_batch_size,
                             top_k: effective_runtime.context_project_top_k,
                             version: ContextEngineVersion::V2,
                         };
                         engine
-                            .retrieve(project_context, &current_prompt, context_budget, model_hint, &config)
+                            .retrieve(
+                                project_context,
+                                &current_prompt,
+                                context_budget,
+                                model_hint,
+                                &config,
+                            )
                             .await
                     } else {
                         let v1_result = build_relevant_project_context(
@@ -946,7 +1209,14 @@ impl ChatRuntime {
                             RetrievalConfig {
                                 embeddings_enabled: effective_runtime.context_embeddings_enabled,
                                 embed_model: effective_runtime.context_embed_model.clone(),
+                                embed_base_url: effective_runtime.embed_base_url.clone(),
                                 ollama_base_url: effective_runtime.context_ollama_base_url.clone(),
+                                embed_connect_timeout_ms: effective_runtime
+                                    .embed_connect_timeout_ms,
+                                embed_request_timeout_ms: effective_runtime
+                                    .embed_request_timeout_ms,
+                                embed_max_retries: effective_runtime.embed_max_retries,
+                                embed_batch_size: effective_runtime.embed_batch_size,
                                 top_k: effective_runtime.context_project_top_k,
                             },
                         )
@@ -957,6 +1227,11 @@ impl ChatRuntime {
                             used_tokens: v1_result.used_tokens,
                             top_k: v1_result.top_k,
                             embedding_used: v1_result.embedding_used,
+                            embedding_reason: v1_result.embedding_diag.reason,
+                            embedding_latency_ms: v1_result.embedding_diag.latency_ms,
+                            embedding_attempts: v1_result.embedding_diag.attempts,
+                            embed_base_url: v1_result.embedding_diag.base_url,
+                            embed_model: v1_result.embedding_diag.model,
                             is_truncated: false,
                             budget_used: v1_result.used_tokens,
                         }
@@ -972,12 +1247,17 @@ impl ChatRuntime {
                         system_content.push('\n');
                         if context_debug_enabled(&self.runtime_config) {
                             eprintln!(
-                                "[context] session={} model={:?} engine={} top_k={} embeddings={} is_truncated={} selected_files={:?} context_tokens={}",
+                                "[context] session={} model={:?} engine={} top_k={} embeddings={} reason={} embed_attempts={} embed_latency_ms={} embed_model={} embed_url={} is_truncated={} selected_files={:?} context_tokens={}",
                                 session_id,
                                 model_hint,
                                 effective_runtime.context_engine,
                                 retrieval.top_k,
                                 retrieval.embedding_used,
+                                retrieval.embedding_reason,
+                                retrieval.embedding_attempts,
+                                retrieval.embedding_latency_ms,
+                                retrieval.embed_model,
+                                retrieval.embed_base_url,
                                 retrieval.is_truncated,
                                 retrieval.selected_files,
                                 retrieval.budget_used
@@ -1498,6 +1778,9 @@ fn project_file_priority(root: &Path, file_path: &Path) -> i32 {
             score -= 8;
         }
     }
+    if file_name == "agents.md" || file_name == "gemini.md" || file_name == "claude.md" {
+        score -= 60;
+    }
     if matches!(
         file_name.as_str(),
         "main.py"
@@ -1537,6 +1820,141 @@ fn context_debug_enabled(runtime_config: &RuntimeConfig) -> bool {
         return v == "1" || v.eq_ignore_ascii_case("true");
     }
     runtime_config.context_debug
+}
+
+#[derive(Debug, Clone)]
+struct WriteFileCommand {
+    relative_path: String,
+    content: String,
+}
+
+fn parse_write_file_command(prompt: &str) -> Option<WriteFileCommand> {
+    let mut lines = prompt.lines();
+    let first = lines.next()?.trim();
+    let mut parts = first.splitn(2, ' ');
+    let command = parts.next()?.trim();
+    if command != "/write-file" {
+        return None;
+    }
+    let relative_path = parts.next()?.trim();
+    if relative_path.is_empty() {
+        return None;
+    }
+
+    let mut content = lines.collect::<Vec<_>>().join("\n");
+    if let Some(stripped) = strip_single_fence(&content) {
+        content = stripped;
+    }
+
+    Some(WriteFileCommand {
+        relative_path: relative_path.to_string(),
+        content,
+    })
+}
+
+fn detect_natural_write_target(prompt: &str) -> Option<String> {
+    let lower = prompt.to_ascii_lowercase();
+    let mentions_create = lower.contains("crea")
+        || lower.contains("crear")
+        || lower.contains("genera")
+        || lower.contains("genera un")
+        || lower.contains("generate")
+        || lower.contains("create")
+        || lower.contains("write ");
+    if !mentions_create {
+        return None;
+    }
+
+    for token in prompt.split_whitespace() {
+        let cleaned = token
+            .trim_matches(|c: char| c == '`' || c == '"' || c == '\'' || c == ',' || c == ':' || c == ';' || c == ')' || c == '(')
+            .trim();
+        if cleaned.is_empty() || cleaned.starts_with('/') {
+            continue;
+        }
+        if cleaned.contains("..") {
+            continue;
+        }
+        let has_ext = cleaned.rsplit_once('.').map(|(_, ext)| !ext.is_empty()).unwrap_or(false);
+        if has_ext && (cleaned.contains('/') || cleaned.contains('.') || cleaned.ends_with(".md")) {
+            return Some(cleaned.to_string());
+        }
+    }
+    None
+}
+
+fn strip_single_fence(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with("```") {
+        return None;
+    }
+    let first_nl = trimmed.find('\n')?;
+    let body = &trimmed[first_nl + 1..];
+    let end = body.rfind("\n```")?;
+    Some(body[..end].to_string())
+}
+
+fn extract_file_payload_from_assistant(text: &str) -> String {
+    if let Some(stripped) = strip_single_fence(text) {
+        return stripped;
+    }
+    text.trim().to_string()
+}
+
+async fn execute_write_file_command(
+    project_root: Option<&str>,
+    command: &WriteFileCommand,
+) -> Result<PathBuf, ChatRuntimeError> {
+    let rel = Path::new(&command.relative_path);
+    if rel.is_absolute() {
+        return Err(ChatRuntimeError::Path(
+            "write-file solo acepta rutas relativas".to_string(),
+        ));
+    }
+    if rel.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(ChatRuntimeError::Path(
+            "ruta inválida: no se permite salir del proyecto".to_string(),
+        ));
+    }
+
+    let base = if let Some(root) = project_root {
+        PathBuf::from(root)
+    } else {
+        std::env::current_dir().map_err(|e| ChatRuntimeError::Path(e.to_string()))?
+    };
+
+    let target = base.join(rel);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).await.map_err(ChatRuntimeError::Io)?;
+    }
+    fs::write(&target, command.content.as_bytes())
+        .await
+        .map_err(ChatRuntimeError::Io)?;
+
+    Ok(target)
+}
+
+fn looks_like_project_overview_prompt(prompt: &str) -> bool {
+    let p = prompt.to_ascii_lowercase();
+    p.contains("what is this project")
+        || p.contains("what does this project do")
+        || p.contains("what is this repo")
+        || p.contains("what does this repo do")
+        || p.contains("what is this repository")
+        || p.contains("what does this repository do")
+        || p.contains("project about")
+        || p.contains("de que trata este proyecto")
+        || p.contains("de qué trata este proyecto")
+        || p.contains("de que trata el proyecto")
+        || p.contains("de qué trata el proyecto")
+        || p.contains("de que va este proyecto")
+        || p.contains("de qué va este proyecto")
+        || p.contains("resumen del proyecto")
 }
 
 fn cached_hardware_caps() -> HardwareCaps {

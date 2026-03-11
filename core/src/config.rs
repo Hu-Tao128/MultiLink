@@ -33,6 +33,11 @@ pub struct StorageConfig {
 pub struct ContextConfig {
     pub embeddings_enabled: bool,
     pub embed_model: String,
+    pub embed_base_url: Option<String>,
+    pub embed_connect_timeout_ms: Option<u64>,
+    pub embed_request_timeout_ms: Option<u64>,
+    pub embed_max_retries: Option<u8>,
+    pub embed_batch_size: Option<usize>,
     pub project_top_k: usize,
     pub max_project_tokens: usize,
     pub debug: bool,
@@ -103,6 +108,11 @@ pub struct RuntimeConfig {
     pub context_embeddings_enabled: bool,
     pub context_debug: bool,
     pub context_embed_model: String,
+    pub embed_base_url: String,
+    pub embed_connect_timeout_ms: u64,
+    pub embed_request_timeout_ms: u64,
+    pub embed_max_retries: u8,
+    pub embed_batch_size: usize,
     pub context_project_top_k: usize,
     pub context_ollama_base_url: String,
     pub context_engine: String,
@@ -231,6 +241,11 @@ impl Default for RuntimeConfig {
             context_embeddings_enabled: true,
             context_debug: false,
             context_embed_model: "embeddinggemma".to_string(),
+            embed_base_url: "http://127.0.0.1:11434".to_string(),
+            embed_connect_timeout_ms: 2_000,
+            embed_request_timeout_ms: 12_000,
+            embed_max_retries: 1,
+            embed_batch_size: 24,
             context_project_top_k: 8,
             context_ollama_base_url: "http://127.0.0.1:11434".to_string(),
             context_engine: "v1".to_string(),
@@ -262,6 +277,11 @@ impl Default for ContextConfig {
         Self {
             embeddings_enabled: true,
             embed_model: "embeddinggemma".to_string(),
+            embed_base_url: None,
+            embed_connect_timeout_ms: None,
+            embed_request_timeout_ms: None,
+            embed_max_retries: None,
+            embed_batch_size: None,
             project_top_k: 8,
             max_project_tokens: 2000,
             debug: false,
@@ -491,6 +511,34 @@ impl AppConfig {
             self.context.embed_model = value;
         }
 
+        if let Ok(value) = std::env::var("MULTILINK_EMBED_BASE_URL") {
+            self.context.embed_base_url = Some(value);
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_EMBED_CONNECT_TIMEOUT_MS") {
+            if let Ok(parsed) = value.parse::<u64>() {
+                self.context.embed_connect_timeout_ms = Some(parsed);
+            }
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_EMBED_REQUEST_TIMEOUT_MS") {
+            if let Ok(parsed) = value.parse::<u64>() {
+                self.context.embed_request_timeout_ms = Some(parsed);
+            }
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_EMBED_MAX_RETRIES") {
+            if let Ok(parsed) = value.parse::<u8>() {
+                self.context.embed_max_retries = Some(parsed);
+            }
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_EMBED_BATCH_SIZE") {
+            if let Ok(parsed) = value.parse::<usize>() {
+                self.context.embed_batch_size = Some(parsed);
+            }
+        }
+
         if let Ok(value) = std::env::var("MULTILINK_PROJECT_TOPK") {
             if let Ok(parsed) = value.parse::<usize>() {
                 self.context.project_top_k = parsed.clamp(2, 24);
@@ -516,6 +564,18 @@ impl AppConfig {
         self.runtime.context_embeddings_enabled = self.context.embeddings_enabled;
         self.runtime.context_debug = self.context.debug;
         self.runtime.context_embed_model = self.context.embed_model.clone();
+        self.runtime.embed_connect_timeout_ms = self
+            .context
+            .embed_connect_timeout_ms
+            .unwrap_or(2_000)
+            .clamp(200, 60_000);
+        self.runtime.embed_request_timeout_ms = self
+            .context
+            .embed_request_timeout_ms
+            .unwrap_or(12_000)
+            .clamp(500, 120_000);
+        self.runtime.embed_max_retries = self.context.embed_max_retries.unwrap_or(1).clamp(0, 5);
+        self.runtime.embed_batch_size = self.context.embed_batch_size.unwrap_or(24).clamp(1, 128);
         self.runtime.context_project_top_k = self.context.project_top_k.clamp(2, 24);
         self.runtime.max_project_context_tokens = self.context.max_project_tokens.max(512);
         self.runtime.max_parallel_streams = self.performance.max_parallel_streams.max(1);
@@ -525,9 +585,21 @@ impl AppConfig {
         self.runtime.network_allow_remote = self.network.allow_remote;
         self.runtime.network_shared_secret = self.network.shared_secret.clone();
         self.runtime.network_allowed_ips = self.network.allowed_ips.clone();
+
+        // Chat URL - viene del primary server
         if let Some(server) = self.primary_server() {
             self.runtime.context_ollama_base_url = server.base_url.clone();
         }
+
+        // Embed URL - si está configurado explícitamente, usarlo;
+        // si no, fallback al primary server (para backward compatibility)
+        self.runtime.embed_base_url = self
+            .context
+            .embed_base_url
+            .clone()
+            .or_else(|| self.primary_server().map(|s| s.base_url.clone()))
+            .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
+
         let mut execution_servers: Vec<ExecutionServerRuntime> = self
             .servers
             .iter()
@@ -589,6 +661,14 @@ impl AppConfig {
             return Err(ConfigError::Invalid(
                 "context.embed_model cannot be empty when embeddings are enabled".to_string(),
             ));
+        }
+
+        if let Some(url) = self.context.embed_base_url.as_ref() {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(ConfigError::Invalid(
+                    "context.embed_base_url must start with http:// or https://".to_string(),
+                ));
+            }
         }
 
         if !(2..=24).contains(&self.context.project_top_k) {
