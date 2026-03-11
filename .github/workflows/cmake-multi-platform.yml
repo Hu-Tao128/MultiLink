@@ -18,6 +18,7 @@ jobs:
 
   cmake-build:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         build_type: [Release]
@@ -98,9 +99,66 @@ jobs:
             echo "path=${{ steps.strings.outputs.build-output-dir }}/multilink" >> $GITHUB_OUTPUT
           fi
 
+      - name: Detect CTest suites
+        id: ctest
+        shell: bash
+        run: |
+          if [ ! -f "${{ steps.strings.outputs.build-output-dir }}/CTestTestfile.cmake" ]; then
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          tests_count=$(ctest --test-dir "${{ steps.strings.outputs.build-output-dir }}" -N | awk -F': ' '/Total Tests:/ {print $2}')
+          if [ -z "$tests_count" ]; then
+            tests_count=0
+          fi
+
+          echo "count=$tests_count" >> "$GITHUB_OUTPUT"
+
       - name: Test
-        working-directory: ${{ steps.strings.outputs.build-output-dir }}
-        run: ctest --build-config ${{ matrix.build_type }}
+        if: steps.ctest.outputs.count != '0'
+        run: ctest --test-dir "${{ steps.strings.outputs.build-output-dir }}" -C ${{ matrix.build_type }} --output-on-failure
+
+      - name: Smoke test GUI (no CTest suites)
+        if: steps.ctest.outputs.count == '0'
+        env:
+          BINARY_PATH: ${{ steps.binary.outputs.path }}
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+
+          binary_path = os.environ.get("BINARY_PATH")
+          if not binary_path:
+              print("BINARY_PATH is not set", file=sys.stderr)
+              sys.exit(1)
+
+          env = os.environ.copy()
+          if env.get("RUNNER_OS") != "Windows":
+              env["QT_QPA_PLATFORM"] = "offscreen"
+
+          try:
+              process = subprocess.Popen([binary_path], env=env)
+          except FileNotFoundError:
+              print(f"Binary not found: {binary_path}", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              process.wait(timeout=8)
+          except subprocess.TimeoutExpired:
+              process.terminate()
+              try:
+                  process.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  process.kill()
+                  process.wait()
+              sys.exit(0)
+
+          if process.returncode != 0:
+              print(f"GUI exited with non-zero code: {process.returncode}", file=sys.stderr)
+              sys.exit(process.returncode)
+          PY
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
