@@ -470,17 +470,24 @@ pub unsafe extern "C" fn chat_backend_select_session(
     let runtime = backend.runtime.handle().clone();
     let chat_runtime = backend.chat_runtime.clone();
     let active_session_id = backend.active_session_id.clone();
+    let ui_state = backend.ui_state.clone();
 
     runtime.spawn(async move {
         if chat_runtime.select_session(&id).await.is_ok() {
             let sessions = chat_runtime.list_sessions().await;
             if let Some(session) = sessions.iter().find(|s| s.id == id) {
+                let mut selected_model_for_ui = session.model.clone().unwrap_or_else(|| fallback_model.clone());
                 if let Some(model) = session.model.as_ref() {
                     if is_embedding_like_model(model) {
                         let _ = chat_runtime
                             .update_session_model(&id, Some(fallback_model.clone()))
                             .await;
+                        selected_model_for_ui = fallback_model.clone();
                     }
+                }
+
+                if let Ok(mut ui) = ui_state.lock() {
+                    ui.active_model = selected_model_for_ui;
                 }
             }
             if let Ok(mut active) = active_session_id.lock() {

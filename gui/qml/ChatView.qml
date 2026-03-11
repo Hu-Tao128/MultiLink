@@ -106,69 +106,69 @@ Page {
     }
 
     function parseInlineMarkdown(text) {
-        const segments = []
-        const boldItalicPattern = /(\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*(.+?)\*|__(.+?)__|_(.+?)_|`(.+?)`)/g
-        let lastIndex = 0
-        let match
+        const lines = String(text || "").split('\n')
+        const parsed = []
 
-        while ((match = boldItalicPattern.exec(text)) !== null) {
-            if (match.index > lastIndex) {
-                segments.push({ kind: "text", value: text.slice(lastIndex, match.index) })
-            }
-
-            if (match[2]) {
-                segments.push({ kind: "bolditalic", value: match[2] })
-            } else if (match[3]) {
-                segments.push({ kind: "bold", value: match[3] })
-            } else if (match[4]) {
-                segments.push({ kind: "italic", value: match[4] })
-            } else if (match[5]) {
-                segments.push({ kind: "bold", value: match[5] })
-            } else if (match[6]) {
-                segments.push({ kind: "italic", value: match[6] })
-            } else if (match[7]) {
-                segments.push({ kind: "inlinecode", value: match[7] })
-            }
-
-            lastIndex = boldItalicPattern.lastIndex
-        }
-
-        if (lastIndex < text.length) {
-            segments.push({ kind: "text", value: text.slice(lastIndex) })
-        }
-
-        if (segments.length === 0) {
-            segments.push({ kind: "text", value: text })
-        }
-
-        return segments
-    }
-
-    function formatListItems(text) {
-        const lines = text.split('\n')
-        const formatted = []
-        
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i]
-            const bulletMatch = line.match(/^(\s*)([-*+]|\d+\.)\s/)
-            
-            if (bulletMatch) {
-                const indent = bulletMatch[1].length
-                const bullet = bulletMatch[2]
-                const content = line.slice(bulletMatch[0].length)
-                
-                formatted.push({
-                    kind: "listitem",
-                    indent: Math.floor(indent / 2),
-                    bullet: bullet,
-                    content: content
+            const headingMatch = line.match(/^(#{1,6})\s+(.+)$/)
+            if (headingMatch) {
+                parsed.push({
+                    kind: "heading",
+                    level: headingMatch[1].length,
+                    value: headingMatch[2]
                 })
-            } else {
-                formatted.push({ kind: "text", value: line + (i < lines.length - 1 ? '\n' : '') })
+                continue
             }
+
+            const bulletMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+(.+)$/)
+            if (bulletMatch) {
+                const indent = Math.floor((bulletMatch[1] || "").length / 2)
+                const marker = bulletMatch[2]
+                const content = bulletMatch[3]
+                parsed.push({
+                    kind: "listitem",
+                    indent: indent,
+                    bullet: marker,
+                    value: content
+                })
+                continue
+            }
+
+            const withLineEnding = line + (i < lines.length - 1 ? '\n' : '')
+            parsed.push(...parseInlineStyleSegments(withLineEnding))
         }
-        
-        return formatted
+
+        if (parsed.length === 0) {
+            parsed.push({ kind: "text", value: text })
+        }
+
+        return parsed
+    }
+
+    function parseInlineStyleSegments(text) {
+        return [{ kind: "richtext", value: inlineMarkdownToHtml(text) }]
+    }
+
+    function escapeHtml(text) {
+        return String(text || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/\"/g, "&quot;")
+            .replace(/'/g, "&#39;")
+    }
+
+    function inlineMarkdownToHtml(text) {
+        let html = escapeHtml(text)
+        html = html.replace(/`([^`]+)`/g, "<code>" + "$1" + "</code>")
+        html = html.replace(/\*\*\*([^*]+)\*\*\*/g, "<b><i>" + "$1" + "</i></b>")
+        html = html.replace(/\*\*([^*]+)\*\*/g, "<b>" + "$1" + "</b>")
+        html = html.replace(/__([^_]+)__/g, "<b>" + "$1" + "</b>")
+        html = html.replace(/\*([^*]+)\*/g, "<i>" + "$1" + "</i>")
+        html = html.replace(/_([^_]+)_/g, "<i>" + "$1" + "</i>")
+        html = html.replace(/\n/g, "<br>")
+        return html
     }
 
     function scrollToBottom() {
@@ -431,13 +431,26 @@ Page {
                                             id: textBlock
                                             visible: segment.kind !== "code"
                                             width: parent.width
-                                            textFormat: TextArea.AutoText
+                                            textFormat: isRichText ? TextArea.RichText : TextArea.AutoText
                                             property string baseColor: colorTextPrimary
                                             property bool isBold: segment.kind === "bold" || segment.kind === "bolditalic"
                                             property bool isItalic: segment.kind === "italic" || segment.kind === "bolditalic"
                                             property bool isInlineCode: segment.kind === "inlinecode"
+                                            property bool isInlineRichSegment: segment.kind === "richtext"
+                                            property bool isHeading: segment.kind === "heading"
+                                            property bool isListItem: segment.kind === "listitem"
+                                            property bool isRichText: isInlineRichSegment || isListItem || isHeading
+                                            property int headingLevel: Number(segment.level || 2)
+                                            property int listIndent: Number(segment.indent || 0)
+                                            property string listBullet: String(segment.bullet || "-")
                                             color: isInlineCode ? "#E53935" : (model.role === "user" ? colorTextPrimary : baseColor)
-                                            text: segment.value
+                                            text: isListItem
+                                                  ? inlineMarkdownToHtml(Array(listIndent + 1).join("  ") + listBullet + " " + String(segment.value || ""))
+                                                  : (isInlineRichSegment
+                                                     ? String(segment.value || "")
+                                                     : (isHeading
+                                                        ? inlineMarkdownToHtml(String(segment.value || ""))
+                                                        : String(segment.value || "")))
                                             wrapMode: TextArea.Wrap
                                             readOnly: true
                                             selectByMouse: true
@@ -445,8 +458,12 @@ Page {
                                             selectedTextColor: colorTextPrimary
                                             padding: isInlineCode ? 4 : 0
                                             font.family: isInlineCode ? "Monospace" : "sans-serif"
-                                            font.pixelSize: isInlineCode ? 12 : 14
-                                            font.bold: isBold
+                                            font.pixelSize: isInlineCode
+                                                            ? 12
+                                                            : (isHeading
+                                                               ? Math.max(16, 24 - (headingLevel * 2))
+                                                               : 14)
+                                            font.bold: isBold || isHeading
                                             font.italic: isItalic
                                             background: Rectangle {
                                                 visible: textBlock.isInlineCode
