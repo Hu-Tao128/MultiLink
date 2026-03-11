@@ -45,7 +45,12 @@ pub trait ContextEngine: Send + Sync {
 pub struct ContextRetrievalConfig {
     pub embeddings_enabled: bool,
     pub embed_model: String,
+    pub embed_base_url: String,
     pub ollama_base_url: String,
+    pub embed_connect_timeout_ms: u64,
+    pub embed_request_timeout_ms: u64,
+    pub embed_max_retries: u8,
+    pub embed_batch_size: usize,
     pub top_k: usize,
     pub version: ContextEngineVersion,
 }
@@ -55,7 +60,12 @@ impl Default for ContextRetrievalConfig {
         Self {
             embeddings_enabled: true,
             embed_model: "embeddinggemma".to_string(),
+            embed_base_url: "http://127.0.0.1:11434".to_string(),
             ollama_base_url: "http://127.0.0.1:11434".to_string(),
+            embed_connect_timeout_ms: 2_000,
+            embed_request_timeout_ms: 12_000,
+            embed_max_retries: 1,
+            embed_batch_size: 24,
             top_k: 8,
             version: ContextEngineVersion::V1,
         }
@@ -82,7 +92,12 @@ impl ContextEngine for ContextEngineV1 {
             crate::context_retrieval::RetrievalConfig {
                 embeddings_enabled: config.embeddings_enabled,
                 embed_model: config.embed_model.clone(),
+                embed_base_url: config.embed_base_url.clone(),
                 ollama_base_url: config.ollama_base_url.clone(),
+                embed_connect_timeout_ms: config.embed_connect_timeout_ms,
+                embed_request_timeout_ms: config.embed_request_timeout_ms,
+                embed_max_retries: config.embed_max_retries,
+                embed_batch_size: config.embed_batch_size,
                 top_k: config.top_k,
             },
         )
@@ -91,13 +106,11 @@ impl ContextEngine for ContextEngineV1 {
     }
 }
 
-pub struct ContextEngineV2 {
-    index_dir: PathBuf,
-}
+pub struct ContextEngineV2;
 
 impl ContextEngineV2 {
-    pub fn new(index_dir: PathBuf) -> Self {
-        Self { index_dir }
+    pub fn new(_index_dir: PathBuf) -> Self {
+        Self
     }
 }
 
@@ -120,6 +133,11 @@ impl ContextEngine for ContextEngineV2 {
                 used_tokens: 0,
                 top_k: config.top_k,
                 embedding_used: false,
+                embedding_reason: "index_build_failed".to_string(),
+                embedding_latency_ms: 0,
+                embedding_attempts: 0,
+                embed_base_url: config.embed_base_url.clone(),
+                embed_model: config.embed_model.clone(),
                 is_truncated: false,
                 budget_used: 0,
             };
@@ -130,9 +148,13 @@ impl ContextEngine for ContextEngineV2 {
             &indexed.chunks,
             token_budget,
             model_hint,
-            &config.ollama_base_url,
+            &config.embed_base_url,
             &config.embed_model,
             config.embeddings_enabled,
+            config.embed_connect_timeout_ms,
+            config.embed_request_timeout_ms,
+            config.embed_max_retries,
+            config.embed_batch_size,
             Some(&indexed.index_dir),
         )
         .await;
@@ -149,6 +171,11 @@ impl From<crate::context_retrieval::RetrievalResult> for RetrievalResult {
             used_tokens: v1.used_tokens,
             top_k: v1.top_k,
             embedding_used: v1.embedding_used,
+            embedding_reason: v1.embedding_diag.reason,
+            embedding_latency_ms: v1.embedding_diag.latency_ms,
+            embedding_attempts: v1.embedding_diag.attempts,
+            embed_base_url: v1.embedding_diag.base_url,
+            embed_model: v1.embedding_diag.model,
             is_truncated: false,
             budget_used: v1.used_tokens,
         }
