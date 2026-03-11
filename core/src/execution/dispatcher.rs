@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{RwLock, Semaphore};
+use tokio::time::sleep;
 
 use crate::config::ExecutionServerRuntime;
 use crate::providers::ollama::OllamaProvider;
@@ -36,6 +37,16 @@ pub struct ExecutionDispatcher {
     servers: Vec<ExecutionServerRuntime>,
     semaphores: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
     status: Arc<RwLock<HashMap<String, ServerStatus>>>,
+    circuits: Arc<RwLock<HashMap<String, CircuitState>>>,
+}
+
+const CIRCUIT_FAIL_THRESHOLD: u32 = 2;
+const CIRCUIT_OPEN_SECS: u64 = 20;
+
+#[derive(Debug, Clone, Default)]
+struct CircuitState {
+    consecutive_failures: u32,
+    open_until: Option<Instant>,
 }
 
 impl ExecutionDispatcher {
@@ -45,6 +56,7 @@ impl ExecutionDispatcher {
             servers,
             semaphores: Arc::new(RwLock::new(HashMap::new())),
             status: Arc::new(RwLock::new(HashMap::new())),
+            circuits: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -96,8 +108,12 @@ impl ExecutionDispatcher {
                 let mut retries = 0usize;
                 let mut last_err = primary_err;
                 for server in self.servers.iter().filter(|s| s.enabled) {
-                    retries += 1;
                     let key = format!("{}@{}", server.name, server.base_url);
+                    if !self.server_available_for_attempt(&key).await {
+                        continue;
+                    }
+
+                    retries += 1;
                     let sem = self
                         .semaphore_for(&key, server.max_concurrency.max(1))
                         .await;
@@ -119,6 +135,7 @@ impl ExecutionDispatcher {
 
                     match result {
                         Ok(stream) => {
+                            self.mark_server_success(&key).await;
                             self.record_status(
                                 key.clone(),
                                 true,
@@ -135,6 +152,7 @@ impl ExecutionDispatcher {
                             });
                         }
                         Err(err) => {
+                            self.mark_server_failure(&key).await;
                             self.record_status(
                                 key.clone(),
                                 false,
@@ -143,6 +161,10 @@ impl ExecutionDispatcher {
                             )
                             .await;
                             last_err = err;
+
+                            let backoff_ms = (150u64 * (1u64 << (retries.saturating_sub(1) as u32)))
+                                .min(1200);
+                            sleep(Duration::from_millis(backoff_ms)).await;
                         }
                     }
                 }
@@ -174,6 +196,41 @@ impl ExecutionDispatcher {
                 concurrent_requests: concurrent,
             },
         );
+    }
+
+    async fn server_available_for_attempt(&self, key: &str) -> bool {
+        let mut guard = self.circuits.write().await;
+        let Some(circuit) = guard.get_mut(key) else {
+            return true;
+        };
+
+        if let Some(open_until) = circuit.open_until {
+            if Instant::now() < open_until {
+                return false;
+            }
+
+            circuit.open_until = None;
+            circuit.consecutive_failures = 0;
+        }
+
+        true
+    }
+
+    async fn mark_server_failure(&self, key: &str) {
+        let mut guard = self.circuits.write().await;
+        let circuit = guard.entry(key.to_string()).or_default();
+        circuit.consecutive_failures = circuit.consecutive_failures.saturating_add(1);
+        if circuit.consecutive_failures >= CIRCUIT_FAIL_THRESHOLD {
+            circuit.open_until = Some(Instant::now() + Duration::from_secs(CIRCUIT_OPEN_SECS));
+        }
+    }
+
+    async fn mark_server_success(&self, key: &str) {
+        let mut guard = self.circuits.write().await;
+        if let Some(circuit) = guard.get_mut(key) {
+            circuit.consecutive_failures = 0;
+            circuit.open_until = None;
+        }
     }
 }
 

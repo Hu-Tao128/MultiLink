@@ -1096,6 +1096,9 @@ impl ChatRuntime {
         system_content.push_str(
             "Do not claim that files were created/modified or commands were executed unless a tool/result in this chat explicitly confirms success. If direct file actions are unavailable, say so clearly and provide the file content or exact patch instead.\n",
         );
+        system_content.push_str(
+            "When Project Context is present, never say you lack access to repository files. Analyze only what is in Project Context and explicitly mention missing pieces if the requested folder/file is not included in that context.\n",
+        );
         if model_tier == ModelTier::Small {
             system_content.push_str(
                 "Prefer concise natural-language answers. Use numbered structure only when the user explicitly asks for a list.\n",

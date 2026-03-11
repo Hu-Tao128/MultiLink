@@ -147,6 +147,7 @@ pub async fn hybrid_retrieval(
 
 fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
     let terms = query_terms(prompt);
+    let path_hints = path_hints(prompt);
     let is_project_overview_prompt = looks_like_project_overview_prompt(prompt);
     let mut scores = Vec::with_capacity(chunks.len());
 
@@ -263,10 +264,35 @@ fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
             }
         }
 
+        for hint in &path_hints {
+            if path_l.starts_with(hint) || path_l.contains(&format!("/{hint}")) {
+                score += 12.0;
+            }
+        }
+
         scores.push(score);
     }
 
     scores
+}
+
+fn path_hints(prompt: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in prompt.split_whitespace() {
+        let t = token
+            .trim_matches(|c: char| {
+                c == '`' || c == '"' || c == '\'' || c == ',' || c == ';' || c == ':' || c == '(' || c == ')'
+            })
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .to_ascii_lowercase();
+        if t.contains('/') && t.len() >= 3 {
+            out.push(t.trim_end_matches('/').to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn query_terms(prompt: &str) -> Vec<String> {
