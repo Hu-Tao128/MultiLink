@@ -6,6 +6,8 @@ pub mod context_retrieval;
 pub mod execution;
 pub mod hardware_profile;
 pub mod intent_budget;
+pub mod lan_agent;
+pub mod mcp_adapter;
 pub mod model_manager;
 pub mod model_profile;
 pub mod observability;
@@ -31,6 +33,8 @@ pub use hardware_profile::{HardwareCaps, HardwareProfile};
 pub use intent_budget::{
     budget_for_intent, detect_query_intent, task_weight_for_prompt, IntentBudget, QueryIntent,
 };
+pub use lan_agent::{decode_messagepack, encode_messagepack, shared_secret_matches, LanEnvelope, LanPayload};
+pub use mcp_adapter::{McpToolCall, ThinMcpAdapter};
 pub use model_manager::{ModelInfo, ModelManager, ModelStatus, ProviderType};
 pub use model_profile::{ModelClass, ModelProfile, RetrievalBudget};
 pub use observability::ExecutionMetrics;
