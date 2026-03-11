@@ -60,6 +60,8 @@ jobs:
         run: choco install cmake ninja -y
 
       - name: Build Rust Backend
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ runner.os == 'macOS' && '14.0' || '' }}
         run: cargo build --release --manifest-path gui/rust/chat_controller/Cargo.toml
 
       - name: Configure CMake (Linux)
@@ -95,6 +97,8 @@ jobs:
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
             echo "path=${{ steps.strings.outputs.build-output-dir }}/Release/multilink.exe" >> $GITHUB_OUTPUT
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            echo "path=${{ steps.strings.outputs.build-output-dir }}/multilink_gui" >> $GITHUB_OUTPUT
           else
             echo "path=${{ steps.strings.outputs.build-output-dir }}/multilink" >> $GITHUB_OUTPUT
           fi
