@@ -281,7 +281,14 @@ fn path_hints(prompt: &str) -> Vec<String> {
     for token in prompt.split_whitespace() {
         let t = token
             .trim_matches(|c: char| {
-                c == '`' || c == '"' || c == '\'' || c == ',' || c == ';' || c == ':' || c == '(' || c == ')'
+                c == '`'
+                    || c == '"'
+                    || c == '\''
+                    || c == ','
+                    || c == ';'
+                    || c == ':'
+                    || c == '('
+                    || c == ')'
             })
             .trim_start_matches("./")
             .trim_start_matches('/')

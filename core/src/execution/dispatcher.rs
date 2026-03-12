@@ -162,8 +162,8 @@ impl ExecutionDispatcher {
                             .await;
                             last_err = err;
 
-                            let backoff_ms = (150u64 * (1u64 << (retries.saturating_sub(1) as u32)))
-                                .min(1200);
+                            let backoff_ms =
+                                (150u64 * (1u64 << (retries.saturating_sub(1) as u32))).min(1200);
                             sleep(Duration::from_millis(backoff_ms)).await;
                         }
                     }
