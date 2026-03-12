@@ -33,10 +33,39 @@ impl OllamaProvider {
     const RETRY_ATTEMPTS: usize = 3;
     const CACHE_TTL_SECS: u64 = 300;
 
+    fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|v| v.clamp(min, max))
+            .unwrap_or(default)
+    }
+
+    fn connect_timeout_secs() -> u64 {
+        Self::env_u64("MULTILINK_OLLAMA_CONNECT_TIMEOUT_SECS", 10, 1, 120)
+    }
+
+    fn http_timeout_secs() -> u64 {
+        // End-to-end timeout for long generations.
+        Self::env_u64("MULTILINK_OLLAMA_HTTP_TIMEOUT_SECS", 1800, 60, 7200)
+    }
+
+    fn stream_idle_timeout_secs() -> u64 {
+        // Idle (no bytes) timeout, not total generation time.
+        Self::env_u64("MULTILINK_OLLAMA_STREAM_IDLE_TIMEOUT_SECS", 180, 30, 3600)
+    }
+
+    fn stream_retries() -> usize {
+        Self::env_u64("MULTILINK_OLLAMA_STREAM_RETRIES", 4, 0, 10) as usize
+    }
+
     pub fn new(base_url: String, default_model: String) -> Self {
+        let connect_timeout_secs = Self::connect_timeout_secs();
+        let http_timeout_secs = Self::http_timeout_secs();
+
         let client = Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(300))
+            .connect_timeout(Duration::from_secs(connect_timeout_secs))
+            .timeout(Duration::from_secs(http_timeout_secs))
             .pool_idle_timeout(Duration::from_secs(10))
             .pool_max_idle_per_host(1)
             .tcp_keepalive(Duration::from_secs(30))
@@ -475,11 +504,11 @@ impl LLMProvider for OllamaProvider {
             })
             .collect();
 
-        const STREAM_RETRIES: usize = 2;
-        const STREAM_TIMEOUT_SECS: u64 = 60;
+        let stream_retries = Self::stream_retries();
+        let stream_timeout_secs = Self::stream_idle_timeout_secs();
         const MAX_PENDING_STREAM_BYTES: usize = 512 * 1024;
 
-        for attempt in 0..=STREAM_RETRIES {
+        for attempt in 0..=stream_retries {
             if attempt > 0 {
                 let backoff_ms = 500u64 * 2u64.pow((attempt - 1) as u32);
                 let backoff = Duration::from_millis(backoff_ms);
@@ -496,7 +525,7 @@ impl LLMProvider for OllamaProvider {
             let response = match self.post_chat_with_retry(&body).await {
                 Ok(r) => r,
                 Err(e) => {
-                    if attempt == STREAM_RETRIES {
+                    if attempt == stream_retries {
                         return Err(e);
                     }
                     let err_str = e.to_string();
@@ -521,12 +550,14 @@ impl LLMProvider for OllamaProvider {
                     let mut pending = Vec::<u8>::new();
                     let mut completed_sent = false;
                     let mut last_data_time = Instant::now();
+                    let stream_timeout_secs = stream_timeout_secs;
+                    let stream_retries = stream_retries;
 
                     loop {
                         tokio::select! {
-                            _ = sleep(Duration::from_secs(STREAM_TIMEOUT_SECS)) => {
+                            _ = sleep(Duration::from_secs(stream_timeout_secs)) => {
                                 let idle_secs = last_data_time.elapsed().as_secs();
-                                if idle_secs >= STREAM_TIMEOUT_SECS {
+                                if idle_secs >= stream_timeout_secs {
                                     let _ = tx.send(Err(LLMError::Timeout)).await;
                                     break;
                                 }
@@ -588,11 +619,11 @@ impl LLMProvider for OllamaProvider {
                                             || error_msg.contains("reset");
 
                                         let enhanced_error = if is_retryable {
-                                            if attempt_num < STREAM_RETRIES {
+                                            if attempt_num < stream_retries {
                                                 LLMError::Http(format!(
                                                     "stream interrupted (attempt {}/{}): server closed connection. You can retry to continue the generation.",
                                                     attempt_num + 1,
-                                                    STREAM_RETRIES + 1
+                                                    stream_retries + 1
                                                 ))
                                             } else {
                                                 LLMError::Http(format!(
@@ -604,7 +635,7 @@ impl LLMProvider for OllamaProvider {
                                             LLMError::Http(error_msg)
                                         };
 
-                                        if is_retryable && attempt_num < STREAM_RETRIES {
+                                        if is_retryable && attempt_num < stream_retries {
                                             let _ = tx.send(Err(enhanced_error)).await;
                                         } else {
                                             let _ = tx.send(Err(enhanced_error)).await;
