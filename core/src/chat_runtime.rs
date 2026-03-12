@@ -387,13 +387,11 @@ impl ChatRuntime {
             };
             persist_session(&self.storage_dir, &user_snapshot).await?;
 
-            let write_result = execute_write_file_command(project_root.as_deref(), &write_cmd).await;
+            let write_result =
+                execute_write_file_command(project_root.as_deref(), &write_cmd).await;
             let (assistant_text, final_state) = match write_result {
                 Ok(written_path) => (
-                    format!(
-                        "Archivo creado correctamente: `{}`",
-                        written_path.display()
-                    ),
+                    format!("Archivo creado correctamente: `{}`", written_path.display()),
                     SessionState::Done,
                 ),
                 Err(err) => (
@@ -572,64 +570,71 @@ impl ChatRuntime {
             .await;
 
         let mut fallback_retry_used = false;
-        let (stream, dispatcher_fallback_used, dispatcher_retries, dispatcher_server_used) = match stream_result {
-            Ok(result) => {
-                let server_used = if let Some((_, url)) = result.server_used.rsplit_once('@') {
-                    url.to_string()
-                } else {
-                    effective_runtime.context_ollama_base_url.clone()
-                };
-                (result.stream, result.fallback_used, result.retries, server_used)
-            }
-            Err(err) => {
-                let err_text = err.to_string();
-                eprintln!("[provider] stream error: {}", err_text);
-                if likely_context_overflow(&err_text) {
-                    fallback_retry_used = true;
-                    eprintln!(
-                        "[provider] retrying without project context (possible context overflow)"
-                    );
-                    let fallback_messages = self
-                        .build_messages(
-                            session_id,
-                            prompt.clone(),
-                            false,
-                            &effective_runtime,
-                            model_profile.as_ref(),
-                        )
-                        .await?;
-                    let fallback_options = PromptOptions {
-                        model: options.model.clone(),
-                        messages: Some(fallback_messages),
-                        num_ctx: None,
-                        ..PromptOptions::default()
-                    };
-                    let retry_result = self
-                        .execution_dispatcher
-                        .dispatch(ExecutionDispatchRequest {
-                            provider,
-                            prompt: prompt.clone(),
-                            options: fallback_options,
-                            allow_remote_fallback,
-                        })
-                        .await
-                        .map_err(|e| ChatRuntimeError::Provider(e.to_string()))?;
-                    let server_used = if let Some((_, url)) = retry_result.server_used.rsplit_once('@') {
+        let (stream, dispatcher_fallback_used, dispatcher_retries, dispatcher_server_used) =
+            match stream_result {
+                Ok(result) => {
+                    let server_used = if let Some((_, url)) = result.server_used.rsplit_once('@') {
                         url.to_string()
                     } else {
                         effective_runtime.context_ollama_base_url.clone()
                     };
                     (
-                        retry_result.stream,
-                        retry_result.fallback_used,
-                        retry_result.retries,
+                        result.stream,
+                        result.fallback_used,
+                        result.retries,
                         server_used,
                     )
-                } else {
-                    return Err(ChatRuntimeError::Provider(err_text));
                 }
-            }
-        };
+                Err(err) => {
+                    let err_text = err.to_string();
+                    eprintln!("[provider] stream error: {}", err_text);
+                    if likely_context_overflow(&err_text) {
+                        fallback_retry_used = true;
+                        eprintln!(
+                        "[provider] retrying without project context (possible context overflow)"
+                    );
+                        let fallback_messages = self
+                            .build_messages(
+                                session_id,
+                                prompt.clone(),
+                                false,
+                                &effective_runtime,
+                                model_profile.as_ref(),
+                            )
+                            .await?;
+                        let fallback_options = PromptOptions {
+                            model: options.model.clone(),
+                            messages: Some(fallback_messages),
+                            num_ctx: None,
+                            ..PromptOptions::default()
+                        };
+                        let retry_result = self
+                            .execution_dispatcher
+                            .dispatch(ExecutionDispatchRequest {
+                                provider,
+                                prompt: prompt.clone(),
+                                options: fallback_options,
+                                allow_remote_fallback,
+                            })
+                            .await
+                            .map_err(|e| ChatRuntimeError::Provider(e.to_string()))?;
+                        let server_used =
+                            if let Some((_, url)) = retry_result.server_used.rsplit_once('@') {
+                                url.to_string()
+                            } else {
+                                effective_runtime.context_ollama_base_url.clone()
+                            };
+                        (
+                            retry_result.stream,
+                            retry_result.fallback_used,
+                            retry_result.retries,
+                            server_used,
+                        )
+                    } else {
+                        return Err(ChatRuntimeError::Provider(err_text));
+                    }
+                }
+            };
 
         let (event_tx, event_rx) = mpsc::channel(128);
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
@@ -665,7 +670,12 @@ impl ChatRuntime {
                     || s.base_url.contains("localhost")
                     || s.name.to_ascii_lowercase().contains("local")
             })
-            .or_else(|| effective_runtime.execution_servers.iter().find(|s| s.enabled))
+            .or_else(|| {
+                effective_runtime
+                    .execution_servers
+                    .iter()
+                    .find(|s| s.enabled)
+            })
             .and_then(|s| {
                 let model = s.default_model.trim();
                 if model.is_empty() || model.eq_ignore_ascii_case("auto") {
@@ -696,7 +706,7 @@ impl ChatRuntime {
             let mut metrics_server_value = metrics_server;
             let mut total_retries = retries;
             let mut resilience_retries = 0usize;
-            let mut file_write_done = false;
+            let file_write_done = false;
 
             loop {
                 tokio::select! {
@@ -726,23 +736,27 @@ impl ChatRuntime {
                             Some(Ok(crate::providers::TokenEvent::Completed)) => {
                                 if let Some(target_path) = natural_write_target.as_ref() {
                                     if !file_write_done {
-                                        let payload = extract_file_payload_from_assistant(&full_output);
-                                        let write_cmd = WriteFileCommand {
-                                            relative_path: target_path.clone(),
-                                            content: payload,
-                                        };
-                                        match execute_write_file_command(session_project_root.as_deref(), &write_cmd).await {
-                                            Ok(written_path) => {
-                                                file_write_done = true;
-                                                let notice = format!("\n\n[archivo creado: `{}`]", written_path.display());
-                                                full_output.push_str(&notice);
-                                                let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
+                                        if let Some(payload) = extract_nonempty_file_payload_from_assistant(&full_output) {
+                                            let write_cmd = WriteFileCommand {
+                                                relative_path: target_path.clone(),
+                                                content: payload,
+                                            };
+                                            match execute_write_file_command(session_project_root.as_deref(), &write_cmd).await {
+                                                Ok(written_path) => {
+                                                    let notice = format!("\n\n[archivo creado: `{}`]", written_path.display());
+                                                    full_output.push_str(&notice);
+                                                    let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
+                                                }
+                                                Err(err) => {
+                                                    let notice = format!("\n\n[no se pudo crear archivo: {}]", err);
+                                                    full_output.push_str(&notice);
+                                                    let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
+                                                }
                                             }
-                                            Err(err) => {
-                                                let notice = format!("\n\n[no se pudo crear archivo: {}]", err);
-                                                full_output.push_str(&notice);
-                                                let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
-                                            }
+                                        } else {
+                                            let notice = "\n\n[no se creo archivo: respuesta vacia]".to_string();
+                                            full_output.push_str(&notice);
+                                            let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
                                         }
                                     }
                                 }
@@ -835,15 +849,13 @@ impl ChatRuntime {
                                 }
                                 if let Some(target_path) = natural_write_target.as_ref() {
                                     if !file_write_done {
-                                        let payload = extract_file_payload_from_assistant(&full_output);
-                                        if !payload.trim().is_empty() {
+                                        if let Some(payload) = extract_nonempty_file_payload_from_assistant(&full_output) {
                                             let write_cmd = WriteFileCommand {
                                                 relative_path: target_path.clone(),
                                                 content: payload,
                                             };
                                             match execute_write_file_command(session_project_root.as_deref(), &write_cmd).await {
                                                 Ok(written_path) => {
-                                                    file_write_done = true;
                                                     let notice = format!(
                                                         "\n\n[archivo parcial creado pese al corte de stream: `{}`]",
                                                         written_path.display()
@@ -867,23 +879,27 @@ impl ChatRuntime {
                             None => {
                                 if let Some(target_path) = natural_write_target.as_ref() {
                                     if !file_write_done {
-                                        let payload = extract_file_payload_from_assistant(&full_output);
-                                        let write_cmd = WriteFileCommand {
-                                            relative_path: target_path.clone(),
-                                            content: payload,
-                                        };
-                                        match execute_write_file_command(session_project_root.as_deref(), &write_cmd).await {
-                                            Ok(written_path) => {
-                                                file_write_done = true;
-                                                let notice = format!("\n\n[archivo creado: `{}`]", written_path.display());
-                                                full_output.push_str(&notice);
-                                                let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
+                                        if let Some(payload) = extract_nonempty_file_payload_from_assistant(&full_output) {
+                                            let write_cmd = WriteFileCommand {
+                                                relative_path: target_path.clone(),
+                                                content: payload,
+                                            };
+                                            match execute_write_file_command(session_project_root.as_deref(), &write_cmd).await {
+                                                Ok(written_path) => {
+                                                    let notice = format!("\n\n[archivo creado: `{}`]", written_path.display());
+                                                    full_output.push_str(&notice);
+                                                    let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
+                                                }
+                                                Err(err) => {
+                                                    let notice = format!("\n\n[no se pudo crear archivo: {}]", err);
+                                                    full_output.push_str(&notice);
+                                                    let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
+                                                }
                                             }
-                                            Err(err) => {
-                                                let notice = format!("\n\n[no se pudo crear archivo: {}]", err);
-                                                full_output.push_str(&notice);
-                                                let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
-                                            }
+                                        } else {
+                                            let notice = "\n\n[no se creo archivo: respuesta vacia]".to_string();
+                                            full_output.push_str(&notice);
+                                            let _ = event_tx.send(StreamEvent::Chunk(notice)).await;
                                         }
                                     }
                                 }
@@ -1870,7 +1886,16 @@ fn detect_natural_write_target(prompt: &str) -> Option<String> {
 
     for token in prompt.split_whitespace() {
         let cleaned = token
-            .trim_matches(|c: char| c == '`' || c == '"' || c == '\'' || c == ',' || c == ':' || c == ';' || c == ')' || c == '(')
+            .trim_matches(|c: char| {
+                c == '`'
+                    || c == '"'
+                    || c == '\''
+                    || c == ','
+                    || c == ':'
+                    || c == ';'
+                    || c == ')'
+                    || c == '('
+            })
             .trim();
         if cleaned.is_empty() || cleaned.starts_with('/') {
             continue;
@@ -1878,7 +1903,10 @@ fn detect_natural_write_target(prompt: &str) -> Option<String> {
         if cleaned.contains("..") {
             continue;
         }
-        let has_ext = cleaned.rsplit_once('.').map(|(_, ext)| !ext.is_empty()).unwrap_or(false);
+        let has_ext = cleaned
+            .rsplit_once('.')
+            .map(|(_, ext)| !ext.is_empty())
+            .unwrap_or(false);
         if has_ext && (cleaned.contains('/') || cleaned.contains('.') || cleaned.ends_with(".md")) {
             return Some(cleaned.to_string());
         }
@@ -1902,6 +1930,15 @@ fn extract_file_payload_from_assistant(text: &str) -> String {
         return stripped;
     }
     text.trim().to_string()
+}
+
+fn extract_nonempty_file_payload_from_assistant(text: &str) -> Option<String> {
+    let payload = extract_file_payload_from_assistant(text);
+    if payload.trim().is_empty() {
+        None
+    } else {
+        Some(payload)
+    }
 }
 
 async fn execute_write_file_command(
@@ -1933,7 +1970,9 @@ async fn execute_write_file_command(
 
     let target = base.join(rel);
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).await.map_err(ChatRuntimeError::Io)?;
+        fs::create_dir_all(parent)
+            .await
+            .map_err(ChatRuntimeError::Io)?;
     }
     fs::write(&target, command.content.as_bytes())
         .await
@@ -2211,6 +2250,35 @@ async fn recover_partials_from_wal(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_nonempty_file_payload_from_assistant;
+
+    #[test]
+    fn extract_nonempty_payload_returns_none_for_empty_text() {
+        assert_eq!(
+            extract_nonempty_file_payload_from_assistant("   \n\t  "),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_nonempty_payload_returns_none_for_empty_fence() {
+        assert_eq!(
+            extract_nonempty_file_payload_from_assistant("```md\n\n```"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_nonempty_payload_keeps_meaningful_fenced_content() {
+        assert_eq!(
+            extract_nonempty_file_payload_from_assistant("```md\n# Hola\n```"),
+            Some("# Hola".to_string())
+        );
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
