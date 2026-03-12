@@ -42,6 +42,9 @@ pub struct ContextConfig {
     pub max_project_tokens: usize,
     pub debug: bool,
     pub engine: String,
+    pub index_refresh_on_query: bool,
+    pub retrieval_enable_filters: bool,
+    pub v2plus_metrics: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +119,9 @@ pub struct RuntimeConfig {
     pub context_project_top_k: usize,
     pub context_ollama_base_url: String,
     pub context_engine: String,
+    pub context_index_refresh_on_query: bool,
+    pub context_retrieval_enable_filters: bool,
+    pub context_v2plus_metrics: bool,
     pub observability_json_logs: bool,
     #[serde(default)]
     pub execution_servers: Vec<ExecutionServerRuntime>,
@@ -249,6 +255,9 @@ impl Default for RuntimeConfig {
             context_project_top_k: 8,
             context_ollama_base_url: "http://127.0.0.1:11434".to_string(),
             context_engine: "v1".to_string(),
+            context_index_refresh_on_query: true,
+            context_retrieval_enable_filters: false,
+            context_v2plus_metrics: true,
             observability_json_logs: false,
             execution_servers: Vec::new(),
             remote_threshold: RemoteThreshold::Heavy,
@@ -286,6 +295,9 @@ impl Default for ContextConfig {
             max_project_tokens: 2000,
             debug: false,
             engine: "v1".to_string(),
+            index_refresh_on_query: true,
+            retrieval_enable_filters: false,
+            v2plus_metrics: true,
         }
     }
 }
@@ -549,6 +561,24 @@ impl AppConfig {
             self.context.debug = value == "1" || value.eq_ignore_ascii_case("true");
         }
 
+        if let Ok(value) = std::env::var("MULTILINK_CONTEXT_INDEX_REFRESH") {
+            self.context.index_refresh_on_query =
+                value == "1" || value.eq_ignore_ascii_case("true");
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_CONTEXT_ENABLE_FILTERS") {
+            self.context.retrieval_enable_filters =
+                value == "1" || value.eq_ignore_ascii_case("true");
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_CONTEXT_V2PLUS_METRICS") {
+            self.context.v2plus_metrics = value == "1" || value.eq_ignore_ascii_case("true");
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_CONTEXT_ENGINE") {
+            self.context.engine = value;
+        }
+
         if let Ok(value) = std::env::var("MULTILINK_SYSTEM_CONTEXT_DIR") {
             self.system_context_dir = Some(PathBuf::from(value));
         }
@@ -582,6 +612,9 @@ impl AppConfig {
         self.runtime.observability_json_logs = self.ui.json_logs;
         self.runtime.remote_threshold = self.routing.remote_threshold;
         self.runtime.context_engine = self.context.engine.clone();
+        self.runtime.context_index_refresh_on_query = self.context.index_refresh_on_query;
+        self.runtime.context_retrieval_enable_filters = self.context.retrieval_enable_filters;
+        self.runtime.context_v2plus_metrics = self.context.v2plus_metrics;
         self.runtime.network_allow_remote = self.network.allow_remote;
         self.runtime.network_shared_secret = self.network.shared_secret.clone();
         self.runtime.network_allowed_ips = self.network.allowed_ips.clone();
@@ -674,6 +707,13 @@ impl AppConfig {
         if !(2..=24).contains(&self.context.project_top_k) {
             return Err(ConfigError::Invalid(
                 "context.project_top_k must be in range 2..=24".to_string(),
+            ));
+        }
+
+        let engine = self.context.engine.trim().to_ascii_lowercase();
+        if !matches!(engine.as_str(), "v1" | "v2" | "v2plus") {
+            return Err(ConfigError::Invalid(
+                "context.engine must be one of: v1, v2, v2plus".to_string(),
             ));
         }
 

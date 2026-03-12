@@ -39,11 +39,18 @@ pub async fn hybrid_retrieval(
     embed_request_timeout_ms: u64,
     embed_max_retries: u8,
     embed_batch_size: usize,
+    retrieval_enable_filters: bool,
     index_dir: Option<&PathBuf>,
 ) -> RetrievalResult {
     if chunks.is_empty() {
         return empty_result(token_budget);
     }
+
+    let filters = if retrieval_enable_filters {
+        Some(extract_retrieval_filters(prompt))
+    } else {
+        None
+    };
 
     let lexical = lexical_scores(prompt, chunks);
     let embed_result = if embed_enabled {
@@ -87,6 +94,7 @@ pub async fn hybrid_retrieval(
     let mut ranked: Vec<RankedChunk> = chunks
         .iter()
         .enumerate()
+        .filter(|(_, chunk)| matches_filters(chunk, filters.as_ref()))
         .map(|(idx, chunk)| {
             let lex = lexical.get(idx).copied().unwrap_or(0.0);
             let emb = embed_result
@@ -108,6 +116,32 @@ pub async fn hybrid_retrieval(
         })
         .collect();
 
+    if ranked.is_empty() {
+        ranked = chunks
+            .iter()
+            .enumerate()
+            .map(|(idx, chunk)| {
+                let lex = lexical.get(idx).copied().unwrap_or(0.0);
+                let emb = embed_result
+                    .scores
+                    .get(&chunk.chunk_hash)
+                    .copied()
+                    .unwrap_or(0.0);
+                let final_score = if embed_used {
+                    lex * 0.35 + emb * 0.65
+                } else {
+                    lex
+                };
+                RankedChunk {
+                    chunk: chunk.clone(),
+                    score: final_score,
+                    lexical_score: lex,
+                    embedding_score: emb,
+                }
+            })
+            .collect();
+    }
+
     ranked.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -115,7 +149,15 @@ pub async fn hybrid_retrieval(
     });
 
     let top_k = (token_budget / 150).max(2).min(24);
-    let ranked_limited: Vec<RankedChunk> = ranked.into_iter().take(top_k).collect();
+    let ranked_limited: Vec<RankedChunk> = if let Some(active_filters) = filters.as_ref() {
+        if active_filters.languages.len() > 1 {
+            partitioned_merge_by_language(ranked, top_k)
+        } else {
+            ranked.into_iter().take(top_k).collect()
+        }
+    } else {
+        ranked.into_iter().take(top_k).collect()
+    };
 
     let compression_result =
         super::compress::fit_to_budget(ranked_limited, token_budget, model_hint);
@@ -293,12 +335,288 @@ fn path_hints(prompt: &str) -> Vec<String> {
             .trim_start_matches("./")
             .trim_start_matches('/')
             .to_ascii_lowercase();
-        if t.contains('/') && t.len() >= 3 {
+
+        // Improved path detection:
+        // 1. Traditional paths with / (src/api, ./src/api, core/src/)
+        if t.contains('/') && t.len() >= 2 {
             out.push(t.trim_end_matches('/').to_string());
+            // Also add parent directories for better matching
+            // e.g., "src/api" -> also add "src"
+            if let Some(parent_end) = t.rfind('/') {
+                let parent = &t[..parent_end];
+                if parent.len() >= 2 && !out.contains(&parent.to_string()) {
+                    out.push(parent.to_string());
+                }
+            }
+        }
+        // 2. Directories without / but with common patterns (src, core, gui, lib)
+        // Only if they look like directory names and are mentioned in context
+        else if t.len() >= 3
+            && (t.starts_with("src")
+                || t == "core"
+                || t == "gui"
+                || t == "lib"
+                || t == "app"
+                || t == "pkg"
+                || t == "internal"
+                || t == "modules"
+                || t == "features"
+                || t == "services"
+                || t == "handlers"
+                || t == "controllers"
+                || t == "models"
+                || t == "views"
+                || t == "api"
+                || t == "routes"
+                || t == "middleware")
+        {
+            out.push(t.clone());
         }
     }
     out.sort();
     out.dedup();
+    out
+}
+
+#[derive(Debug, Clone, Default)]
+struct RetrievalFilters {
+    languages: HashSet<String>,
+    path_patterns: Vec<String>,
+}
+
+fn extract_retrieval_filters(prompt: &str) -> RetrievalFilters {
+    let mut filters = RetrievalFilters::default();
+    let p = prompt.to_ascii_lowercase();
+
+    // Extract languages
+    for language in known_languages() {
+        if p.contains(language) {
+            filters.languages.insert(language.to_string());
+        }
+    }
+
+    // Extract path patterns - improved for directories like src/api, ./src/api/*
+    filters.path_patterns = extract_directory_hints(prompt)
+        .into_iter()
+        .map(|hint| hint.trim_end_matches('/').to_string())
+        .filter(|hint| !hint.is_empty())
+        .collect();
+
+    filters
+}
+
+fn extract_directory_hints(prompt: &str) -> Vec<String> {
+    let mut hints = Vec::new();
+
+    // Pattern 1: ./src/api/* or src/api/* or core/src/* etc.
+    let dir_patterns = [
+        ("src/", vec!["src/api", "src/utils", "src/models", "src/services", "src/handlers", "src/controllers", "src/views", "src/middleware"]),
+        ("core/", vec!["core/src", "core/src/config", "core/src/providers", "core/src/chat"]),
+        ("gui/", vec!["gui/src", "gui/rust", "gui/qml"]),
+        ("lib/", vec!["lib/", "lib/src"]),
+    ];
+
+    let p_lower = prompt.to_lowercase();
+    for (prefix, common_dirs) in dir_patterns {
+        if p_lower.contains(prefix) {
+            for dir in common_dirs {
+                if p_lower.contains(dir) && !hints.contains(&dir.to_string()) {
+                    hints.push(dir.to_string());
+                }
+            }
+        }
+    }
+
+    // Pattern 2: keywords that imply directories
+    let dir_keywords = [
+        ("api", "src/api"),
+        ("routes", "src/api"),
+        ("endpoints", "src/api"),
+        ("handlers", "src/handlers"),
+        ("controllers", "src/controllers"),
+        ("services", "src/services"),
+        ("models", "src/models"),
+        ("views", "src/views"),
+        ("middleware", "src/middleware"),
+        ("config", "core/src/config"),
+        ("provider", "core/src/providers"),
+    ];
+
+    for (keyword, default_dir) in dir_keywords {
+        if p_lower.contains(keyword) && !hints.contains(&default_dir.to_string()) {
+            let already_covered = hints.iter().any(|h| default_dir.starts_with(h));
+            if !already_covered {
+                hints.push(default_dir.to_string());
+            }
+        }
+    }
+
+    // Pattern 3: Extract directory from file paths mentioned in prompt
+    // e.g., "src/api/routes.rs" -> extract "src/api"
+    let words: Vec<&str> = p_lower.split(|c: char| !c.is_alphanumeric() && c != '/' && c != '_' && c != '-').collect();
+    
+    for word in words {
+        if word.contains('/') && word.len() >= 4 {
+            // It's a path, extract directory part
+            if let Some(dir_end) = word.rfind('/') {
+                let dir = &word[..dir_end];
+                if dir.len() >= 3 && !dir.contains('.') {
+                    // Skip if it looks like a file extension
+                    if !hints.contains(&dir.to_string()) {
+                        hints.push(dir.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    hints.sort();
+    hints.dedup();
+    hints
+}
+
+fn known_languages() -> &'static [&'static str] {
+    &[
+        "rust",
+        "python",
+        "typescript",
+        "javascript",
+        "tsx",
+        "jsx",
+        "go",
+        "java",
+        "kotlin",
+        "scala",
+        "c",
+        "cpp",
+        "csharp",
+        "swift",
+        "php",
+        "ruby",
+        "sql",
+        "bash",
+        "yaml",
+        "json",
+        "toml",
+        "markdown",
+    ]
+}
+
+fn matches_filters(chunk: &SemanticChunk, filters: Option<&RetrievalFilters>) -> bool {
+    let Some(filters) = filters else {
+        return true;
+    };
+
+    let language_ok = if filters.languages.is_empty() {
+        true
+    } else {
+        filters
+            .languages
+            .contains(&chunk.language.to_ascii_lowercase())
+    };
+
+    let path_ok = if filters.path_patterns.is_empty() {
+        true
+    } else {
+        let path_l = chunk.file.to_ascii_lowercase();
+        filters.path_patterns.iter().any(|pattern| {
+            wildcard_match(pattern, &path_l)
+                || path_l.starts_with(pattern)
+                || path_l.contains(&format!("/{pattern}"))
+        })
+    };
+
+    language_ok && path_ok
+}
+
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let pattern_chars: Vec<char> = pattern.chars().collect();
+    let text_chars: Vec<char> = text.chars().collect();
+
+    let mut p = 0usize;
+    let mut t = 0usize;
+    let mut star_idx: Option<usize> = None;
+    let mut match_idx = 0usize;
+
+    while t < text_chars.len() {
+        if p < pattern_chars.len() && (pattern_chars[p] == '?' || pattern_chars[p] == text_chars[t])
+        {
+            p += 1;
+            t += 1;
+        } else if p < pattern_chars.len() && pattern_chars[p] == '*' {
+            star_idx = Some(p);
+            p += 1;
+            match_idx = t;
+        } else if let Some(star) = star_idx {
+            p = star + 1;
+            match_idx += 1;
+            t = match_idx;
+        } else {
+            return false;
+        }
+    }
+
+    while p < pattern_chars.len() && pattern_chars[p] == '*' {
+        p += 1;
+    }
+
+    p == pattern_chars.len()
+}
+
+fn partitioned_merge_by_language(ranked: Vec<RankedChunk>, top_k: usize) -> Vec<RankedChunk> {
+    let mut partitions: HashMap<String, Vec<RankedChunk>> = HashMap::new();
+    for chunk in ranked {
+        let key = chunk.chunk.language.to_ascii_lowercase();
+        partitions.entry(key).or_default().push(chunk);
+    }
+
+    for values in partitions.values_mut() {
+        values.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    let mut cursors: HashMap<String, usize> = partitions
+        .keys()
+        .cloned()
+        .map(|k| (k, 0usize))
+        .collect::<HashMap<_, _>>();
+
+    let mut keys = partitions.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+
+    let mut out = Vec::new();
+    while out.len() < top_k {
+        let mut progressed = false;
+        for key in &keys {
+            let Some(values) = partitions.get(key) else {
+                continue;
+            };
+            let Some(cursor) = cursors.get_mut(key) else {
+                continue;
+            };
+            if *cursor < values.len() {
+                out.push(values[*cursor].clone());
+                *cursor += 1;
+                progressed = true;
+                if out.len() >= top_k {
+                    break;
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out.truncate(top_k);
     out
 }
 

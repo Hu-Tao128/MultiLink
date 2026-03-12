@@ -1,5 +1,5 @@
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -19,9 +19,21 @@ pub struct IndexedProject {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PersistedIndex {
+    #[serde(default)]
     source_fingerprint: String,
+    #[serde(default)]
     project_hash: String,
+    #[serde(default)]
+    files: Vec<PersistedFileState>,
+    #[serde(default)]
     chunks: Vec<PersistedChunk>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct PersistedFileState {
+    path: String,
+    content_hash: String,
+    chunk_hashes: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -62,44 +74,52 @@ pub async fn load_or_build(raw_context: &str) -> Option<IndexedProject> {
     let index_dir = index_root_dir().join(&project_hash);
     let manifest = index_dir.join("manifest.json");
 
-    if let Ok(existing) = fs::read_to_string(&manifest) {
-        if let Ok(parsed_manifest) = serde_json::from_str::<PersistedIndex>(&existing) {
-            if parsed_manifest.source_fingerprint == source_fingerprint {
-                let out = IndexedProject {
-                    project_hash,
-                    source_fingerprint: source_fingerprint.clone(),
-                    chunks: parsed_manifest
-                        .chunks
-                        .into_iter()
-                        .map(|c| SemanticChunk {
-                            file: c.file,
-                            language: c.language,
-                            start_line: c.start_line,
-                            symbol: c.symbol,
-                            content: c.content,
-                            chunk_hash: c.chunk_hash,
-                        })
-                        .collect(),
-                    index_dir,
-                };
-                in_memory_cache()
-                    .write()
-                    .await
-                    .insert(source_fingerprint, out.clone());
-                return Some(out);
-            }
+    let previous_index = if let Ok(existing) = fs::read_to_string(&manifest) {
+        serde_json::from_str::<PersistedIndex>(&existing).ok()
+    } else {
+        None
+    };
+
+    if let Some(parsed_manifest) = previous_index.as_ref() {
+        if parsed_manifest.source_fingerprint == source_fingerprint {
+            let out = IndexedProject {
+                project_hash,
+                source_fingerprint: source_fingerprint.clone(),
+                chunks: parsed_manifest
+                    .chunks
+                    .iter()
+                    .cloned()
+                    .map(|c| SemanticChunk {
+                        file: c.file,
+                        language: c.language,
+                        start_line: c.start_line,
+                        symbol: c.symbol,
+                        content: c.content,
+                        chunk_hash: c.chunk_hash,
+                    })
+                    .collect(),
+                index_dir,
+            };
+            in_memory_cache()
+                .write()
+                .await
+                .insert(source_fingerprint, out.clone());
+            return Some(out);
         }
     }
 
     let _file_hashes = file_signatures(&parsed);
-    let chunks = semantic_chunks(&parsed.files, 32);
+    let chunks = build_incremental_chunks(&parsed.files, previous_index.as_ref());
     if chunks.is_empty() {
         return None;
     }
 
+    let files = build_file_states(&parsed.files, &chunks);
+
     let persisted = PersistedIndex {
         source_fingerprint: source_fingerprint.clone(),
         project_hash: project_hash.clone(),
+        files,
         chunks: chunks
             .iter()
             .map(|chunk| PersistedChunk {
@@ -133,10 +153,196 @@ pub async fn load_or_build(raw_context: &str) -> Option<IndexedProject> {
     Some(out)
 }
 
+pub async fn load_best_effort(raw_context: &str) -> Option<IndexedProject> {
+    if raw_context.trim().is_empty() {
+        return None;
+    }
+
+    let source_fingerprint = short_hash(raw_context);
+    if let Some(cached) = in_memory_cache().read().await.get(&source_fingerprint) {
+        return Some(cached.clone());
+    }
+
+    let parsed = parse_project(raw_context);
+    if parsed.files.is_empty() {
+        return None;
+    }
+
+    let project_hash = project_hash(&parsed);
+    let index_dir = index_root_dir().join(&project_hash);
+    let manifest = index_dir.join("manifest.json");
+    let persisted = fs::read_to_string(&manifest)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<PersistedIndex>(&raw).ok())?;
+
+    if persisted.source_fingerprint == source_fingerprint {
+        let exact = indexed_from_persisted(
+            project_hash,
+            source_fingerprint.clone(),
+            index_dir,
+            persisted,
+        );
+        in_memory_cache()
+            .write()
+            .await
+            .insert(source_fingerprint, exact.clone());
+        return Some(exact);
+    }
+
+    // Fallback to the latest consistent index for this project while a refresh may be in-flight.
+    Some(indexed_from_persisted(
+        project_hash,
+        persisted.source_fingerprint.clone(),
+        index_dir,
+        persisted,
+    ))
+}
+
+pub fn refresh_in_background(raw_context: String) {
+    if raw_context.trim().is_empty() {
+        return;
+    }
+    let refresh_key = refresh_key_for_raw_context(&raw_context);
+    tokio::spawn(async move {
+        let can_run = {
+            let mut guard = refresh_inflight().write().await;
+            if guard.contains(&refresh_key) {
+                false
+            } else {
+                guard.insert(refresh_key.clone());
+                true
+            }
+        };
+
+        if !can_run {
+            return;
+        }
+
+        let _ = load_or_build(&raw_context).await;
+
+        let mut guard = refresh_inflight().write().await;
+        guard.remove(&refresh_key);
+    });
+}
+
 fn parse_project(raw_context: &str) -> ParsedProject {
     let root = parse_project_root(raw_context);
     let files = parse_source_files(raw_context);
     ParsedProject { root, files }
+}
+
+fn indexed_from_persisted(
+    project_hash: String,
+    source_fingerprint: String,
+    index_dir: PathBuf,
+    persisted: PersistedIndex,
+) -> IndexedProject {
+    IndexedProject {
+        project_hash,
+        source_fingerprint,
+        chunks: persisted
+            .chunks
+            .into_iter()
+            .map(|c| SemanticChunk {
+                file: c.file,
+                language: c.language,
+                start_line: c.start_line,
+                symbol: c.symbol,
+                content: c.content,
+                chunk_hash: c.chunk_hash,
+            })
+            .collect(),
+        index_dir,
+    }
+}
+
+fn refresh_key_for_raw_context(raw_context: &str) -> String {
+    if let Some(root) = parse_project_root(raw_context) {
+        return format!("root:{}", root.display());
+    }
+    format!("raw:{}", short_hash(raw_context))
+}
+
+fn build_incremental_chunks(
+    files: &[SourceFile],
+    previous: Option<&PersistedIndex>,
+) -> Vec<SemanticChunk> {
+    let mut out = Vec::new();
+
+    let (prev_files, prev_chunks) = if let Some(prev) = previous {
+        let file_map = prev
+            .files
+            .iter()
+            .map(|state| (state.path.clone(), state.clone()))
+            .collect::<HashMap<_, _>>();
+        let chunk_map = prev
+            .chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    chunk.chunk_hash.clone(),
+                    SemanticChunk {
+                        file: chunk.file.clone(),
+                        language: chunk.language.clone(),
+                        start_line: chunk.start_line,
+                        symbol: chunk.symbol.clone(),
+                        content: chunk.content.clone(),
+                        chunk_hash: chunk.chunk_hash.clone(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        (Some(file_map), Some(chunk_map))
+    } else {
+        (None, None)
+    };
+
+    for file in files {
+        let content_hash = short_hash(&file.content);
+        let reused = prev_files
+            .as_ref()
+            .and_then(|map| map.get(&file.path))
+            .filter(|state| state.content_hash == content_hash)
+            .and_then(|state| {
+                let mut rebuilt = Vec::with_capacity(state.chunk_hashes.len());
+                let chunk_map = prev_chunks.as_ref()?;
+                for hash in &state.chunk_hashes {
+                    let chunk = chunk_map.get(hash)?;
+                    rebuilt.push(chunk.clone());
+                }
+                Some(rebuilt)
+            });
+
+        if let Some(chunks) = reused {
+            out.extend(chunks);
+        } else {
+            out.extend(semantic_chunks(std::slice::from_ref(file), 32));
+        }
+    }
+
+    out
+}
+
+fn build_file_states(files: &[SourceFile], chunks: &[SemanticChunk]) -> Vec<PersistedFileState> {
+    let mut chunk_hashes_by_file: HashMap<&str, Vec<String>> = HashMap::new();
+    for chunk in chunks {
+        chunk_hashes_by_file
+            .entry(chunk.file.as_str())
+            .or_default()
+            .push(chunk.chunk_hash.clone());
+    }
+
+    files
+        .iter()
+        .map(|file| PersistedFileState {
+            path: file.path.clone(),
+            content_hash: short_hash(&file.content),
+            chunk_hashes: chunk_hashes_by_file
+                .get(file.path.as_str())
+                .cloned()
+                .unwrap_or_default(),
+        })
+        .collect()
 }
 
 fn parse_project_root(raw_context: &str) -> Option<PathBuf> {
@@ -264,6 +470,11 @@ fn short_hash(input: &str) -> String {
 fn in_memory_cache() -> &'static RwLock<HashMap<String, IndexedProject>> {
     static CACHE: OnceLock<RwLock<HashMap<String, IndexedProject>>> = OnceLock::new();
     CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn refresh_inflight() -> &'static RwLock<HashSet<String>> {
+    static REFRESH_INFLIGHT: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+    REFRESH_INFLIGHT.get_or_init(|| RwLock::new(HashSet::new()))
 }
 
 #[cfg(test)]

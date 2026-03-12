@@ -12,6 +12,7 @@ pub use retrieval::RetrievalResult;
 pub enum ContextEngineVersion {
     V1,
     V2,
+    V2Plus,
 }
 
 impl Default for ContextEngineVersion {
@@ -23,6 +24,7 @@ impl Default for ContextEngineVersion {
 impl ContextEngineVersion {
     pub fn from_str(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
+            "v2plus" | "v2+" => Self::V2Plus,
             "v2" | "2" => Self::V2,
             _ => Self::V1,
         }
@@ -52,6 +54,8 @@ pub struct ContextRetrievalConfig {
     pub embed_max_retries: u8,
     pub embed_batch_size: usize,
     pub top_k: usize,
+    pub index_refresh_on_query: bool,
+    pub retrieval_enable_filters: bool,
     pub version: ContextEngineVersion,
 }
 
@@ -67,6 +71,8 @@ impl Default for ContextRetrievalConfig {
             embed_max_retries: 1,
             embed_batch_size: 24,
             top_k: 8,
+            index_refresh_on_query: true,
+            retrieval_enable_filters: false,
             version: ContextEngineVersion::V1,
         }
     }
@@ -114,6 +120,14 @@ impl ContextEngineV2 {
     }
 }
 
+pub struct ContextEngineV2Plus;
+
+impl ContextEngineV2Plus {
+    pub fn new(_index_dir: PathBuf) -> Self {
+        Self
+    }
+}
+
 #[async_trait::async_trait]
 impl ContextEngine for ContextEngineV2 {
     async fn retrieve(
@@ -155,11 +169,67 @@ impl ContextEngine for ContextEngineV2 {
             config.embed_request_timeout_ms,
             config.embed_max_retries,
             config.embed_batch_size,
+            config.retrieval_enable_filters,
             Some(&indexed.index_dir),
         )
         .await;
 
         result
+    }
+}
+
+#[async_trait::async_trait]
+impl ContextEngine for ContextEngineV2Plus {
+    async fn retrieve(
+        &self,
+        project_context: &str,
+        prompt: &str,
+        token_budget: usize,
+        model_hint: Option<&str>,
+        config: &ContextRetrievalConfig,
+    ) -> RetrievalResult {
+        if config.index_refresh_on_query {
+            crate::context_engine::index::refresh_in_background(project_context.to_string());
+        }
+
+        let mut indexed = crate::context_engine::index::load_best_effort(project_context).await;
+        if indexed.is_none() {
+            indexed = crate::context_engine::index::load_or_build(project_context).await;
+        }
+
+        let Some(indexed) = indexed else {
+            return RetrievalResult {
+                context: String::new(),
+                selected_files: Vec::new(),
+                used_tokens: 0,
+                top_k: config.top_k,
+                embedding_used: false,
+                embedding_reason: "index_build_failed".to_string(),
+                embedding_latency_ms: 0,
+                embedding_attempts: 0,
+                embed_base_url: config.embed_base_url.clone(),
+                embed_model: config.embed_model.clone(),
+                is_truncated: false,
+                budget_used: 0,
+            };
+        };
+
+        crate::context_engine::retrieval::hybrid_retrieval(
+            prompt,
+            &indexed.chunks,
+            token_budget,
+            model_hint,
+            &config.embed_base_url,
+            &config.embed_model,
+            config.embeddings_enabled,
+            config.embed_connect_timeout_ms,
+            config.embed_request_timeout_ms,
+            config.embed_max_retries,
+            config.embed_batch_size,
+            config.retrieval_enable_filters,
+            Some(&indexed.index_dir),
+        )
+        .await
     }
 }
 

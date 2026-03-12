@@ -15,7 +15,8 @@ use walkdir::WalkDir;
 
 use crate::config::{ModelTier, RuntimeConfig};
 use crate::context_engine::{
-    ContextEngine, ContextEngineV2, ContextEngineVersion, ContextRetrievalConfig, RetrievalResult,
+    ContextEngine, ContextEngineV2, ContextEngineV2Plus, ContextEngineVersion,
+    ContextRetrievalConfig, RetrievalResult,
 };
 use crate::context_retrieval::{build_relevant_project_context, RetrievalConfig};
 use crate::execution::{ExecutionDispatchRequest, ExecutionDispatcher};
@@ -1191,41 +1192,13 @@ impl ChatRuntime {
                     .max_project_context_tokens
                     .min(effective_runtime.max_context_tokens.saturating_sub(tokens));
                 if context_budget > 0 {
-                    let retrieval: RetrievalResult = if effective_runtime.context_engine == "v2" {
-                        let engine = ContextEngineV2::new(
-                            dirs::data_local_dir()
+                    let retrieval: RetrievalResult =
+                        if matches!(effective_runtime.context_engine.as_str(), "v2" | "v2plus") {
+                            let index_dir = dirs::data_local_dir()
                                 .unwrap_or_else(|| PathBuf::from(".multilink"))
                                 .join("multilink")
-                                .join("index"),
-                        );
-                        let config = ContextRetrievalConfig {
-                            embeddings_enabled: effective_runtime.context_embeddings_enabled,
-                            embed_model: effective_runtime.context_embed_model.clone(),
-                            embed_base_url: effective_runtime.embed_base_url.clone(),
-                            ollama_base_url: effective_runtime.context_ollama_base_url.clone(),
-                            embed_connect_timeout_ms: effective_runtime.embed_connect_timeout_ms,
-                            embed_request_timeout_ms: effective_runtime.embed_request_timeout_ms,
-                            embed_max_retries: effective_runtime.embed_max_retries,
-                            embed_batch_size: effective_runtime.embed_batch_size,
-                            top_k: effective_runtime.context_project_top_k,
-                            version: ContextEngineVersion::V2,
-                        };
-                        engine
-                            .retrieve(
-                                project_context,
-                                &current_prompt,
-                                context_budget,
-                                model_hint,
-                                &config,
-                            )
-                            .await
-                    } else {
-                        let v1_result = build_relevant_project_context(
-                            project_context,
-                            &current_prompt,
-                            context_budget,
-                            model_hint,
-                            RetrievalConfig {
+                                .join("index");
+                            let config = ContextRetrievalConfig {
                                 embeddings_enabled: effective_runtime.context_embeddings_enabled,
                                 embed_model: effective_runtime.context_embed_model.clone(),
                                 embed_base_url: effective_runtime.embed_base_url.clone(),
@@ -1237,24 +1210,78 @@ impl ChatRuntime {
                                 embed_max_retries: effective_runtime.embed_max_retries,
                                 embed_batch_size: effective_runtime.embed_batch_size,
                                 top_k: effective_runtime.context_project_top_k,
-                            },
-                        )
-                        .await;
-                        RetrievalResult {
-                            context: v1_result.context,
-                            selected_files: v1_result.selected_files,
-                            used_tokens: v1_result.used_tokens,
-                            top_k: v1_result.top_k,
-                            embedding_used: v1_result.embedding_used,
-                            embedding_reason: v1_result.embedding_diag.reason,
-                            embedding_latency_ms: v1_result.embedding_diag.latency_ms,
-                            embedding_attempts: v1_result.embedding_diag.attempts,
-                            embed_base_url: v1_result.embedding_diag.base_url,
-                            embed_model: v1_result.embedding_diag.model,
-                            is_truncated: false,
-                            budget_used: v1_result.used_tokens,
-                        }
-                    };
+                                index_refresh_on_query: effective_runtime
+                                    .context_index_refresh_on_query,
+                                retrieval_enable_filters: effective_runtime
+                                    .context_retrieval_enable_filters,
+                                version: if effective_runtime.context_engine == "v2plus" {
+                                    ContextEngineVersion::V2Plus
+                                } else {
+                                    ContextEngineVersion::V2
+                                },
+                            };
+                            if effective_runtime.context_engine == "v2plus" {
+                                let engine = ContextEngineV2Plus::new(index_dir);
+                                engine
+                                    .retrieve(
+                                        project_context,
+                                        &current_prompt,
+                                        context_budget,
+                                        model_hint,
+                                        &config,
+                                    )
+                                    .await
+                            } else {
+                                let engine = ContextEngineV2::new(index_dir);
+                                engine
+                                    .retrieve(
+                                        project_context,
+                                        &current_prompt,
+                                        context_budget,
+                                        model_hint,
+                                        &config,
+                                    )
+                                    .await
+                            }
+                        } else {
+                            let v1_result = build_relevant_project_context(
+                                project_context,
+                                &current_prompt,
+                                context_budget,
+                                model_hint,
+                                RetrievalConfig {
+                                    embeddings_enabled: effective_runtime
+                                        .context_embeddings_enabled,
+                                    embed_model: effective_runtime.context_embed_model.clone(),
+                                    embed_base_url: effective_runtime.embed_base_url.clone(),
+                                    ollama_base_url: effective_runtime
+                                        .context_ollama_base_url
+                                        .clone(),
+                                    embed_connect_timeout_ms: effective_runtime
+                                        .embed_connect_timeout_ms,
+                                    embed_request_timeout_ms: effective_runtime
+                                        .embed_request_timeout_ms,
+                                    embed_max_retries: effective_runtime.embed_max_retries,
+                                    embed_batch_size: effective_runtime.embed_batch_size,
+                                    top_k: effective_runtime.context_project_top_k,
+                                },
+                            )
+                            .await;
+                            RetrievalResult {
+                                context: v1_result.context,
+                                selected_files: v1_result.selected_files,
+                                used_tokens: v1_result.used_tokens,
+                                top_k: v1_result.top_k,
+                                embedding_used: v1_result.embedding_used,
+                                embedding_reason: v1_result.embedding_diag.reason,
+                                embedding_latency_ms: v1_result.embedding_diag.latency_ms,
+                                embedding_attempts: v1_result.embedding_diag.attempts,
+                                embed_base_url: v1_result.embedding_diag.base_url,
+                                embed_model: v1_result.embedding_diag.model,
+                                is_truncated: false,
+                                budget_used: v1_result.used_tokens,
+                            }
+                        };
 
                     if !retrieval.context.trim().is_empty() {
                         if retrieval.is_truncated {
@@ -1280,6 +1307,21 @@ impl ChatRuntime {
                                 retrieval.is_truncated,
                                 retrieval.selected_files,
                                 retrieval.budget_used
+                            );
+                        }
+                        if effective_runtime.context_engine == "v2plus"
+                            && effective_runtime.context_v2plus_metrics
+                        {
+                            eprintln!(
+                                "[context.v2plus.metrics] session={} top_k={} selected={} used_tokens={} budget_used={} truncated={} embedding_used={} embed_latency_ms={}",
+                                session_id,
+                                retrieval.top_k,
+                                retrieval.selected_files.len(),
+                                retrieval.used_tokens,
+                                retrieval.budget_used,
+                                retrieval.is_truncated,
+                                retrieval.embedding_used,
+                                retrieval.embedding_latency_ms
                             );
                         }
                     }

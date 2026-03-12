@@ -17,8 +17,8 @@ pub mod session;
 pub mod system;
 
 pub use context_engine::{
-    ContextEngine, ContextEngineV1, ContextEngineV2, ContextEngineVersion, ContextRetrievalConfig,
-    RetrievalResult,
+    ContextEngine, ContextEngineV1, ContextEngineV2, ContextEngineV2Plus, ContextEngineVersion,
+    ContextRetrievalConfig, RetrievalResult,
 };
 
 pub use auth::{AuthProvider, AuthService, OAuthConfig, OAuthFlow, StoredToken, TokenStore};

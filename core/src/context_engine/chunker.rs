@@ -1,6 +1,10 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+use quote::ToTokens;
+use syn::spanned::Spanned;
+use syn::visit::Visit;
+
 #[derive(Debug, Clone)]
 pub struct SourceFile {
     pub path: String,
@@ -33,31 +37,14 @@ pub fn semantic_chunks(files: &[SourceFile], fallback_block_lines: usize) -> Vec
 
 fn chunk_single_file(file: &SourceFile, fallback_block_lines: usize) -> Vec<SemanticChunk> {
     let path_l = file.path.to_ascii_lowercase();
-    let mut markers = Vec::new();
+    let mut markers = if is_rust_file(&path_l) {
+        rust_ast_markers(&file.content)
+    } else {
+        Vec::new()
+    };
 
-    for (idx, line) in file.content.lines().enumerate() {
-        let line_no = idx + 1;
-        let trimmed = line.trim_start();
-        if is_rust_file(&path_l) {
-            if trimmed.starts_with("fn ")
-                || trimmed.starts_with("impl ")
-                || trimmed.starts_with("mod ")
-            {
-                markers.push((line_no, extract_symbol(trimmed, &path_l)));
-            }
-        } else if is_python_file(&path_l) {
-            if trimmed.starts_with("def ") || trimmed.starts_with("class ") {
-                markers.push((line_no, extract_symbol(trimmed, &path_l)));
-            }
-        } else if is_js_like_file(&path_l) {
-            if trimmed.starts_with("function ")
-                || trimmed.starts_with("class ")
-                || trimmed.contains("=>")
-                || trimmed.starts_with("export function ")
-            {
-                markers.push((line_no, extract_symbol(trimmed, &path_l)));
-            }
-        }
+    if markers.is_empty() {
+        markers = collect_text_markers(&file.content, &path_l);
     }
 
     if markers.is_empty() {
@@ -190,6 +177,113 @@ fn extract_symbol(line: &str, path_l: &str) -> String {
         return "rust_symbol".to_string();
     }
     "block".to_string()
+}
+
+fn collect_text_markers(content: &str, path_l: &str) -> Vec<(usize, String)> {
+    let mut markers = Vec::new();
+
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim_start();
+        if is_python_file(path_l) {
+            if trimmed.starts_with("def ")
+                || trimmed.starts_with("async def ")
+                || trimmed.starts_with("class ")
+            {
+                markers.push((line_no, extract_symbol(trimmed, path_l)));
+            }
+        } else if is_js_like_file(path_l) {
+            if trimmed.starts_with("function ")
+                || trimmed.starts_with("export function ")
+                || trimmed.starts_with("class ")
+                || trimmed.starts_with("interface ")
+                || trimmed.starts_with("type ")
+                || trimmed.starts_with("enum ")
+                || trimmed.contains("=>")
+            {
+                markers.push((line_no, extract_symbol(trimmed, path_l)));
+            }
+        } else if is_rust_file(path_l)
+            && (trimmed.starts_with("fn ")
+                || trimmed.starts_with("impl ")
+                || trimmed.starts_with("mod "))
+        {
+            markers.push((line_no, extract_symbol(trimmed, path_l)));
+        }
+    }
+
+    markers
+}
+
+fn rust_ast_markers(content: &str) -> Vec<(usize, String)> {
+    let Ok(ast) = syn::parse_file(content) else {
+        return Vec::new();
+    };
+
+    let mut collector = RustSymbolCollector {
+        symbols: Vec::new(),
+    };
+    collector.visit_file(&ast);
+    collector.symbols.sort_by_key(|(line, _)| *line);
+    collector.symbols.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    collector.symbols
+}
+
+struct RustSymbolCollector {
+    symbols: Vec<(usize, String)>,
+}
+
+impl RustSymbolCollector {
+    fn push_symbol(&mut self, line: usize, symbol: String) {
+        if line > 0 && !symbol.is_empty() {
+            self.symbols.push((line, symbol));
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for RustSymbolCollector {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.push_symbol(
+            node.sig.ident.span().start().line,
+            node.sig.ident.to_string(),
+        );
+        syn::visit::visit_item_fn(self, node);
+    }
+
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        self.push_symbol(node.ident.span().start().line, node.ident.to_string());
+        syn::visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        self.push_symbol(node.ident.span().start().line, node.ident.to_string());
+        syn::visit::visit_item_enum(self, node);
+    }
+
+    fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        self.push_symbol(node.ident.span().start().line, node.ident.to_string());
+        syn::visit::visit_item_trait(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        self.push_symbol(node.ident.span().start().line, node.ident.to_string());
+        syn::visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let self_ty = node.self_ty.to_token_stream().to_string();
+        self.push_symbol(node.self_ty.span().start().line, format!("impl {self_ty}"));
+
+        for item in &node.items {
+            if let syn::ImplItem::Fn(method) = item {
+                self.push_symbol(
+                    method.sig.ident.span().start().line,
+                    format!("{}::{}", self_ty, method.sig.ident),
+                );
+            }
+        }
+        syn::visit::visit_item_impl(self, node);
+    }
 }
 
 fn is_rust_file(path: &str) -> bool {
