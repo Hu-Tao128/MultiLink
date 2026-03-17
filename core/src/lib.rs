@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod benchmark;
 pub mod chat_runtime;
+pub mod commands;
 pub mod config;
 pub mod context_engine;
 pub mod context_retrieval;
