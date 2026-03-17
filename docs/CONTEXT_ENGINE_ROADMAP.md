@@ -33,10 +33,10 @@
 
 ## Fase 3 — Hybrid Retrieval (Opcional)
 
-- [ ] Definir trait `EmbeddingStore` con método `search(query_vec, top_k) -> Vec<(ChunkId, f32)>`.
-- [ ] Implementar `hybrid_search()` con pesos configurables `alpha` (embedding) y `1-alpha` (lexical).
-- [ ] Asegurar que con `embeddings_enabled = false` el sistema sigue funcionando.
-- [ ] Test: verificar que hybrid ranking no degrada resultados vs solo lexical en un corpus pequeño.
+- [x] Definir trait `EmbeddingStore` con método `search(query_vec, top_k) -> Vec<(ChunkId, f32)>`.
+- [x] Implementar `hybrid_search()` con pesos configurables `alpha` (embedding) y `1-alpha` (lexical).
+- [x] Asegurar que con `embeddings_enabled = false` el sistema sigue funcionando.
+- [x] Test: verificar que hybrid ranking no degrada resultados vs solo lexical en un corpus pequeño.
 
 ## Fase 4 — LSP Semantic Server
 
