@@ -21,15 +21,15 @@
 
 ## Fase 2 — Tree-sitter Semantic Chunking
 
-- [ ] Añadir dependencias `tree-sitter`, `tree-sitter-rust` al `Cargo.toml`.
-- [ ] Implementar `parser/tree_sitter_parser.rs`: inicializar parser por `Language` enum.
-- [ ] Definir struct `CodeChunk` con `id`, `file`, `symbol`, `start_line`, `end_line`, `text`, `language`.
-- [ ] Implementar `parser/chunk_extractor.rs` para **Rust** (`function_item`, `struct_item`, `impl_item`, `mod_item`).
-- [ ] Implementar `parser/chunk_extractor.rs` para **Python** (`function_definition`, `class_definition`).
-- [ ] Implementar `parser/chunk_extractor.rs` para **JavaScript/TypeScript**.
-- [ ] Implementar `parser/symbol_index.rs`: nombre de símbolo → `ChunkId`.
+- [x] Añadir dependencias `tree-sitter`, `tree-sitter-rust` al `Cargo.toml`.
+- [x] Implementar `parser/tree_sitter_parser.rs`: inicializar parser por `Language` enum.
+- [x] Definir struct `CodeChunk` con `id`, `file`, `symbol`, `start_line`, `end_line`, `text`, `language`.
+- [x] Implementar `parser/chunk_extractor.rs` para **Rust** (`function_item`, `struct_item`, `impl_item`, `mod_item`).
+- [x] Implementar `parser/chunk_extractor.rs` para **Python** (`function_definition`, `class_definition`).
+- [x] Implementar `parser/chunk_extractor.rs` para **JavaScript/TypeScript**.
+- [x] Implementar `parser/symbol_index.rs`: nombre de símbolo → `ChunkId`.
 - [ ] Conectar extractor con `LexicalIndex`: al indexar un archivo, usar chunks semánticos.
-- [ ] Test: parsear un archivo Rust de muestra y verificar que `fn` y `struct` son chunks separados.
+- [x] Test: parsear un archivo Rust de muestra y verificar que `fn` y `struct` son chunks separados.
 
 ## Fase 3 — Hybrid Retrieval (Opcional)
 
