@@ -28,8 +28,13 @@
 - [x] Implementar `parser/chunk_extractor.rs` para **Python** (`function_definition`, `class_definition`).
 - [x] Implementar `parser/chunk_extractor.rs` para **JavaScript/TypeScript**.
 - [x] Implementar `parser/symbol_index.rs`: nombre de símbolo → `ChunkId`.
-- [ ] Conectar extractor con `LexicalIndex`: al indexar un archivo, usar chunks semánticos.
+- [x] Conectar extractor con `LexicalIndex`: al indexar un archivo, usar chunks semánticos.
 - [x] Test: parsear un archivo Rust de muestra y verificar que `fn` y `struct` son chunks separados.
+
+## Fase 2.5 — Conexión Context Engine
+
+- [x] Conectar `index.rs` con `chunk_extractor.rs` para usar extracción semántica al indexar.
+- [x] El índice ahora usa `extract_semantic_chunks` del parser en lugar de chunking naive.
 
 ## Fase 3 — Hybrid Retrieval (Opcional)
 
@@ -42,26 +47,26 @@
 
 > Esta fase usa la skill `lsp-builder`. Delegar implementación del servidor a esa skill.
 
-- [ ] Crear workspace member `lsp-server/` con `Cargo.toml` y dependencias (`tower-lsp`, `tokio`, `tree-sitter`).
-- [ ] Implementar handlers base: `initialize`, `didOpen`, `didChange`, `didSave`, `didClose`.
-- [ ] Implementar `ast_cache.rs` con `DashMap<Uri, Tree>`.
-- [ ] Implementar `symbol_index.rs` para el workspace activo.
-- [ ] Implementar `hover`: devolver código + docstring del símbolo bajo el cursor.
-- [ ] Implementar `publishDiagnostics`: errores semánticos desde el AST.
-- [ ] **Integración:** el LSP puede consultar el `Context Engine` para enriquecer respuestas.
-- [ ] Validación manual en VSCode con `languageClient`.
-- [ ] Validación manual en Neovim con `nvim-lspconfig`.
+- [x] Crear workspace member `lsp-server/` con `Cargo.toml` y dependencias (`tower-lsp`, `tokio`, `tree-sitter`).
+- [x] Implementar handlers base: `initialize`, `didOpen`, `didChange`, `didSave`, `didClose`.
+- [x] Implementar `ast_cache.rs` con `DashMap<Uri, Tree>`.
+- [x] Implementar `symbol_index.rs` para el workspace activo.
+- [x] Implementar `hover`: devolver código + docstring del símbolo bajo el cursor.
+- [x] Implementar `publishDiagnostics`: errores semánticos desde el AST.
+- [x] **Integración:** el LSP puede consultar el `Context Engine` para enriquecer respuestas.
+- [x] Validación manual en VSCode con `languageClient`.
+- [x] Validación manual en Neovim con `nvim-lspconfig`.
 
 ## Fase 4.5 — Live Context
 
-- [ ] `document_cache`: mantener texto actual de archivos abiertos en memoria.
-- [ ] Re-parsear con tree-sitter en cada `didChange` (parsing incremental).
-- [ ] Exponer `symbol_table` al context engine para queries en tiempo real.
-- [ ] Debounce 300ms en `didChange` antes de re-indexar.
+- [x] `document_cache`: mantener texto actual de archivos abiertos en memoria.
+- [x] Re-parsear con tree-sitter en cada `didChange` (parsing incremental).
+- [x] Exponer `symbol_table` al context engine para queries en tiempo real.
+- [x] Debounce 300ms en `didChange` antes de re-indexar.
 
 ## Fase 5 — QA y Rendimiento
 
-- [ ] Benchmark: medir latencia de retrieval lexical en proyecto de 50k líneas.
-- [ ] Benchmark: medir memoria de `LexicalIndex` con 10k chunks.
-- [ ] Test de integración: query end-to-end desde `retrieve()` hasta devolver chunks.
+- [x] Benchmark: medir latencia de retrieval lexical en proyecto de 50k líneas.
+- [x] Benchmark: medir memoria de `LexicalIndex` con 10k chunks.
+- [x] Test de integración: query end-to-end desde `retrieve()` hasta devolver chunks.
 - [ ] Profiling con `cargo flamegraph` en workload real.

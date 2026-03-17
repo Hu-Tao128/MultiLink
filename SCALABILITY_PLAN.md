@@ -1,7 +1,7 @@
 # Plan de Escalabilidad y Despliegue
 
 > Generado el: 2026-03-16 | Auditor: Skill `auditor-escalabilidad`
-> Actualizado el: 2026-03-16
+> Actualizado el: 2026-03-17
 
 ## Resumen Ejecutivo
 
@@ -69,7 +69,7 @@ El proyecto MultiLink presenta una arquitectura bien diseñada con separación c
 - [x] HC-02: Agregar detección de `~/.ollama/models` para Linux
 - [x] DT-01: Timeouts configurables via variables de entorno
 - [x] DT-02: Crear Dockerfile y docker-compose.yml
-- [ ] DT-03: Cambiar `embed_model` por uno disponible (e.g., `nomic-embed-text`)
+- ✅ DT-03: Cambiar `embed_model` por uno disponible (e.g., `nomic-embed-text`) — *implementado auto-detección en resolve_embed_model()*
 
 ### Mediano Plazo (1–3 meses) — Reducir Deuda Técnica
 - [ ] Agregar logging claro cuando fallan proveedores
@@ -94,3 +94,27 @@ El proyecto MultiLink presenta una arquitectura bien diseñada con separación c
 | **Docker** | Dockerfile multi-stage + docker-compose.yml |
 | **Seguridad** | No hay API keys hardcodeadas |
 | **UI** | Sin bloqueo del hilo principal detectado |
+
+---
+
+## 🔄 Actualización — 2026-03-17
+
+### Hallazgos Resueltos desde la Última Auditoría
+- ✅ HC-01 — URLs de Ollama hardcodeadas — *resuelto con `detect_ollama_base_url()` en config.rs*
+- ✅ HC-02 — Ruta de modelos no detectada para Linux — *resuelto en model_manager/ollama.rs con ~/.ollama/models*
+- ✅ DT-01 — Timeouts no configurables — *implementado via MULTILINK_OLLAMA_*_TIMEOUT*
+- ✅ DT-02 — Sin Dockerfile — *creado Dockerfile y docker-compose.yml*
+
+### Verificación de Código
+- `detect_ollama_base_url()` presente en config.rs (líneas 12, 297, 337, 474, 697)
+- `detect_models_dir()` verifica `~/.ollama/models` en ollama.rs (líneas 28-29)
+- Timeouts configurables via env vars en providers/ollama.rs (líneas 45-55)
+- Dockerfile existe en raíz del proyecto
+
+### Pendientes sin Cambios
+- ⏳ Ninguno — Todos los hallazgos resueltos
+
+### Notas
+- Los defaults hardcodeados (127.0.0.1:11434) en config.rs son aceptables como **fallback final** después de que la detección falla
+- No se detectaron nuevas rutas absolutas de usuario en el código
+- **DT-03 resuelto**: `embed_model` por defecto es vacío y `resolve_embed_model()` auto-detecta el mejor modelo disponible

@@ -11,8 +11,8 @@ Este plan es complementario al plan de 10 fases del orquestador LLM.
 ## Estado rapido
 
 - Paso actual: **6 - Observabilidad + A/B**.
-- Siguiente paso: **6**.
-- Ultimo paso completado: **5**.
+- Siguiente paso: **6** (en progreso)
+- Ultimo paso completado: **5**
 
 ---
 
@@ -120,11 +120,25 @@ Este plan es complementario al plan de 10 fases del orquestador LLM.
 
 ### 6) Observabilidad + A/B
 
-**Estado**: ⏳ Pendiente
+**Estado**: 🟡 En progreso
 
-**Por implementar**
-- [ ] Metricas comparables `v2` vs `v2plus`.
-- [ ] Criterios de promocion/rollback.
+**Implementado**
+- Nueva estructura `ContextRetrievalMetrics` en `observability.rs`:
+  - `context_latency_ms` - latencia total de retrieval
+  - `embedding_latency_ms` - latencia de embeddings
+  - `index_refresh_ms` - tiempo de refresh del indice (optional)
+  - `retrieval_hit_rate` - tasa de aciertos (preparado para tracking)
+  - `truncation_rate` - tasa de truncamiento
+  - `error_rate` - tasa de errores
+  - `selected_files`, `used_tokens`, `budget_used`, `embedding_used`, `top_k`
+- Integracion en `chat_runtime.rs`: medicion de `context_latency_ms` con `Instant::now()`
+- Emision de metricas unificadas para v2 y v2plus via `metrics.emit(false)`
+
+**Por completar**
+- [ ] Recolectar metricas comparables `v2` vs `v2plus` en misma corrida
+- [ ] Definir criterios de promocion/rollback (hit_rate +5%, latency +15%)
+- [ ] Suite de 60 prompts (20 navegacion, 20 debug, 20 refactor)
+- [ ] Captura de metricas: p50/p95 latency, hit_rate, truncation_rate
 
 **Instrucciones obligatorias de pruebas (gate antes del ultimo paso)**
 

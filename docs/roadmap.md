@@ -29,6 +29,10 @@
 - [ ] OAuth hardening (refresh token lifecycle)
 - [ ] Remote provider auth UI wiring
 - [ ] Model registry external sources
+- [x] Context Engine v2 (lexical + semantic + hybrid retrieval)
+- [x] LSP Server (tower-lsp with tree-sitter)
+- [x] Observability metrics (context_latency_ms, hit_rate, truncation_rate)
+- [x] Benchmarks (lexical search, indexing)
 
 ## 📋 Backlog
 
