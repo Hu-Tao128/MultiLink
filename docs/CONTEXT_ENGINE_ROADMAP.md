@@ -10,13 +10,13 @@
 
 ## Fase 1 — Lexical Search Engine
 
-- [ ] Crear módulo `core/src/context_engine/` con `mod.rs`.
-- [ ] Implementar `tokenizer.rs`: lowercase, split camelCase, split snake_case, quitar puntuación.
-- [ ] Implementar `index/lexical_index.rs`: índice invertido con `HashMap<String, Vec<ChunkId>>`.
-- [ ] Implementar `ranking/bm25.rs`: función `score(tf, df, n_docs, dl, avg_dl) -> f32` con k1=1.5, b=0.75.
-- [ ] Implementar `retrieval/lexical_search.rs`: pipeline query → tokenize → lookup → score → top_k.
-- [ ] Implementar `context_retrieval.rs`: entry point con branch `embeddings_enabled`.
-- [ ] Test unitario: indexar 3 chunks de prueba y verificar que la query devuelve el correcto.
+- [x] Crear módulo `core/src/context_engine/` con `mod.rs`.
+- [x] Implementar `tokenizer.rs`: lowercase, split camelCase, split snake_case, quitar puntuación.
+- [x] Implementar `index/lexical_index.rs`: índice invertido con `HashMap<String, Vec<ChunkId>>`.
+- [x] Implementar `ranking/bm25.rs`: función `score(tf, df, n_docs, dl, avg_dl) -> f32` con k1=1.5, b=0.75.
+- [x] Implementar `retrieval/lexical_search.rs`: pipeline query → tokenize → lookup → score → top_k.
+- [x] Implementar `context_retrieval.rs`: entry point con branch `embeddings_enabled`.
+- [x] Test unitario: indexar 3 chunks de prueba y verificar que la query devuelve el correcto.
 - [ ] Benchmark: verificar latencia < 10ms con 1 000 chunks sintéticos.
 
 ## Fase 2 — Tree-sitter Semantic Chunking
