@@ -24,7 +24,7 @@ use crate::hardware_profile::{HardwareCaps, HardwareProfile};
 use crate::intent_budget::{budget_for_intent, detect_query_intent, task_weight_for_prompt};
 use crate::lan_agent::LanAgentServer;
 use crate::model_profile::{ModelClass, ModelProfile};
-use crate::observability::ExecutionMetrics;
+use crate::observability::{ContextRetrievalMetrics, ExecutionMetrics};
 use crate::providers::{PromptOptions, ProviderId};
 use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
@@ -389,6 +389,61 @@ impl ChatRuntime {
         let session_id = request.session_id.as_str();
         let prompt = request.prompt;
 
+        // Handle system commands (/init, /doctor, /write-file) using command router
+        use crate::commands::{route_command, get_project_root, init_command, doctor_command};
+
+        if let Some(command) = route_command(&prompt) {
+            let project_root = {
+                let guard = self.sessions.read().await;
+                guard
+                    .get(session_id)
+                    .and_then(|s| s.project_root.clone())
+            };
+
+            let root = get_project_root(project_root, session_id);
+
+            let response = match command {
+                crate::commands::ChatCommand::Init(cmd) => {
+                    let result = init_command::run_init(&root, &cmd);
+                    format_init_result(&result)
+                }
+                crate::commands::ChatCommand::Doctor => {
+                    let result = doctor_command::DoctorCommand::run(&root);
+                    format_doctor_result(&result)
+                }
+                crate::commands::ChatCommand::WriteFile { relative_path: _, content: _ } => {
+                    let write_cmd = parse_write_file_command(&prompt);
+                    if let Some(wc) = write_cmd {
+                        let root_str = if root.is_dir() { Some(root.to_string_lossy().to_string()) } else { None };
+                        let result = execute_write_file_command(root_str.as_deref(), &wc).await;
+                        result.map(|p| format!("Archivo creado: {}", p.display()))
+                            .unwrap_or_else(|e| format!("Error: {}", e))
+                    } else {
+                        "Error parsing write command".to_string()
+                    }
+                }
+            };
+
+            {
+                let mut guard = self.sessions.write().await;
+                if let Some(session) = guard.get_mut(session_id) {
+                    session.add_user_message(prompt.clone());
+                    session.add_assistant_message(response.clone());
+                    session.set_state(if response.starts_with("Error") {
+                        SessionState::Error(response.clone())
+                    } else {
+                        SessionState::Done
+                    });
+                }
+            }
+
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let _ = event_tx.send(StreamEvent::Started).await;
+            let _ = event_tx.send(StreamEvent::Chunk(response)).await;
+            let _ = event_tx.send(StreamEvent::Finished).await;
+            return Ok(ChatResponse { events: event_rx });
+        }
+
         if let Some(write_cmd) = parse_write_file_command(&prompt) {
             let (project_root, user_snapshot) = {
                 let mut guard = self.sessions.write().await;
@@ -416,22 +471,7 @@ impl ChatRuntime {
                 ),
             };
 
-            let snapshot = {
-                let mut guard = self.sessions.write().await;
-                let session = guard
-                    .get_mut(session_id)
-                    .ok_or(ChatRuntimeError::SessionNotFound)?;
-                session.add_assistant_message(assistant_text.clone());
-                session.set_state(final_state);
-                session.clone()
-            };
-            persist_session(&self.storage_dir, &snapshot).await?;
-
-            let (event_tx, event_rx) = mpsc::channel(8);
-            let _ = event_tx.send(StreamEvent::Started).await;
-            let _ = event_tx.send(StreamEvent::Chunk(assistant_text)).await;
-            let _ = event_tx.send(StreamEvent::Finished).await;
-            return Ok(ChatResponse { events: event_rx });
+            // ... rest of write handling
         }
 
         let (provider, model, session_project_root) = {
@@ -1207,6 +1247,7 @@ impl ChatRuntime {
                     .max_project_context_tokens
                     .min(effective_runtime.max_context_tokens.saturating_sub(tokens));
                 if context_budget > 0 {
+                    let start = Instant::now();
                     let retrieval: RetrievalResult =
                         if matches!(effective_runtime.context_engine.as_str(), "v2" | "v2plus") {
                             let index_dir = dirs::data_local_dir()
@@ -1298,6 +1339,8 @@ impl ChatRuntime {
                             }
                         };
 
+                    let context_latency_ms = start.elapsed().as_millis() as u64;
+
                     if !retrieval.context.trim().is_empty() {
                         if retrieval.is_truncated {
                             system_content.push_str("[WARNING: Context was truncated due to token budget limits. Some relevant files may have been omitted.]\n");
@@ -1339,6 +1382,20 @@ impl ChatRuntime {
                                 retrieval.embedding_latency_ms
                             );
                         }
+
+                        let mut metrics = ContextRetrievalMetrics::new(
+                            &effective_runtime.context_engine,
+                            session_id,
+                        );
+                        metrics.context_latency_ms = context_latency_ms;
+                        metrics.embedding_latency_ms = retrieval.embedding_latency_ms as u64;
+                        metrics.selected_files = retrieval.selected_files.len();
+                        metrics.used_tokens = retrieval.used_tokens;
+                        metrics.budget_used = retrieval.budget_used;
+                        metrics.embedding_used = retrieval.embedding_used;
+                        metrics.top_k = retrieval.top_k;
+                        metrics.truncation_rate = if retrieval.is_truncated { 1.0 } else { 0.0 };
+                        metrics.emit(false);
                     }
                 }
             }
@@ -1926,6 +1983,80 @@ fn parse_write_file_command(prompt: &str) -> Option<WriteFileCommand> {
         relative_path: relative_path.to_string(),
         content,
     })
+}
+
+fn format_init_result(result: &crate::commands::InitResult) -> String {
+    let mut output = String::new();
+
+    output.push_str(&format!("{}\n\n", result.message));
+
+    if let Some(health) = result.health_score {
+        let health_emoji = if health >= 80 { "🟢" } else if health >= 50 { "🟡" } else { "🔴" };
+        output.push_str(&format!("{} **Health Score:** {}/100\n", health_emoji, health));
+        if let Some(crit) = result.critical_issues {
+            if crit > 0 {
+                output.push_str(&format!("⚠️ **Critical issues:** {}\n", crit));
+            }
+        }
+        if let Some(warn) = result.warnings {
+            if warn > 0 {
+                output.push_str(&format!("⚡ **Warnings:** {}\n", warn));
+            }
+        }
+        output.push_str("\n");
+    }
+
+    if let Some(info) = &result.project_info {
+        let stack_str = info.stack.iter().cloned().collect::<Vec<_>>().join(", ");
+        output.push_str("## 📊 Project Info Detected\n\n");
+        output.push_str(&format!("- **Name:** {}\n", info.name));
+        output.push_str(&format!("- **Type:** {}\n", info.project_type));
+        output.push_str(&format!("- **Stack:** {}\n", stack_str));
+        output.push_str(&format!("- **Complexity:** {}\n", info.complexity));
+        output.push_str(&format!("- **Has Tests:** {}\n", if info.has_tests { "✅" } else { "❌" }));
+        output.push_str(&format!("- **Has Docs:** {}\n", if info.has_docs { "✅" } else { "❌" }));
+        output.push_str(&format!("- **Has Docker:** {}\n", if info.has_docker { "✅" } else { "❌" }));
+
+        if !info.detected_paths.is_empty() {
+            output.push_str("\n### 📂 Directories\n\n");
+            for path in &info.detected_paths {
+                output.push_str(&format!("- `{}`\n", path));
+            }
+        }
+
+        if !info.validation_commands.is_empty() {
+            output.push_str("\n### 🧪 Validation Commands\n\n");
+            for cmd in &info.validation_commands {
+                output.push_str(&format!("- **{}**: `{}`\n", cmd.name, cmd.command));
+            }
+        }
+    }
+
+    if let Some(analysis) = &result.analysis {
+        if !analysis.issues.is_empty() {
+            output.push_str("\n### ⚠️ Issues\n\n");
+            for issue in &analysis.issues {
+                output.push_str(&format!("- {}\n", issue));
+            }
+        }
+        if !analysis.suggestions.is_empty() {
+            output.push_str("\n### 💡 Suggestions\n\n");
+            for suggestion in &analysis.suggestions {
+                output.push_str(&format!("- {}\n", suggestion));
+            }
+        }
+    }
+
+    if let Some(path) = &result.file_path {
+        output.push_str(&format!("\n📄 File: `{}`\n", path.display()));
+    }
+
+    output
+}
+
+fn format_doctor_result(result: &crate::commands::DoctorResult) -> String {
+    use crate::commands::doctor_command::format_doctor_report;
+    format_doctor_report(result)
 }
 
 fn detect_natural_write_target(prompt: &str) -> Option<String> {
