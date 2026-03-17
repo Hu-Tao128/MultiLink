@@ -22,6 +22,7 @@ use crate::context_retrieval::{build_relevant_project_context, RetrievalConfig};
 use crate::execution::{ExecutionDispatchRequest, ExecutionDispatcher};
 use crate::hardware_profile::{HardwareCaps, HardwareProfile};
 use crate::intent_budget::{budget_for_intent, detect_query_intent, task_weight_for_prompt};
+use crate::lan_agent::LanAgentServer;
 use crate::model_profile::{ModelClass, ModelProfile};
 use crate::observability::ExecutionMetrics;
 use crate::providers::{PromptOptions, ProviderId};
@@ -51,6 +52,7 @@ pub struct HandleUserMessageRequest {
     pub prompt: String,
 }
 
+#[derive(Clone)]
 pub struct ChatRuntime {
     router: Arc<ProviderRouter>,
     execution_dispatcher: Arc<ExecutionDispatcher>,
@@ -120,6 +122,16 @@ impl ChatRuntime {
             runtime_config,
             system_context_dir,
         }
+    }
+
+    pub async fn start_lan_agent(
+        &self,
+        addr: &str,
+        shared_secret: String,
+    ) -> Result<LanAgentServer, std::io::Error> {
+        let runtime = Arc::new(self.clone());
+        let server = LanAgentServer::bind(addr, runtime, shared_secret).await?;
+        Ok(server)
     }
 
     pub fn new_portable(
