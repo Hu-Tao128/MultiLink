@@ -161,8 +161,11 @@ Page {
                             }
 
                             Button {
-                                text: "Probar conexion"
+                                text: model.testing ? "Cargando..." : "Probar conexion"
+                                enabled: !model.testing
                                 onClicked: {
+                                    serversModel.setProperty(index, "test_result", "Cargando modelos...")
+                                    serversModel.setProperty(index, "testing", true)
                                     const raw = controller.testServerConnection(model.base_url)
                                     let parsed = { ok: false, model_count: 0, error: "respuesta invalida", hint: "" }
                                     try {
@@ -173,6 +176,7 @@ Page {
                                         ? ("OK - modelos detectados: " + parsed.model_count)
                                         : ("Error: " + parsed.error + (parsed.hint && parsed.hint.length > 0 ? "\n\nSugerencia:\n" + parsed.hint : ""))
                                     serversModel.setProperty(index, "test_result", text)
+                                    serversModel.setProperty(index, "testing", false)
                                 }
                             }
                         }
@@ -200,7 +204,8 @@ Page {
                             default_model: "auto",
                             priority: serversModel.count + 1,
                             enabled: true,
-                            test_result: ""
+                            test_result: "",
+                            testing: false
                         })
                     }
                 }
