@@ -16,8 +16,8 @@ NEXT_PHASE = 10 (Benchmark/release gate)
 - Phase 7 Network security enforcement: partial (config available, enforcement depends on Phase 8.5).
 - Phase 8 Multi-server router hardening: complete (health monitor, circuit breaker, backoff).
 - Phase 8.5 LAN Agent + MCP adapter: complete.
-- Phase 9 Orchestrator + Skills: in progress.
-- Phase 10 Benchmark/release gate: not started.
+- Phase 9 Orchestrator + Skills: complete.
+- Phase 10 Benchmark/release gate: in progress.
 
 ## Immediate Focus
 
@@ -32,7 +32,7 @@ NEXT_PHASE = 10 (Benchmark/release gate)
    - [x] Step 2: Implement skill loader (global + project paths)
    - [x] Step 3: Create SkillOrchestrator for skill selection/execution
    - [x] Step 4: Integrate with ChatRuntime for skill-based prompts
-   - [ ] Step 5: Add skill sharing mechanism (opt-in)
+   - [x] Step 5: Add skill sharing mechanism (opt-in)
 3. Phase 10: Benchmark/release gate
 
 ## Recovery Plan (Pre-test execution)

@@ -48,5 +48,5 @@ pub use providers::{
 };
 pub use router::{ProviderAvailability, ProviderRouter};
 pub use session::{ChatMessage, ChatSession, SessionState};
-pub use skills::{Skill, SkillLoader, SkillManifest, SkillOrchestrator, SkillParameter};
+pub use skills::{Skill, SkillLoader, SkillManifest, SkillOrchestrator, SkillParameter, SkillShare, SkillSharer};
 pub use system::{OllamaInstallPlan, SystemService};

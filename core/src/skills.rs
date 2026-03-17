@@ -104,6 +104,60 @@ impl SkillOrchestrator {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillShare {
+    pub manifest: SkillManifest,
+    pub shared_by: String,
+    pub shared_at: u64,
+}
+
+pub struct SkillSharer;
+
+impl SkillSharer {
+    pub fn export_skill(skill: &Skill, shared_by: &str) -> SkillShare {
+        SkillShare {
+            manifest: skill.manifest.clone(),
+            shared_by: shared_by.to_string(),
+            shared_at: unix_timestamp_ms(),
+        }
+    }
+
+    pub fn import_skill(share: &SkillShare, dest_dir: &PathBuf) -> std::io::Result<PathBuf> {
+        std::fs::create_dir_all(dest_dir)?;
+        let filename = format!(
+            "{}.toml",
+            share.manifest.name.replace(' ', "_").to_lowercase()
+        );
+        let path = dest_dir.join(&filename);
+        let content = toml::to_string_pretty(&share.manifest)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(&path, content)?;
+        Ok(path)
+    }
+
+    pub fn save_shared_skills(shared_skills: &[SkillShare], path: &PathBuf) -> std::io::Result<()> {
+        let content = serde_json::to_string_pretty(shared_skills)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(path, content)
+    }
+
+    pub fn load_shared_skills(path: &PathBuf) -> std::io::Result<Vec<SkillShare>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = std::fs::read_to_string(path)?;
+        serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
+fn unix_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
