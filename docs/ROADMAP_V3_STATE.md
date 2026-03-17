@@ -25,7 +25,7 @@ NEXT_PHASE = 9 (Orchestrator + Skills)
    - [x] Step 1: LAN Agent protocol structure (MessagePack envelope/payload)
    - [x] Step 2: MCP adapter basic tool conversion
    - [x] Step 3: Implement LAN Agent TCP server for MessagePack streaming
-   - [ ] Step 4: Implement MCP adapter response handling
+   - [x] Step 4: Implement MCP adapter response handling
    - [ ] Step 5: Integrate LAN Agent with ChatRuntime
 2. Phase 9: Orchestrator + Skills
 3. Phase 10: Benchmark/release gate
