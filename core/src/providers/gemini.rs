@@ -163,6 +163,18 @@ impl LLMProvider for GeminiProvider {
     async fn get_model_info(&self, _model: &str) -> Result<ProviderCapabilities, LLMError> {
         Ok(ProviderCapabilities::default_with_context(128_000))
     }
+
+    async fn health_check(&self) -> Result<bool, LLMError> {
+        if self.access_token.is_none() {
+            return Ok(false);
+        }
+        let token = self.access_token.as_deref().unwrap();
+        let test_url = format!("{}/models", self.endpoint.replace("/generateContent", ""));
+        match self.client.get(&test_url).bearer_auth(token).send().await {
+            Ok(resp) => Ok(resp.status().is_success()),
+            Err(_) => Ok(false),
+        }
+    }
 }
 
 fn map_reqwest(error: reqwest::Error) -> LLMError {

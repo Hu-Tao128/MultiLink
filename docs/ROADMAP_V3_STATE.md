@@ -22,6 +22,12 @@ NEXT_PHASE = 8 (Router hardening)
 ## Immediate Focus
 
 1. Complete remaining Phase 8 items (health monitor, circuit breaker, backoff).
+   - [x] Step 1: Add health_check() to LLMProvider trait
+   - [ ] Step 2: Add ProviderHealthState struct to router.rs
+   - [ ] Step 3: Add CircuitBreaker config to router.rs
+   - [ ] Step 4: Implement health monitor background task
+   - [ ] Step 5: Add retry/backoff logic to send methods
+   - [ ] Step 6: Implement provider-specific health checks
 2. Phase 8.5: LAN Agent protocol implementation.
 3. MCP adapter as thin external layer.
 

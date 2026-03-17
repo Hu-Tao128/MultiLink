@@ -126,6 +126,8 @@ pub trait LLMProvider: Send + Sync {
     ) -> Result<TokenStream, LLMError>;
 
     async fn get_model_info(&self, model: &str) -> Result<ProviderCapabilities, LLMError>;
+
+    async fn health_check(&self) -> Result<bool, LLMError>;
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -134,6 +136,7 @@ pub struct ProviderCapabilities {
     pub tools: bool,
     pub fim: bool,
     pub vision: bool,
+    pub supports_embedding: bool,
     pub max_context_tokens: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameter_count: Option<u64>,
@@ -152,6 +155,7 @@ impl ProviderCapabilities {
             tools: false,
             fim: false,
             vision: false,
+            supports_embedding: false,
             max_context_tokens: context_tokens,
             parameter_count: None,
             quantization_level: None,

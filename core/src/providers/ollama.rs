@@ -152,6 +152,8 @@ impl OllamaProvider {
         let has_insert_in_capabilities = capabilities_raw.contains(&"insert".to_string());
         let supports_fim = has_insert_in_capabilities && template.contains("fim_prefix");
 
+        let supports_embedding = capabilities_raw.contains(&"embedding".to_string());
+
         let supports_vision = capabilities_raw.contains(&"vision".to_string())
             || model_info.map_or(false, |m| {
                 m.keys().any(|k| k.contains("vision") || k.contains("mm."))
@@ -166,6 +168,7 @@ impl OllamaProvider {
             tools: supports_tools,
             fim: supports_fim,
             vision: supports_vision,
+            supports_embedding,
             max_context_tokens: context_length,
             parameter_count,
             quantization_level,
@@ -695,5 +698,13 @@ impl LLMProvider for OllamaProvider {
             model.to_string()
         };
         self.get_cached_or_fetch(&model_name).await
+    }
+
+    async fn health_check(&self) -> Result<bool, LLMError> {
+        let url = format!("{}/api/tags", self.base_url);
+        match self.client.get(&url).send().await {
+            Ok(resp) => Ok(resp.status().is_success()),
+            Err(_) => Ok(false),
+        }
     }
 }

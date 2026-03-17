@@ -163,12 +163,25 @@ impl LLMProvider for CodexProvider {
             tools: false,
             fim: true,
             vision: false,
+            supports_embedding: false,
             max_context_tokens: 128_000,
             parameter_count: None,
             quantization_level: None,
             embedding_length: None,
             capability_tags: Vec::new(),
         })
+    }
+
+    async fn health_check(&self) -> Result<bool, LLMError> {
+        if self.access_token.is_none() {
+            return Ok(false);
+        }
+        let token = self.access_token.as_deref().unwrap();
+        let test_url = self.endpoint.replace("/completions", "/models");
+        match self.client.get(&test_url).bearer_auth(token).send().await {
+            Ok(resp) => Ok(resp.status().is_success()),
+            Err(_) => Ok(false),
+        }
     }
 }
 
