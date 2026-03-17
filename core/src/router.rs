@@ -2,12 +2,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio::time::sleep;
 use tokio::sync::RwLock;
 
 use crate::providers::{
     LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId,
     TokenStream,
 };
+
+const DEFAULT_MAX_RETRIES: u32 = 3;
+const DEFAULT_INITIAL_BACKOFF_MS: u64 = 500;
+const DEFAULT_MAX_BACKOFF_MS: u64 = 5000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderAvailability {
@@ -254,8 +259,19 @@ impl ProviderRouter {
         options: PromptOptions,
     ) -> Result<LLMResponse, LLMError> {
         if let Some(provider) = self.providers.get(&preferred) {
-            if provider.is_available() {
-                return provider.send(prompt.clone(), options.clone()).await;
+            if provider.is_available() && self.check_circuit_breaker(preferred).await {
+                match provider.send(prompt.clone(), options.clone()).await {
+                    Ok(response) => {
+                        self.record_success(preferred).await;
+                        return Ok(response);
+                    }
+                    Err(e) => {
+                        self.record_failure(preferred).await;
+                        if !is_retryable_error(&e) {
+                            return Err(e);
+                        }
+                    }
+                }
             }
         }
 
@@ -265,13 +281,51 @@ impl ProviderRouter {
             }
 
             if let Some(provider) = self.providers.get(provider_id) {
-                if provider.is_available() {
-                    return provider.send(prompt.clone(), options.clone()).await;
+                if provider.is_available() && self.check_circuit_breaker(*provider_id).await {
+                    match self.send_with_retry(provider, prompt.clone(), options.clone()).await {
+                        Ok(response) => {
+                            self.record_success(*provider_id).await;
+                            return Ok(response);
+                        }
+                        Err(_e) => {
+                            self.record_failure(*provider_id).await;
+                            continue;
+                        }
+                    }
                 }
             }
         }
 
         Err(LLMError::Unavailable)
+    }
+
+    async fn send_with_retry(
+        &self,
+        provider: &Arc<dyn LLMProvider>,
+        prompt: String,
+        options: PromptOptions,
+    ) -> Result<LLMResponse, LLMError> {
+        let max_retries = DEFAULT_MAX_RETRIES;
+        let mut last_error = LLMError::Unavailable;
+
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                let backoff_ms = calculate_backoff(attempt, DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS);
+                sleep(Duration::from_millis(backoff_ms)).await;
+            }
+
+            match provider.send(prompt.clone(), options.clone()).await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    last_error = e.clone();
+                    if !is_retryable_error(&e) {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        Err(last_error)
     }
 
     pub async fn stream_send(
@@ -281,7 +335,7 @@ impl ProviderRouter {
         options: PromptOptions,
     ) -> Result<TokenStream, LLMError> {
         if let Some(provider) = self.providers.get(&preferred) {
-            if provider.is_available() {
+            if provider.is_available() && self.check_circuit_breaker(preferred).await {
                 return provider.stream_send(prompt.clone(), options.clone()).await;
             }
         }
@@ -292,7 +346,7 @@ impl ProviderRouter {
             }
 
             if let Some(provider) = self.providers.get(provider_id) {
-                if provider.is_available() {
+                if provider.is_available() && self.check_circuit_breaker(*provider_id).await {
                     return provider.stream_send(prompt.clone(), options.clone()).await;
                 }
             }
@@ -325,4 +379,18 @@ impl ProviderRouter {
 
         Err(LLMError::Unavailable)
     }
+}
+
+fn is_retryable_error(error: &LLMError) -> bool {
+    match error {
+        LLMError::Timeout => true,
+        LLMError::RateLimited => true,
+        LLMError::Http(_) => true,
+        _ => false,
+    }
+}
+
+fn calculate_backoff(attempt: u32, initial_ms: u64, max_ms: u64) -> u64 {
+    let backoff = initial_ms * 2u64.pow(attempt.saturating_sub(1) as u32);
+    backoff.min(max_ms)
 }

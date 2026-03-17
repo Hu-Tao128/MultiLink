@@ -26,7 +26,7 @@ NEXT_PHASE = 8 (Router hardening)
    - [x] Step 2: Add ProviderHealthState struct to router.rs
    - [x] Step 3: Add CircuitBreaker config to router.rs
    - [x] Step 4: Implement health monitor background task
-   - [ ] Step 5: Add retry/backoff logic to send methods
+   - [x] Step 5: Add retry/backoff logic to send methods
    - [x] Step 6: Implement provider-specific health checks
 2. Phase 8.5: LAN Agent protocol implementation.
 3. MCP adapter as thin external layer.

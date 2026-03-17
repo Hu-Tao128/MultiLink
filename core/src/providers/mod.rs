@@ -93,7 +93,7 @@ pub enum TokenEvent {
     Completed,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum LLMError {
     #[error("provider not configured")]
     NotConfigured,
