@@ -54,6 +54,10 @@ impl LLMProvider for MockProvider {
     async fn get_model_info(&self, _model: &str) -> Result<ProviderCapabilities, LLMError> {
         Ok(ProviderCapabilities::default_with_context(4096))
     }
+
+    async fn health_check(&self) -> Result<bool, LLMError> {
+        Ok(self.available)
+    }
 }
 
 #[tokio::test]

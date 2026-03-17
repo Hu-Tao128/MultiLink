@@ -42,6 +42,10 @@ impl LLMProvider for FailingPrimaryProvider {
     async fn get_model_info(&self, _model: &str) -> Result<ProviderCapabilities, LLMError> {
         Ok(ProviderCapabilities::default_with_context(4096))
     }
+
+    async fn health_check(&self) -> Result<bool, LLMError> {
+        Ok(true)
+    }
 }
 
 fn dispatcher_with_unreachable_remote() -> ExecutionDispatcher {
