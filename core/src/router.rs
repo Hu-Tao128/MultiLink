@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio::sync::RwLock;
+
 use crate::providers::{
     LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId,
     TokenStream,
@@ -56,8 +58,10 @@ impl Default for CircuitBreakerConfig {
 pub struct ProviderRouter {
     providers: HashMap<ProviderId, Arc<dyn LLMProvider>>,
     order: Vec<ProviderId>,
-    health_states: HashMap<ProviderId, ProviderHealthState>,
+    health_states: Arc<RwLock<HashMap<ProviderId, ProviderHealthState>>>,
     circuit_breaker_config: CircuitBreakerConfig,
+    health_check_interval: Duration,
+    shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl Default for ProviderRouter {
@@ -71,8 +75,10 @@ impl ProviderRouter {
         Self {
             providers: HashMap::new(),
             order: vec![ProviderId::Ollama, ProviderId::Gemini, ProviderId::Codex],
-            health_states: HashMap::new(),
+            health_states: Arc::new(RwLock::new(HashMap::new())),
             circuit_breaker_config: CircuitBreakerConfig::default(),
+            health_check_interval: Duration::from_secs(30),
+            shutdown_tx: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -80,23 +86,38 @@ impl ProviderRouter {
         Self {
             providers: HashMap::new(),
             order: vec![ProviderId::Ollama, ProviderId::Gemini, ProviderId::Codex],
-            health_states: HashMap::new(),
+            health_states: Arc::new(RwLock::new(HashMap::new())),
             circuit_breaker_config: config,
+            health_check_interval: Duration::from_secs(30),
+            shutdown_tx: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub fn with_health_check_interval(mut self, interval: Duration) -> Self {
+        self.health_check_interval = interval;
+        self
     }
 
     pub fn register(&mut self, provider: Arc<dyn LLMProvider>) {
         let id = provider.id();
         self.providers.insert(id, provider);
-        self.health_states.entry(id).or_default();
     }
 
-    pub fn health_state(&self, provider_id: ProviderId) -> Option<&ProviderHealthState> {
-        self.health_states.get(&provider_id)
+    pub async fn init_health_states(&self) {
+        let mut states = self.health_states.write().await;
+        for id in &self.order {
+            states.entry(*id).or_default();
+        }
     }
 
-    pub fn record_success(&mut self, provider_id: ProviderId) {
-        if let Some(state) = self.health_states.get_mut(&provider_id) {
+    pub async fn health_state(&self, provider_id: ProviderId) -> Option<ProviderHealthState> {
+        let states = self.health_states.read().await;
+        states.get(&provider_id).cloned()
+    }
+
+    pub async fn record_success(&self, provider_id: ProviderId) {
+        let mut states = self.health_states.write().await;
+        if let Some(state) = states.get_mut(&provider_id) {
             state.failure_count = 0;
             state.consecutive_successes += 1;
             state.cooldown_until = None;
@@ -104,8 +125,9 @@ impl ProviderRouter {
         }
     }
 
-    pub fn record_failure(&mut self, provider_id: ProviderId) {
-        if let Some(state) = self.health_states.get_mut(&provider_id) {
+    pub async fn record_failure(&self, provider_id: ProviderId) {
+        let mut states = self.health_states.write().await;
+        if let Some(state) = states.get_mut(&provider_id) {
             state.failure_count += 1;
             state.last_failure_time = Some(Instant::now());
             state.consecutive_successes = 0;
@@ -117,19 +139,79 @@ impl ProviderRouter {
         }
     }
 
-    pub fn check_circuit_breaker(&self, provider_id: ProviderId) -> bool {
-        if let Some(state) = self.health_states.get(&provider_id) {
+    pub async fn check_circuit_breaker(&self, provider_id: ProviderId) -> bool {
+        let states = self.health_states.read().await;
+        if let Some(state) = states.get(&provider_id) {
             if !state.is_healthy {
                 if let Some(cooldown_end) = state.cooldown_until {
                     if Instant::now() >= cooldown_end {
                         return true;
-                        // Would transition to half-open state here
                     }
                 }
                 return false;
             }
         }
         true
+    }
+
+    pub async fn start_health_monitor(&self) {
+        let providers = self.providers.clone();
+        let health_states = self.health_states.clone();
+        let interval = self.health_check_interval;
+        let config = self.circuit_breaker_config.clone();
+        let shutdown_tx = self.shutdown_tx.clone();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *shutdown_tx.write().await = Some(tx);
+
+        tokio::spawn(async move {
+            let mut rx = rx;
+            let mut interval_timer = tokio::time::interval(interval);
+            
+            loop {
+                tokio::select! {
+                    _ = &mut rx => {
+                        break;
+                    }
+                    _ = interval_timer.tick() => {
+                        for (provider_id, provider) in &providers {
+                            let is_healthy = match provider.health_check().await {
+                                Ok(healthy) => healthy,
+                                Err(_) => false,
+                            };
+                            
+                            let mut states = health_states.write().await;
+                            if let Some(state) = states.get_mut(provider_id) {
+                                if is_healthy {
+                                    state.consecutive_successes += 1;
+                                    if state.consecutive_successes >= config.success_threshold {
+                                        state.is_healthy = true;
+                                        state.failure_count = 0;
+                                        state.cooldown_until = None;
+                                    }
+                                } else {
+                                    state.failure_count += 1;
+                                    state.last_failure_time = Some(Instant::now());
+                                    state.consecutive_successes = 0;
+                                    
+                                    if state.failure_count >= config.failure_threshold {
+                                        state.is_healthy = false;
+                                        state.cooldown_until = Some(Instant::now() + config.recovery_timeout);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    pub async fn stop_health_monitor(&self) {
+        let mut tx = self.shutdown_tx.write().await;
+        if let Some(sender) = tx.take() {
+            let _ = sender.send(());
+        }
     }
 
     pub fn available(&self) -> Vec<ProviderId> {

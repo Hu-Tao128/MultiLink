@@ -25,7 +25,7 @@ NEXT_PHASE = 8 (Router hardening)
    - [x] Step 1: Add health_check() to LLMProvider trait
    - [x] Step 2: Add ProviderHealthState struct to router.rs
    - [x] Step 3: Add CircuitBreaker config to router.rs
-   - [ ] Step 4: Implement health monitor background task
+   - [x] Step 4: Implement health monitor background task
    - [ ] Step 5: Add retry/backoff logic to send methods
    - [x] Step 6: Implement provider-specific health checks
 2. Phase 8.5: LAN Agent protocol implementation.
