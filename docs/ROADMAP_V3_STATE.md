@@ -2,8 +2,8 @@
 
 Last updated: 2026-03-07
 
-CURRENT_PHASE = 7 (Network security enforcement)
-NEXT_PHASE = 8 (Router hardening)
+CURRENT_PHASE = 8.5 (LAN Agent + MCP adapter)
+NEXT_PHASE = 9 (Orchestrator + Skills)
 
 ## Status Summary
 
@@ -14,22 +14,21 @@ NEXT_PHASE = 8 (Router hardening)
 - Phase 5 Hardware-aware caps: complete.
 - Phase 6 Context Engine v2: complete (integrated with evidence enforcement).
 - Phase 7 Network security enforcement: partial (config available, enforcement depends on Phase 8.5).
-- Phase 8 Multi-server router hardening: partial.
-- Phase 8.5 LAN Agent + MCP adapter: not started.
+- Phase 8 Multi-server router hardening: complete (health monitor, circuit breaker, backoff).
+- Phase 8.5 LAN Agent + MCP adapter: in progress.
 - Phase 9 Orchestrator + Skills: not started.
 - Phase 10 Benchmark/release gate: not started.
 
 ## Immediate Focus
 
-1. Complete remaining Phase 8 items (health monitor, circuit breaker, backoff).
-   - [x] Step 1: Add health_check() to LLMProvider trait
-   - [x] Step 2: Add ProviderHealthState struct to router.rs
-   - [x] Step 3: Add CircuitBreaker config to router.rs
-   - [x] Step 4: Implement health monitor background task
-   - [x] Step 5: Add retry/backoff logic to send methods
-   - [x] Step 6: Implement provider-specific health checks
-2. Phase 8.5: LAN Agent protocol implementation.
-3. MCP adapter as thin external layer.
+1. Phase 8.5: LAN Agent + MCP adapter implementation.
+   - [x] Step 1: LAN Agent protocol structure (MessagePack envelope/payload)
+   - [x] Step 2: MCP adapter basic tool conversion
+   - [x] Step 3: Implement LAN Agent TCP server for MessagePack streaming
+   - [ ] Step 4: Implement MCP adapter response handling
+   - [ ] Step 5: Integrate LAN Agent with ChatRuntime
+2. Phase 9: Orchestrator + Skills
+3. Phase 10: Benchmark/release gate
 
 ## Recovery Plan (Pre-test execution)
 

@@ -34,7 +34,8 @@ pub use intent_budget::{
     budget_for_intent, detect_query_intent, task_weight_for_prompt, IntentBudget, QueryIntent,
 };
 pub use lan_agent::{
-    decode_messagepack, encode_messagepack, shared_secret_matches, LanEnvelope, LanPayload,
+    decode_messagepack, encode_messagepack, shared_secret_matches, LanAgentServer, LanEnvelope,
+    LanPayload,
 };
 pub use mcp_adapter::{McpToolCall, ThinMcpAdapter};
 pub use model_manager::{ModelInfo, ModelManager, ModelStatus, ProviderType};
