@@ -6,6 +6,7 @@ pub mod hybrid_retrieval;
 pub mod index;
 pub mod lexical_search;
 pub mod parser;
+pub mod project_context;
 pub mod retrieval;
 pub mod tokenizer;
 

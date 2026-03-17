@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
 use crate::context_engine::chunker::{semantic_chunks, SemanticChunk, SourceFile};
+use crate::context_engine::parser::chunk_extractor::{extract_semantic_chunks, CodeChunk};
 
 #[derive(Debug, Clone)]
 pub struct IndexedProject {
@@ -316,11 +317,43 @@ fn build_incremental_chunks(
         if let Some(chunks) = reused {
             out.extend(chunks);
         } else {
-            out.extend(semantic_chunks(std::slice::from_ref(file), 32));
+            out.extend(extract_chunks_from_file(file));
         }
     }
 
     out
+}
+
+fn extract_chunks_from_file(file: &SourceFile) -> Vec<SemanticChunk> {
+    let code_chunks = extract_semantic_chunks(&file.content, &file.path);
+
+    if code_chunks.is_empty() {
+        return semantic_chunks(std::slice::from_ref(file), 32);
+    }
+
+    code_chunks
+        .into_iter()
+        .map(convert_code_chunk_to_semantic)
+        .collect()
+}
+
+fn convert_code_chunk_to_semantic(chunk: CodeChunk) -> SemanticChunk {
+    let mut hasher = DefaultHasher::new();
+    chunk.file.hash(&mut hasher);
+    chunk.start_line.hash(&mut hasher);
+    if let Some(ref sym) = chunk.symbol {
+        sym.hash(&mut hasher);
+    }
+    chunk.text.hash(&mut hasher);
+
+    SemanticChunk {
+        file: chunk.file,
+        language: chunk.language.to_string(),
+        start_line: chunk.start_line,
+        symbol: chunk.symbol.unwrap_or_else(|| "unnamed".to_string()),
+        content: chunk.text,
+        chunk_hash: format!("{:016x}", hasher.finish()),
+    }
 }
 
 fn build_file_states(files: &[SourceFile], chunks: &[SemanticChunk]) -> Vec<PersistedFileState> {
@@ -509,5 +542,61 @@ mod tests {
         let second = debug_disk_scan_count();
         assert!(first >= 1);
         assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn benchmark_indexing_100_chunks() {
+        use std::time::Instant;
+
+        let mut files_content = String::new();
+        for i in 0..100 {
+            files_content.push_str(&format!(
+                "File: module_{}.rs\n```rust\npub fn function_{}() -> i32 {{\n    let x = {};\n    x + 1\n}}\n\n```\n",
+                i, i, i
+            ));
+        }
+
+        let raw = format!("Project root: /tmp/test\n\nFiles:\n\n{}", files_content);
+
+        let start = Instant::now();
+        let result = load_or_build(&raw).await;
+        let duration = start.elapsed();
+
+        assert!(result.is_some(), "Index should be built");
+        let chunks = result.unwrap().chunks;
+        assert!(!chunks.is_empty(), "Should have extracted chunks");
+
+        println!("Indexed 100 files in {}ms", duration.as_millis());
+        assert!(
+            duration.as_millis() < 500,
+            "Indexing should complete in < 500ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn benchmark_indexing_1000_chunks() {
+        use std::time::Instant;
+
+        let mut files_content = String::new();
+        for i in 0..1000 {
+            files_content.push_str(&format!(
+                "File: file_{}.rs\n```rust\nfn func_{}() {{\n    let val = {};\n}}\n```\n",
+                i, i, i
+            ));
+        }
+
+        let raw = format!("Project root: /tmp/test\n\nFiles:\n\n{}", files_content);
+
+        let start = Instant::now();
+        let result = load_or_build(&raw).await;
+        let duration = start.elapsed();
+
+        assert!(result.is_some(), "Index should be built");
+
+        println!("Indexed 1000 files in {}ms", duration.as_millis());
+        assert!(
+            duration.as_millis() < 3000,
+            "Indexing 1k files should complete in < 3s"
+        );
     }
 }

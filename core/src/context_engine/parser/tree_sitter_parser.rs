@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::OnceLock;
 use tree_sitter::{Language, Parser, Tree};
 
@@ -31,6 +32,18 @@ impl SourceLanguage {
             return Self::from_extension(ext);
         }
         Self::Unknown
+    }
+}
+
+impl fmt::Display for SourceLanguage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rust => write!(f, "rust"),
+            Self::Python => write!(f, "python"),
+            Self::JavaScript => write!(f, "javascript"),
+            Self::TypeScript => write!(f, "typescript"),
+            Self::Unknown => write!(f, "text"),
+        }
     }
 }
 

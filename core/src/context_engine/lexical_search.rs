@@ -168,4 +168,62 @@ mod tests {
         let tokens = Tokenizer::tokenize("my_function_name");
         assert!(tokens.contains(&"function".to_string()));
     }
+
+    #[test]
+    fn benchmark_lexical_search_1000_chunks() {
+        use std::time::Instant;
+
+        let mut index = LexicalIndex::new();
+
+        for i in 0..1000 {
+            let content = format!(
+                "pub fn function_{}() -> i32 {{\n    let x = {};\n    x + 1\n}}\n",
+                i, i
+            );
+            index.add_document(format!("doc_{}", i), content);
+        }
+
+        let query = "function 500";
+        let start = Instant::now();
+        let results = index.search(query, 10);
+        let duration = start.elapsed();
+
+        assert!(!results.is_empty(), "Should find results");
+        println!(
+            "Lexical search 1000 docs: {}ms, found {} results",
+            duration.as_millis(),
+            results.len()
+        );
+        assert!(
+            duration.as_millis() < 50,
+            "Lexical search should be < 50ms for 1k docs"
+        );
+    }
+
+    #[test]
+    fn benchmark_lexical_search_10000_chunks() {
+        use std::time::Instant;
+
+        let mut index = LexicalIndex::new();
+
+        for i in 0..10000 {
+            let content = format!("struct Data_{} {{\n    field_{}: i32,\n}}\n", i, i % 100);
+            index.add_document(format!("doc_{}", i), content);
+        }
+
+        let query = "field_50";
+        let start = Instant::now();
+        let results = index.search(query, 10);
+        let duration = start.elapsed();
+
+        println!(
+            "Lexical search 10k docs: {}ms, found {} results",
+            duration.as_millis(),
+            results.len()
+        );
+        assert!(
+            duration.as_millis() < 200,
+            "Lexical search should be < 200ms for 10k docs"
+        );
+    }
 }
