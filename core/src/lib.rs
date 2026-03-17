@@ -14,6 +14,7 @@ pub mod observability;
 pub mod providers;
 pub mod router;
 pub mod session;
+pub mod skills;
 pub mod system;
 
 pub use context_engine::{
@@ -47,4 +48,5 @@ pub use providers::{
 };
 pub use router::{ProviderAvailability, ProviderRouter};
 pub use session::{ChatMessage, ChatSession, SessionState};
+pub use skills::{Skill, SkillLoader, SkillManifest, SkillOrchestrator, SkillParameter};
 pub use system::{OllamaInstallPlan, SystemService};

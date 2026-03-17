@@ -2,8 +2,8 @@
 
 Last updated: 2026-03-07
 
-CURRENT_PHASE = 8.5 (LAN Agent + MCP adapter)
-NEXT_PHASE = 9 (Orchestrator + Skills)
+CURRENT_PHASE = 9 (Orchestrator + Skills)
+NEXT_PHASE = 10 (Benchmark/release gate)
 
 ## Status Summary
 
@@ -15,8 +15,8 @@ NEXT_PHASE = 9 (Orchestrator + Skills)
 - Phase 6 Context Engine v2: complete (integrated with evidence enforcement).
 - Phase 7 Network security enforcement: partial (config available, enforcement depends on Phase 8.5).
 - Phase 8 Multi-server router hardening: complete (health monitor, circuit breaker, backoff).
-- Phase 8.5 LAN Agent + MCP adapter: in progress.
-- Phase 9 Orchestrator + Skills: not started.
+- Phase 8.5 LAN Agent + MCP adapter: complete.
+- Phase 9 Orchestrator + Skills: in progress.
 - Phase 10 Benchmark/release gate: not started.
 
 ## Immediate Focus
@@ -28,6 +28,11 @@ NEXT_PHASE = 9 (Orchestrator + Skills)
    - [x] Step 4: Implement MCP adapter response handling
    - [x] Step 5: Integrate LAN Agent with ChatRuntime
 2. Phase 9: Orchestrator + Skills
+   - [x] Step 1: Create Skill struct and SkillManifest in TOML format
+   - [x] Step 2: Implement skill loader (global + project paths)
+   - [x] Step 3: Create SkillOrchestrator for skill selection/execution
+   - [x] Step 4: Integrate with ChatRuntime for skill-based prompts
+   - [ ] Step 5: Add skill sharing mechanism (opt-in)
 3. Phase 10: Benchmark/release gate
 
 ## Recovery Plan (Pre-test execution)
