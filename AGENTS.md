@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> **IMPORTANT**: Read `./MULTILINK.md` first for project context and agent behavior guidelines.
+
 This file provides guidance for coding agents working in this repository.
 
 ## Scope and Priority
