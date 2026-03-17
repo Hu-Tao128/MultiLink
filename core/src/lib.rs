@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod benchmark;
 pub mod chat_runtime;
 pub mod config;
 pub mod context_engine;
@@ -23,6 +24,7 @@ pub use context_engine::{
 };
 
 pub use auth::{AuthProvider, AuthService, OAuthConfig, OAuthFlow, StoredToken, TokenStore};
+pub use benchmark::{BenchmarkResult, BenchmarkRunner, ReleaseChecklist, ReleaseCriteria};
 pub use chat_runtime::{
     ChatResponse, ChatRuntime, ChatRuntimeError, HandleUserMessageRequest, StreamEvent,
 };

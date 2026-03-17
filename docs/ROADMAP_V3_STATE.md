@@ -2,8 +2,8 @@
 
 Last updated: 2026-03-07
 
-CURRENT_PHASE = 9 (Orchestrator + Skills)
-NEXT_PHASE = 10 (Benchmark/release gate)
+CURRENT_PHASE = 10 (Benchmark/release gate)
+NEXT_PHASE = release
 
 ## Status Summary
 
@@ -34,20 +34,25 @@ NEXT_PHASE = 10 (Benchmark/release gate)
    - [x] Step 4: Integrate with ChatRuntime for skill-based prompts
    - [x] Step 5: Add skill sharing mechanism (opt-in)
 3. Phase 10: Benchmark/release gate
+   - [x] Step 1: Create benchmark suite for latency/throughput
+   - [x] Step 2: Add release criteria thresholds
+   - [x] Step 3: Create release checklist
+   - [ ] Step 4: Add CI smoke tests
 
 ## Recovery Plan (Pre-test execution)
 
 - [ ] CI stabilization for GUI build matrix (Linux/macOS/Windows) with smoke-run fallback when CTest suites are not present.
-- [ ] Phase 8 hardening closure: health monitor, circuit breaker, backoff/retry policy.
-- [ ] Phase 8.5 bootstrap: LAN Agent protocol (MessagePack streaming) + MCP thin adapter (no core logic move).
-- [ ] Exit criteria definition before Phase 9 start: runtime fallback validated, network security hooks connected, adapter E2E request/response path verified.
+- [x] Phase 8 hardening closure: health monitor, circuit breaker, backoff/retry policy.
+- [x] Phase 8.5 bootstrap: LAN Agent protocol (MessagePack streaming) + MCP thin adapter (no core logic move).
+- [x] Exit criteria definition before Phase 9 start: runtime fallback validated, network security hooks connected, adapter E2E request/response path verified.
 
 ## What is behind
 
 - Phase 7 is still partial because enforcement completion depends on 8.5 integration.
-- Phase 8 is partial and blocks the guardrail to start Phase 9.
-- Phase 8.5 is not started and is currently the main critical path item.
-- Phase 9 and 10 are blocked by design (not sequencing errors, but dependency debt).
+- Phase 8: complete.
+- Phase 8.5: complete.
+- Phase 9: complete.
+- Phase 10: in progress.
 
 ## MCP Strategy
 
