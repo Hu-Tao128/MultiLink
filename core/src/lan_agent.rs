@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -49,23 +50,46 @@ pub fn shared_secret_matches(expected: &str, provided: &str) -> bool {
     if expected.is_empty() || provided.is_empty() {
         return false;
     }
-    expected == provided
+    constant_time_compare(expected, provided)
+}
+
+fn constant_time_compare(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.as_bytes().iter().zip(b.as_bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 pub struct LanAgentServer {
     listener: TcpListener,
     runtime: Arc<ChatRuntime>,
     shared_secret: String,
+    allowed_ips: Vec<IpAddr>,
+    allow_remote: bool,
     shutdown: Arc<RwLock<bool>>,
 }
 
 impl LanAgentServer {
-    pub async fn bind(addr: &str, runtime: Arc<ChatRuntime>, shared_secret: String) -> Result<Self, std::io::Error> {
+    pub async fn bind(
+        addr: &str, 
+        runtime: Arc<ChatRuntime>, 
+        shared_secret: String,
+        allowed_ips: Vec<String>,
+        allow_remote: bool,
+    ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(addr).await?;
+        
+        let parsed_ips: Vec<IpAddr> = allowed_ips
+            .iter()
+            .filter_map(|ip| ip.parse().ok())
+            .collect();
+        
         Ok(Self {
             listener,
             runtime,
             shared_secret,
+            allowed_ips: parsed_ips,
+            allow_remote,
             shutdown: Arc::new(RwLock::new(false)),
         })
     }
@@ -82,11 +106,17 @@ impl LanAgentServer {
             tokio::select! {
                 result = self.listener.accept() => {
                     match result {
-                        Ok((stream, _addr)) => {
+                        Ok((stream, client_addr)) => {
+                            if !self.is_ip_allowed(&client_addr.ip()) {
+                                eprintln!("LAN Agent: connection rejected from {}", client_addr.ip());
+                                continue;
+                            }
+                            
                             let runtime = self.runtime.clone();
                             let secret = self.shared_secret.clone();
+                            let allow_remote = self.allow_remote;
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, runtime, secret).await {
+                                if let Err(e) = Self::handle_connection(stream, runtime, secret, allow_remote).await {
                                     eprintln!("LAN Agent connection error: {}", e);
                                 }
                             });
@@ -101,10 +131,25 @@ impl LanAgentServer {
         Ok(())
     }
 
+    fn is_ip_allowed(&self, client_ip: &IpAddr) -> bool {
+        if self.allowed_ips.is_empty() {
+            return true;
+        }
+        
+        let is_local = client_ip.is_loopback();
+        
+        if self.allow_remote {
+            true
+        } else {
+            is_local || self.allowed_ips.contains(client_ip)
+        }
+    }
+
     async fn handle_connection(
         mut stream: TcpStream,
         runtime: Arc<ChatRuntime>,
         shared_secret: String,
+        _allow_remote: bool,
     ) -> Result<(), std::io::Error> {
         let mut buffer = vec![0u8; 65536];
         

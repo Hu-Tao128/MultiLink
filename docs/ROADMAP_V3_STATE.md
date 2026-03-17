@@ -13,7 +13,7 @@ NEXT_PHASE = maintenance
 - Phase 4 Intent-aware budgeting: complete.
 - Phase 5 Hardware-aware caps: complete.
 - Phase 6 Context Engine v2: complete (integrated with evidence enforcement).
-- Phase 7 Network security enforcement: partial (config available, enforcement depends on Phase 8.5).
+- Phase 7 Network security enforcement: complete (IP filtering, shared secret, remote access control).
 - Phase 8 Multi-server router hardening: complete (health monitor, circuit breaker, backoff).
 - Phase 8.5 LAN Agent + MCP adapter: complete.
 - Phase 9 Orchestrator + Skills: complete.
