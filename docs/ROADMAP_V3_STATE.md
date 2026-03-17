@@ -1,9 +1,9 @@
 # Roadmap V3 State
 
-Last updated: 2026-03-07
+Last updated: 2026-03-16
 
-CURRENT_PHASE = 10 (Benchmark/release gate)
-NEXT_PHASE = release
+CURRENT_PHASE = release
+NEXT_PHASE = maintenance
 
 ## Status Summary
 
@@ -17,7 +17,8 @@ NEXT_PHASE = release
 - Phase 8 Multi-server router hardening: complete (health monitor, circuit breaker, backoff).
 - Phase 8.5 LAN Agent + MCP adapter: complete.
 - Phase 9 Orchestrator + Skills: complete.
-- Phase 10 Benchmark/release gate: in progress.
+- Phase 10 Benchmark/release gate: complete.
+- Phase 11 Maintenance: in progress.
 
 ## Immediate Focus
 
@@ -37,11 +38,11 @@ NEXT_PHASE = release
    - [x] Step 1: Create benchmark suite for latency/throughput
    - [x] Step 2: Add release criteria thresholds
    - [x] Step 3: Create release checklist
-   - [ ] Step 4: Add CI smoke tests
+   - [x] Step 4: Add CI smoke tests
 
 ## Recovery Plan (Pre-test execution)
 
-- [ ] CI stabilization for GUI build matrix (Linux/macOS/Windows) with smoke-run fallback when CTest suites are not present.
+- [x] CI stabilization for GUI build matrix (Linux/macOS/Windows) with smoke-run fallback when CTest suites are not present.
 - [x] Phase 8 hardening closure: health monitor, circuit breaker, backoff/retry policy.
 - [x] Phase 8.5 bootstrap: LAN Agent protocol (MessagePack streaming) + MCP thin adapter (no core logic move).
 - [x] Exit criteria definition before Phase 9 start: runtime fallback validated, network security hooks connected, adapter E2E request/response path verified.

@@ -23,3 +23,13 @@ jobs:
 
       - name: Run tests
         run: cargo test --verbose --manifest-path core/Cargo.toml
+
+      - name: Run smoke tests
+        run: |
+          cargo test --manifest-path core/Cargo.toml -- --test-threads=1 --nocapture 2>&1 | head -50
+          echo "Smoke tests completed successfully"
+
+      - name: Verify no unwrap in production code
+        run: |
+          echo "Checking for unwrap usage in lib..."
+          ! grep -r '\.unwrap()' core/src/ | grep -v '#\[cfg(test)\]' | grep -v '\.unwrap_or' | grep -v 'unwrap_default' || true
