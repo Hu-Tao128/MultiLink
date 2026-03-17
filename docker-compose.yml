@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  multilink:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: multilink-core:latest
+    container_name: multilink
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/app/config:ro
+      - ollama-cache:/root/.ollama
+    environment:
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - MULTILINK_DEBUG_CONTEXT=0
+    restart: unless-stopped
+    networks:
+      - multilink-net
+
+  # Optional: Ollama service (uncomment if you want Ollama in the same stack)
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: ollama
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama-data:/root/.ollama
+  #   environment:
+  #     - OLLAMA_HOST=0.0.0.0:11434
+  #   restart: unless-stopped
+  #   networks:
+  #     - multilink-net
+
+volumes:
+  ollama-cache:
+    driver: local
+
+networks:
+  multilink-net:
+    driver: bridge

@@ -21,6 +21,25 @@ impl OllamaModelManager {
         if let Ok(custom) = std::env::var("OLLAMA_MODELS") {
             return PathBuf::from(custom);
         }
+
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            if let Some(home) = dirs::home_dir() {
+                let home_models = home.join(".ollama/models");
+                if home_models.exists() || home.join(".ollama").exists() {
+                    return home_models;
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let system_path = PathBuf::from("/var/lib/ollama/models");
+            if system_path.exists() {
+                return system_path;
+            }
+        }
+
         PathBuf::from("/var/lib/ollama/models")
     }
 

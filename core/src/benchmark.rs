@@ -111,8 +111,7 @@ impl Default for ReleaseCriteria {
 
 impl ReleaseCriteria {
     pub fn check(&self, result: &BenchmarkResult) -> bool {
-        result.avg_latency_ms <= self.max_avg_latency_ms
-            && result.throughput >= self.min_throughput
+        result.avg_latency_ms <= self.max_avg_latency_ms && result.throughput >= self.min_throughput
     }
 
     pub fn report(&self, result: &BenchmarkResult) -> Vec<String> {
@@ -168,7 +167,11 @@ impl ReleaseChecklist {
             if self.core_tests_pass { "PASS" } else { "FAIL" },
             self.gui_builds.len(),
             if self.benchmarks_pass { "PASS" } else { "FAIL" },
-            if self.documentation_updated { "PASS" } else { "FAIL" }
+            if self.documentation_updated {
+                "PASS"
+            } else {
+                "FAIL"
+            }
         )
     }
 }

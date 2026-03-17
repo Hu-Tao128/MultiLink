@@ -40,7 +40,9 @@ pub use lan_agent::{
     decode_messagepack, encode_messagepack, shared_secret_matches, LanAgentServer, LanEnvelope,
     LanPayload,
 };
-pub use mcp_adapter::{McpContent, McpError, McpResult, McpToolCall, McpToolResponse, ThinMcpAdapter};
+pub use mcp_adapter::{
+    McpContent, McpError, McpResult, McpToolCall, McpToolResponse, ThinMcpAdapter,
+};
 pub use model_manager::{ModelInfo, ModelManager, ModelStatus, ProviderType};
 pub use model_profile::{ModelClass, ModelProfile, RetrievalBudget};
 pub use observability::ExecutionMetrics;
@@ -50,5 +52,7 @@ pub use providers::{
 };
 pub use router::{ProviderAvailability, ProviderRouter};
 pub use session::{ChatMessage, ChatSession, SessionState};
-pub use skills::{Skill, SkillLoader, SkillManifest, SkillOrchestrator, SkillParameter, SkillShare, SkillSharer};
+pub use skills::{
+    Skill, SkillLoader, SkillManifest, SkillOrchestrator, SkillParameter, SkillShare, SkillSharer,
+};
 pub use system::{OllamaInstallPlan, SystemService};

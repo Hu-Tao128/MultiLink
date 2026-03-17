@@ -410,8 +410,28 @@ fn extract_directory_hints(prompt: &str) -> Vec<String> {
 
     // Pattern 1: ./src/api/* or src/api/* or core/src/* etc.
     let dir_patterns = [
-        ("src/", vec!["src/api", "src/utils", "src/models", "src/services", "src/handlers", "src/controllers", "src/views", "src/middleware"]),
-        ("core/", vec!["core/src", "core/src/config", "core/src/providers", "core/src/chat"]),
+        (
+            "src/",
+            vec![
+                "src/api",
+                "src/utils",
+                "src/models",
+                "src/services",
+                "src/handlers",
+                "src/controllers",
+                "src/views",
+                "src/middleware",
+            ],
+        ),
+        (
+            "core/",
+            vec![
+                "core/src",
+                "core/src/config",
+                "core/src/providers",
+                "core/src/chat",
+            ],
+        ),
         ("gui/", vec!["gui/src", "gui/rust", "gui/qml"]),
         ("lib/", vec!["lib/", "lib/src"]),
     ];
@@ -453,8 +473,10 @@ fn extract_directory_hints(prompt: &str) -> Vec<String> {
 
     // Pattern 3: Extract directory from file paths mentioned in prompt
     // e.g., "src/api/routes.rs" -> extract "src/api"
-    let words: Vec<&str> = p_lower.split(|c: char| !c.is_alphanumeric() && c != '/' && c != '_' && c != '-').collect();
-    
+    let words: Vec<&str> = p_lower
+        .split(|c: char| !c.is_alphanumeric() && c != '/' && c != '_' && c != '-')
+        .collect();
+
     for word in words {
         if word.contains('/') && word.len() >= 4 {
             // It's a path, extract directory part

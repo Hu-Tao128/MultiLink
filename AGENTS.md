@@ -1,7 +1,6 @@
 # AGENTS.md
 
-This file is guidance for coding agents working in this repository.
-It is focused on practical build/test workflows and code style expectations.
+This file provides guidance for coding agents working in this repository.
 
 ## Scope and Priority
 
@@ -14,24 +13,41 @@ It is focused on practical build/test workflows and code style expectations.
 
 ## Rules Discovery
 
-- Checked for Cursor rules:
-  - `.cursor/rules/` -> not present
-  - `.cursorrules` -> not present
-- Checked for Copilot instructions:
-  - `.github/copilot-instructions.md` -> not present
+- `.cursor/rules/` -> not present
+- `.cursorrules` -> not present  
+- `.github/copilot-instructions.md` -> not present
 
 No additional repo-specific AI rule files are currently enforced.
 
-## Repository Layout (high value paths)
+## Repository Layout
 
-- `core/src/chat_runtime.rs`: central runtime orchestration.
-- `core/src/config.rs`: config schema, migration, validation.
-- `core/src/execution/`: execution dispatcher and fallback routing.
-- `core/src/providers/`: provider integrations (Ollama, Gemini, Codex).
-- `core/src/context_retrieval.rs`: retrieval and project-context assembly.
-- `gui/rust/chat_controller/src/lib.rs`: Rust backend for GUI bridge.
-- `gui/src/chatcontroller.*`: Qt/C++ bridge layer.
-- `gui/qml/`: QML screens (`Main.qml`, `ChatView.qml`, `Settings.qml`).
+```
+MultiLink/
+├── core/                    # Rust core library (multilink-core)
+│   ├── src/
+│   │   ├── chat_runtime.rs  # Central runtime orchestration
+│   │   ├── config.rs        # Config schema, migration, validation
+│   │   ├── execution/       # Execution dispatcher and fallback routing
+│   │   ├── providers/       # Provider integrations (Ollama, Gemini, Codex)
+│   │   ├── context_engine/  # Context retrieval, embeddings, chunking
+│   │   ├── model_manager/   # Model registry and npm integration
+│   │   ├── auth/            # OAuth and token storage
+│   │   ├── session.rs       # Session management
+│   │   ├── router.rs        # Provider routing with health monitor, circuit breaker
+│   │   ├── lan_agent.rs    # LAN Agent TCP server for MessagePack
+│   │   ├── mcp_adapter.rs  # MCP protocol adapter
+│   │   ├── skills.rs        # Skill system for orchestrator
+│   │   └── benchmark.rs     # Benchmark suite and release criteria
+│   └── Cargo.toml
+├── gui/                     # Qt/QML GUI application
+│   ├── qml/                 # QML screens (Main.qml, ChatView.qml, Settings.qml)
+│   ├── src/                 # C++ bridge layer (chatcontroller.*, bridge.rs)
+│   ├── rust/chat_controller/ # Rust backend for GUI bridge
+│   └── CMakeLists.txt
+├── config/                  # Default configuration files
+├── .github/workflows/       # CI/CD pipelines
+└── build/                   # Build output (gitignored)
+```
 
 ## Build Commands
 
@@ -52,13 +68,11 @@ cargo test --manifest-path core/Cargo.toml
 ### Run a single Rust test (core)
 
 By test name substring:
-
 ```bash
 cargo test --manifest-path core/Cargo.toml runtime_limits_parallel_streams
 ```
 
 By test target file + name:
-
 ```bash
 cargo test --manifest-path core/Cargo.toml --test chat_runtime_tests runtime_streams_and_persists_session
 ```
@@ -89,26 +103,25 @@ ctest --test-dir build/gui -C Release
 ```
 
 Debug context behavior:
-
 ```bash
 MULTILINK_DEBUG_CONTEXT=1 ./build/gui/multilink_gui
 ```
 
 ## Lint/Format Commands
 
-Rust formatting:
+### Rust formatting
 
 ```bash
 cargo fmt --all --manifest-path core/Cargo.toml
 ```
 
-Rust linting:
+### Rust linting
 
 ```bash
 cargo clippy --manifest-path core/Cargo.toml -- -D warnings
 ```
 
-GUI Rust linting:
+### GUI Rust linting
 
 ```bash
 cargo clippy --manifest-path gui/rust/chat_controller/Cargo.toml -- -D warnings
@@ -120,78 +133,74 @@ If linting is noisy due to toolchain/platform differences, document it in PR not
 
 ### Rust (core + GUI Rust bridge)
 
-- Use Rust 2021 idioms (no Rust 2024-only syntax).
-- Keep modules focused; avoid giant mixed-responsibility files.
-- Prefer explicit structs/enums over untyped maps for domain data.
-- Keep function signatures stable for runtime contracts once introduced.
-- Use `Result<_, _>` and `thiserror`-based errors for recoverable failures.
-- Never `unwrap()` in production-path logic; use fallbacks or propagate errors.
-- `unwrap_or_default()` is acceptable for non-critical telemetry/UI serialization.
-- Add `#[serde(default)]` for backward-compatible config evolution.
-- Keep imports grouped: std, third-party, crate-local.
-- Prefer `Arc` + async-safe synchronization (`tokio::sync::*`) in runtime paths.
-- Use bounded channels/semaphores for concurrency control.
+- **Edition**: Rust 2021 (no Rust 2024-only syntax)
+- **Modules**: Keep focused; avoid giant mixed-responsibility files
+- **Types**: Prefer explicit structs/enums over untyped maps for domain data
+- **Stability**: Keep function signatures stable for runtime contracts once introduced
+- **Errors**: Use `Result<_, _>` and `thiserror`-based errors for recoverable failures
+- **No unwrap()**: Never `unwrap()` in production-path logic; use fallbacks or propagate errors
+- **unwrap_or_default()**: Acceptable for non-critical telemetry/UI serialization
+- **Serde**: Add `#[serde(default)]` for backward-compatible config evolution
+- **Imports**: Keep grouped: std, third-party, crate-local
+- **Concurrency**: Prefer `Arc` + async-safe synchronization (`tokio::sync::*`)
+- **Channels**: Use bounded channels/semaphores for concurrency control
 
-### Naming
+### Naming Conventions
 
-- Types: `PascalCase` (`ExecutionDispatcher`, `ServerStatus`).
-- Functions/vars: `snake_case`.
-- Constants: `SCREAMING_SNAKE_CASE`.
-- Test names should describe behavior, e.g. `runtime_recovers_partial_wal_on_load`.
+| Element | Convention | Example |
+|---------|------------|---------|
+| Types | PascalCase | `ExecutionDispatcher`, `ServerStatus` |
+| Functions/vars | snake_case | `get_config()`, `model_list` |
+| Constants | SCREAMING_SNAKE_CASE | `MAX_RETRIES`, `DEFAULT_TIMEOUT` |
+| Test names | describe behavior | `runtime_recovers_partial_wal_on_load` |
 
-### Error handling and resilience
+### Error Handling and Resilience
 
-- Distinguish transient network errors from permanent config/logic errors.
-- For provider calls, prefer retry/fallback in dispatcher layer.
-- Include actionable user-facing hints for connectivity issues.
-- Preserve session state consistency on both success and failure paths.
+- Distinguish transient network errors from permanent config/logic errors
+- For provider calls, prefer retry/fallback in dispatcher layer
+- Include actionable user-facing hints for connectivity issues
+- Preserve session state consistency on both success and failure paths
 
-### Config and migration
+### Config and Migration
 
-- Treat config compatibility as a contract.
-- New config fields should be backward compatible.
-- If schema changes, update migration logic and tests together.
-- Keep defaults safe for low-resource hardware.
+- Treat config compatibility as a contract
+- New config fields should be backward compatible
+- If schema changes, update migration logic and tests together
+- Keep defaults safe for low-resource hardware
 
-### QML/C++ bridge
+### QML/C++ Bridge
 
-- QML is declarative UI only; no networking or persistence in QML.
-- Expose minimal, stable Q_INVOKABLE methods from `ChatController`.
-- C++ bridge should convert and relay data/events, not own business decisions.
-- Keep string encoding UTF-8 clean when crossing FFI boundaries.
+- QML is declarative UI only; no networking or persistence in QML
+- Expose minimal, stable Q_INVOKABLE methods from `ChatController`
+- C++ bridge should convert and relay data/events, not own business decisions
+- Keep string encoding UTF-8 clean when crossing FFI boundaries
 
-## Testing Expectations for Changes
+## Testing Expectations
 
 For core behavior changes, run:
-
 1. `cargo test --manifest-path core/Cargo.toml`
 2. `cmake --build build/gui --config Release`
 
 For GUI bridge changes, also smoke-run app:
-
 ```bash
 QT_QPA_PLATFORM=offscreen timeout 8s ./build/gui/multilink_gui
 ```
 
 For config/routing changes, manually verify:
-
-- config load/migration path
-- server test in Settings
-- model list refresh from configured servers
-- at least one prompt round-trip
+- Config load/migration path
+- Server test in Settings
+- Model list refresh from configured servers
+- At least one prompt round-trip
 
 ## Commit Guidance
 
-- Keep commits scoped by concern:
-  - `feat(core): ...`
-  - `fix(gui): ...`
-  - `docs: ...`
-- Do not mix major refactors with unrelated docs churn.
-- Include tests when changing runtime, config, routing, or retrieval behavior.
+- Keep commits scoped by concern: `feat(core): ...`, `fix(gui): ...`, `docs: ...`
+- Do not mix major refractors with unrelated docs churn
+- Include tests when changing runtime, config, routing, or retrieval behavior
 
 ## Agent Working Notes
 
-- Read current diffs before editing; do not revert unrelated user changes.
-- Prefer non-destructive fixes and incremental refactors.
-- If a CI/platform issue appears (Qt version differences), add compatibility fallback.
-- When uncertain, choose the option that preserves runtime correctness first.
+- Read current diffs before editing; do not revert unrelated user changes
+- Prefer non-destructive fixes and incremental refactors
+- If a CI/platform issue appears (Qt version differences), add compatibility fallback
+- When uncertain, choose the option that preserves runtime correctness first

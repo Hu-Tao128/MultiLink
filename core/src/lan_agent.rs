@@ -57,7 +57,11 @@ fn constant_time_compare(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.as_bytes().iter().zip(b.as_bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.as_bytes()
+        .iter()
+        .zip(b.as_bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 pub struct LanAgentServer {
@@ -71,19 +75,19 @@ pub struct LanAgentServer {
 
 impl LanAgentServer {
     pub async fn bind(
-        addr: &str, 
-        runtime: Arc<ChatRuntime>, 
+        addr: &str,
+        runtime: Arc<ChatRuntime>,
         shared_secret: String,
         allowed_ips: Vec<String>,
         allow_remote: bool,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(addr).await?;
-        
+
         let parsed_ips: Vec<IpAddr> = allowed_ips
             .iter()
             .filter_map(|ip| ip.parse().ok())
             .collect();
-        
+
         Ok(Self {
             listener,
             runtime,
@@ -111,7 +115,7 @@ impl LanAgentServer {
                                 eprintln!("LAN Agent: connection rejected from {}", client_addr.ip());
                                 continue;
                             }
-                            
+
                             let runtime = self.runtime.clone();
                             let secret = self.shared_secret.clone();
                             let allow_remote = self.allow_remote;
@@ -135,9 +139,9 @@ impl LanAgentServer {
         if self.allowed_ips.is_empty() {
             return true;
         }
-        
+
         let is_local = client_ip.is_loopback();
-        
+
         if self.allow_remote {
             true
         } else {
@@ -152,7 +156,7 @@ impl LanAgentServer {
         _allow_remote: bool,
     ) -> Result<(), std::io::Error> {
         let mut buffer = vec![0u8; 65536];
-        
+
         let n = stream.read(&mut buffer).await?;
         if n == 0 {
             return Ok(());
@@ -202,20 +206,22 @@ impl LanAgentServer {
                 text: Some("pong".to_string()),
                 error: None,
             },
-            LanPayload::Dispatch { session_id, prompt, provider: _ } => {
-                match runtime.send_message(&session_id, prompt).await {
-                    Ok(_response) => LanPayload::DispatchResponse {
-                        ok: true,
-                        text: Some("message queued".to_string()),
-                        error: None,
-                    },
-                    Err(e) => LanPayload::DispatchResponse {
-                        ok: false,
-                        text: None,
-                        error: Some(e.to_string()),
-                    },
-                }
-            }
+            LanPayload::Dispatch {
+                session_id,
+                prompt,
+                provider: _,
+            } => match runtime.send_message(&session_id, prompt).await {
+                Ok(_response) => LanPayload::DispatchResponse {
+                    ok: true,
+                    text: Some("message queued".to_string()),
+                    error: None,
+                },
+                Err(e) => LanPayload::DispatchResponse {
+                    ok: false,
+                    text: None,
+                    error: Some(e.to_string()),
+                },
+            },
             LanPayload::Error { message } => LanPayload::Error { message },
             LanPayload::DispatchResponse { .. } => LanPayload::Error {
                 message: "unexpected response payload in request".to_string(),
@@ -230,10 +236,12 @@ impl LanAgentServer {
         }
     }
 
-    async fn write_response(stream: &mut TcpStream, response: &LanEnvelope) -> Result<(), std::io::Error> {
-        let encoded = encode_messagepack(response).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+    async fn write_response(
+        stream: &mut TcpStream,
+        response: &LanEnvelope,
+    ) -> Result<(), std::io::Error> {
+        let encoded = encode_messagepack(response)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         stream.write_all(&encoded).await?;
         stream.flush().await?;
         Ok(())

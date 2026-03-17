@@ -132,7 +132,8 @@ impl ChatRuntime {
         allow_remote: bool,
     ) -> Result<LanAgentServer, std::io::Error> {
         let runtime = Arc::new(self.clone());
-        let server = LanAgentServer::bind(addr, runtime, shared_secret, allowed_ips, allow_remote).await?;
+        let server =
+            LanAgentServer::bind(addr, runtime, shared_secret, allowed_ips, allow_remote).await?;
         Ok(server)
     }
 

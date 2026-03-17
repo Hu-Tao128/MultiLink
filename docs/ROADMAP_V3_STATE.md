@@ -5,55 +5,33 @@ Last updated: 2026-03-16
 CURRENT_PHASE = release
 NEXT_PHASE = maintenance
 
-## Status Summary
+## All Phases Complete
 
-- Phase 1 Observability: complete.
-- Phase 2 Config V2 + migration: complete.
-- Phase 3 Model-aware budgeting: complete.
-- Phase 4 Intent-aware budgeting: complete.
-- Phase 5 Hardware-aware caps: complete.
-- Phase 6 Context Engine v2: complete (integrated with evidence enforcement).
-- Phase 7 Network security enforcement: complete (IP filtering, shared secret, remote access control).
-- Phase 8 Multi-server router hardening: complete (health monitor, circuit breaker, backoff).
-- Phase 8.5 LAN Agent + MCP adapter: complete.
-- Phase 9 Orchestrator + Skills: complete.
-- Phase 10 Benchmark/release gate: complete.
-- Phase 11 Maintenance: in progress.
+| Phase | Status |
+|-------|--------|
+| Phase 1 Observability | complete |
+| Phase 2 Config V2 + migration | complete |
+| Phase 3 Model-aware budgeting | complete |
+| Phase 4 Intent-aware budgeting | complete |
+| Phase 5 Hardware-aware caps | complete |
+| Phase 6 Context Engine v2 | complete |
+| Phase 7 Network security enforcement | complete |
+| Phase 8 Multi-server router hardening | complete |
+| Phase 8.5 LAN Agent + MCP adapter | complete |
+| Phase 9 Orchestrator + Skills | complete |
+| Phase 10 Benchmark/release gate | complete |
 
 ## Immediate Focus
 
-1. Phase 8.5: LAN Agent + MCP adapter implementation.
-   - [x] Step 1: LAN Agent protocol structure (MessagePack envelope/payload)
-   - [x] Step 2: MCP adapter basic tool conversion
-   - [x] Step 3: Implement LAN Agent TCP server for MessagePack streaming
-   - [x] Step 4: Implement MCP adapter response handling
-   - [x] Step 5: Integrate LAN Agent with ChatRuntime
-2. Phase 9: Orchestrator + Skills
-   - [x] Step 1: Create Skill struct and SkillManifest in TOML format
-   - [x] Step 2: Implement skill loader (global + project paths)
-   - [x] Step 3: Create SkillOrchestrator for skill selection/execution
-   - [x] Step 4: Integrate with ChatRuntime for skill-based prompts
-   - [x] Step 5: Add skill sharing mechanism (opt-in)
-3. Phase 10: Benchmark/release gate
-   - [x] Step 1: Create benchmark suite for latency/throughput
-   - [x] Step 2: Add release criteria thresholds
-   - [x] Step 3: Create release checklist
-   - [x] Step 4: Add CI smoke tests
-
-## Recovery Plan (Pre-test execution)
-
-- [x] CI stabilization for GUI build matrix (Linux/macOS/Windows) with smoke-run fallback when CTest suites are not present.
-- [x] Phase 8 hardening closure: health monitor, circuit breaker, backoff/retry policy.
-- [x] Phase 8.5 bootstrap: LAN Agent protocol (MessagePack streaming) + MCP thin adapter (no core logic move).
-- [x] Exit criteria definition before Phase 9 start: runtime fallback validated, network security hooks connected, adapter E2E request/response path verified.
+1. Maintenance mode: ongoing improvements and bug fixes.
 
 ## What is behind
 
-- Phase 7 is still partial because enforcement completion depends on 8.5 integration.
+- Phase 7: complete.
 - Phase 8: complete.
 - Phase 8.5: complete.
 - Phase 9: complete.
-- Phase 10: in progress.
+- Phase 10: complete.
 
 ## MCP Strategy
 

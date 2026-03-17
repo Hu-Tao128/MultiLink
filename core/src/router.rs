@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::time::sleep;
 use tokio::sync::RwLock;
+use tokio::time::sleep;
 
 use crate::providers::{
     LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId,
@@ -136,10 +136,11 @@ impl ProviderRouter {
             state.failure_count += 1;
             state.last_failure_time = Some(Instant::now());
             state.consecutive_successes = 0;
-            
+
             if state.failure_count >= self.circuit_breaker_config.failure_threshold {
                 state.is_healthy = false;
-                state.cooldown_until = Some(Instant::now() + self.circuit_breaker_config.recovery_timeout);
+                state.cooldown_until =
+                    Some(Instant::now() + self.circuit_breaker_config.recovery_timeout);
             }
         }
     }
@@ -172,7 +173,7 @@ impl ProviderRouter {
         tokio::spawn(async move {
             let mut rx = rx;
             let mut interval_timer = tokio::time::interval(interval);
-            
+
             loop {
                 tokio::select! {
                     _ = &mut rx => {
@@ -184,7 +185,7 @@ impl ProviderRouter {
                                 Ok(healthy) => healthy,
                                 Err(_) => false,
                             };
-                            
+
                             let mut states = health_states.write().await;
                             if let Some(state) = states.get_mut(provider_id) {
                                 if is_healthy {
@@ -198,7 +199,7 @@ impl ProviderRouter {
                                     state.failure_count += 1;
                                     state.last_failure_time = Some(Instant::now());
                                     state.consecutive_successes = 0;
-                                    
+
                                     if state.failure_count >= config.failure_threshold {
                                         state.is_healthy = false;
                                         state.cooldown_until = Some(Instant::now() + config.recovery_timeout);
@@ -282,7 +283,10 @@ impl ProviderRouter {
 
             if let Some(provider) = self.providers.get(provider_id) {
                 if provider.is_available() && self.check_circuit_breaker(*provider_id).await {
-                    match self.send_with_retry(provider, prompt.clone(), options.clone()).await {
+                    match self
+                        .send_with_retry(provider, prompt.clone(), options.clone())
+                        .await
+                    {
                         Ok(response) => {
                             self.record_success(*provider_id).await;
                             return Ok(response);
@@ -310,7 +314,8 @@ impl ProviderRouter {
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                let backoff_ms = calculate_backoff(attempt, DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS);
+                let backoff_ms =
+                    calculate_backoff(attempt, DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS);
                 sleep(Duration::from_millis(backoff_ms)).await;
             }
 

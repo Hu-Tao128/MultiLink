@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 pub use retrieval::RetrievalResult;
 
+use crate::config::detect_ollama_base_url;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextEngineVersion {
     V1,
@@ -61,11 +63,12 @@ pub struct ContextRetrievalConfig {
 
 impl Default for ContextRetrievalConfig {
     fn default() -> Self {
+        let ollama_url = detect_ollama_base_url();
         Self {
             embeddings_enabled: true,
-            embed_model: "embeddinggemma".to_string(),
-            embed_base_url: "http://127.0.0.1:11434".to_string(),
-            ollama_base_url: "http://127.0.0.1:11434".to_string(),
+            embed_model: String::new(),
+            embed_base_url: ollama_url.clone(),
+            ollama_base_url: ollama_url,
             embed_connect_timeout_ms: 2_000,
             embed_request_timeout_ms: 12_000,
             embed_max_retries: 1,

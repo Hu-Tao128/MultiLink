@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillManifest {
@@ -46,11 +46,11 @@ impl SkillLoader {
             .join("global")
     }
 
-    pub fn project_skills_dir(project_root: &PathBuf) -> PathBuf {
+    pub fn project_skills_dir(project_root: &Path) -> PathBuf {
         project_root.join(".multilink").join("skills")
     }
 
-    pub fn load_skills_from_dir(dir: &PathBuf) -> Vec<Skill> {
+    pub fn load_skills_from_dir(dir: &Path) -> Vec<Skill> {
         if !dir.exists() {
             return Vec::new();
         }
@@ -59,7 +59,7 @@ impl SkillLoader {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "toml") {
+                if path.extension().is_some_and(|e| e == "toml") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Ok(manifest) = toml::from_str::<SkillManifest>(&content) {
                             skills.push(Skill { manifest, path });

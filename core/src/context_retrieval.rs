@@ -1,8 +1,7 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
-use std::sync::OnceLock;
-use std::time::Duration;
-use std::time::Instant;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct RetrievalConfig {
@@ -77,7 +76,8 @@ pub async fn build_relevant_project_context(
     }
 
     let lexical = lexical_scores(prompt, &chunks);
-    let (embedding, embedding_diag) = maybe_embedding_scores(prompt, &chunks, &config).await;
+    let (embedding, embedding_diag) =
+        maybe_embedding_scores(prompt, &chunks, &config, model_hint).await;
     let embedding_used = embedding_diag.used;
     let mut ranked: Vec<(usize, f32)> = lexical
         .into_iter()
@@ -438,6 +438,7 @@ async fn maybe_embedding_scores(
     prompt: &str,
     chunks: &[ProjectChunk],
     config: &RetrievalConfig,
+    model_hint: Option<&str>,
 ) -> (Option<Vec<f32>>, EmbeddingDiagnostics) {
     let mut diag = EmbeddingDiagnostics {
         used: false,
@@ -457,10 +458,29 @@ async fn maybe_embedding_scores(
         return (None, diag);
     }
 
-    let model = config.embed_model.as_str();
     let base_url = config.embed_base_url.as_str();
-    let started = Instant::now();
+    let model = resolve_embed_model(base_url, &config.embed_model, model_hint, config).await;
+    diag.model = model.clone();
 
+    if model.is_empty() {
+        let models = fetch_ollama_model_details(base_url, config)
+            .await
+            .unwrap_or_default();
+        let available: Vec<String> = models.iter().map(|(n, _)| n.clone()).collect();
+        let capable: Vec<String> = models
+            .iter()
+            .filter(|(_, c)| c.supports_embedding)
+            .map(|(n, _)| n.clone())
+            .collect();
+
+        diag.reason = format!(
+            "no_embedding_capable_model available={:?} capable={:?}",
+            available, capable
+        );
+        return (None, diag);
+    }
+
+    let started = Instant::now();
     let chunk_inputs: Vec<String> = chunks
         .iter()
         .map(|chunk| {
@@ -473,7 +493,8 @@ async fn maybe_embedding_scores(
         })
         .collect();
 
-    let query_vector = match embed_inputs(base_url, model, vec![prompt.to_string()], config).await {
+    let query_vector = match embed_inputs(base_url, &model, vec![prompt.to_string()], config).await
+    {
         Ok(v) => {
             diag.attempts = diag.attempts.saturating_add(1);
             if let Some(first) = v.into_iter().next() {
@@ -485,7 +506,7 @@ async fn maybe_embedding_scores(
             }
         }
         Err(reason) => {
-            diag.reason = format!("query_failed:{}", reason);
+            diag.reason = format!("embed_api_error model={}: {}", model, reason);
             diag.latency_ms = started.elapsed().as_millis();
             return (None, diag);
         }
@@ -493,13 +514,13 @@ async fn maybe_embedding_scores(
 
     let mut chunk_vectors = Vec::new();
     for batch in chunk_inputs.chunks(config.embed_batch_size.max(1)) {
-        match embed_inputs(base_url, model, batch.to_vec(), config).await {
+        match embed_inputs(base_url, &model, batch.to_vec(), config).await {
             Ok(vectors) => {
                 diag.attempts = diag.attempts.saturating_add(1);
                 chunk_vectors.extend(vectors);
             }
             Err(reason) => {
-                diag.reason = format!("chunks_failed:{}", reason);
+                diag.reason = format!("chunks_failed model={}: {}", model, reason);
                 diag.latency_ms = started.elapsed().as_millis();
                 return (None, diag);
             }
@@ -519,6 +540,192 @@ async fn maybe_embedding_scores(
         ),
         diag,
     )
+}
+
+#[derive(serde::Deserialize)]
+struct OllamaTagsResponse {
+    models: Vec<OllamaTagModel>,
+}
+
+#[derive(serde::Deserialize)]
+struct OllamaTagModel {
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct OllamaShowResponse {
+    capabilities: Option<Vec<String>>,
+}
+
+static EMBED_MODEL_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+async fn resolve_embed_model(
+    base_url: &str,
+    configured: &str,
+    model_hint: Option<&str>,
+    config: &RetrievalConfig,
+) -> String {
+    let cache = EMBED_MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    // 1. If configured and exists and supports embedding, use it.
+    if !configured.is_empty() {
+        if let Some(caps) = fetch_model_capabilities(base_url, configured, config).await {
+            if caps.contains(&"embedding".to_string()) {
+                return configured.to_string();
+            }
+        }
+    }
+
+    // Check cache
+    {
+        let lock = cache.lock().unwrap();
+        if let Some(cached) = lock.get(base_url) {
+            return cached.clone();
+        }
+    }
+
+    // 2. Detect
+    let detected = detect_best_embed_model(base_url, model_hint, config).await;
+
+    // Save to cache
+    {
+        let mut lock = cache.lock().unwrap();
+        lock.insert(base_url.to_string(), detected.clone());
+    }
+
+    detected
+}
+
+async fn fetch_model_capabilities(
+    base_url: &str,
+    model: &str,
+    config: &RetrievalConfig,
+) -> Option<Vec<String>> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(config.embed_connect_timeout_ms))
+        .timeout(Duration::from_millis(config.embed_request_timeout_ms))
+        .build()
+        .ok()?;
+
+    let url = format!("{}/api/show", base_url.trim_end_matches('/'));
+    let body = serde_json::json!({"model": model});
+    let resp = client.post(url).json(&body).send().await.ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let show = resp.json::<OllamaShowResponse>().await.ok()?;
+    show.capabilities
+}
+
+async fn detect_best_embed_model(
+    base_url: &str,
+    model_hint: Option<&str>,
+    config: &RetrievalConfig,
+) -> String {
+    let models = fetch_ollama_model_details(base_url, config)
+        .await
+        .unwrap_or_default();
+    if models.is_empty() {
+        return String::new();
+    }
+
+    let capable_models: Vec<String> = models
+        .iter()
+        .filter(|(_, info)| info.supports_embedding)
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    if capable_models.is_empty() {
+        return String::new();
+    }
+
+    // Preference: nomic-embed-text
+    if let Some(m) = capable_models
+        .iter()
+        .find(|m| m.contains("nomic-embed-text"))
+    {
+        return m.clone();
+    }
+
+    // Preference: mxbai-embed-large
+    if let Some(m) = capable_models
+        .iter()
+        .find(|m| m.contains("mxbai-embed-large"))
+    {
+        return m.clone();
+    }
+
+    // Preference: any with "embed"
+    if let Some(m) = capable_models
+        .iter()
+        .find(|m| m.to_lowercase().contains("embed"))
+    {
+        return m.clone();
+    }
+
+    // Fallback: model_hint if capable
+    if let Some(hint) = model_hint {
+        if capable_models
+            .iter()
+            .any(|m| m == hint || m.split(':').next() == Some(hint))
+        {
+            return hint.to_string();
+        }
+    }
+
+    // Last resort: just the first capable one
+    capable_models.first().cloned().unwrap_or_default()
+}
+
+struct SimpleModelInfo {
+    supports_embedding: bool,
+}
+
+async fn fetch_ollama_model_details(
+    base_url: &str,
+    config: &RetrievalConfig,
+) -> Result<Vec<(String, SimpleModelInfo)>, String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(config.embed_connect_timeout_ms))
+        .timeout(Duration::from_millis(config.embed_request_timeout_ms))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let url_tags = format!("{}/api/tags", base_url.trim_end_matches('/'));
+    let resp_tags = client
+        .get(url_tags)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp_tags.status().is_success() {
+        return Err(format!("http_{}", resp_tags.status()));
+    }
+
+    let tags = resp_tags
+        .json::<OllamaTagsResponse>()
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut results = Vec::new();
+
+    for model in tags.models {
+        let url_show = format!("{}/api/show", base_url.trim_end_matches('/'));
+        let body = serde_json::json!({"model": model.name});
+        if let Ok(resp_show) = client.post(url_show).json(&body).send().await {
+            if resp_show.status().is_success() {
+                if let Ok(show) = resp_show.json::<OllamaShowResponse>().await {
+                    let supports_embedding = show
+                        .capabilities
+                        .map_or(false, |c| c.contains(&"embedding".to_string()));
+                    results.push((model.name, SimpleModelInfo { supports_embedding }));
+                }
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 #[cfg(test)]

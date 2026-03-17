@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use multilink_core::providers::ollama::OllamaProvider;
-use multilink_core::{ChatRuntime, ProviderId, ProviderRouter, StreamEvent};
+use multilink_core::{AppConfig, ChatRuntime, ProviderId, ProviderRouter, StreamEvent};
 
 const PERSIST_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -25,16 +25,35 @@ pub struct ChatBridge {
 
 impl Default for ChatBridge {
     fn default() -> Self {
-        let mut router = ProviderRouter::new();
-        router.register(Arc::new(OllamaProvider::new(
-            "http://127.0.0.1:11434".to_string(),
-            "llama3.2".to_string(),
-        )));
-
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .ok();
+
+        let (selected_server, default_model) = if let Some(rt) = runtime.as_ref() {
+            let config_path = AppConfig::default_user_config_path();
+            let config = rt.block_on(async { AppConfig::load_or_create(&config_path).await.unwrap_or_default() });
+            let server = config.primary_server().cloned().unwrap_or_default();
+            let model = server.default_model.clone();
+            (server, model)
+        } else {
+            let server = multilink_core::config::ServerConfig {
+                name: "Local Ollama".to_string(),
+                provider: multilink_core::config::ProviderKind::Ollama,
+                base_url: "http://127.0.0.1:11434".to_string(),
+                default_model: "qwen2.5-coder:3b".to_string(),
+                priority: 1,
+                enabled: true,
+            };
+            let model = server.default_model.clone();
+            (server, model)
+        };
+
+        let mut router = ProviderRouter::new();
+        router.register(Arc::new(OllamaProvider::new(
+            selected_server.base_url.clone(),
+            default_model.clone(),
+        )));
 
         let chat_runtime = if let Some(rt) = runtime.as_ref() {
             rt.block_on(async {
@@ -60,14 +79,14 @@ impl Default for ChatBridge {
         };
 
         let active_session_id = if let Some(rt) = runtime.as_ref() {
-            rt.block_on(chat_runtime.create_session(ProviderId::Ollama, Some("llama3.2".to_string())))
+            rt.block_on(chat_runtime.create_session(ProviderId::Ollama, Some(default_model.clone())))
         } else {
             "session-unavailable".to_string()
         };
 
         Self {
             active_provider: "Ollama".to_string(),
-            active_model: "llama3.2".to_string(),
+            active_model: default_model,
             provider_scope: "LOCAL".to_string(),
             chat_runtime,
             active_session_id,

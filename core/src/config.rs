@@ -1,9 +1,70 @@
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 pub const CURRENT_CONFIG_VERSION: u32 = 2;
+
+const OLLAMA_COMMON_PORTS: &[u16] = &[11434, 10101];
+
+pub fn detect_ollama_base_url() -> String {
+    if let Ok(env_url) = std::env::var("OLLAMA_HOST") {
+        if !env_url.is_empty() {
+            return normalize_ollama_url(&env_url);
+        }
+    }
+
+    if let Ok(env_url) = std::env::var("MULTILINK_OLLAMA_BASE_URL") {
+        if !env_url.is_empty() {
+            return normalize_ollama_url(&env_url);
+        }
+    }
+
+    for &port in OLLAMA_COMMON_PORTS {
+        let url = format!("http://127.0.0.1:{}", port);
+        if is_port_open("127.0.0.1", port) {
+            return url;
+        }
+        let url_ipv6 = format!("http://[::1]:{}", port);
+        if is_port_open("::1", port) {
+            return url_ipv6;
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("ollama").arg("list").output() {
+        if output.status.success() {
+            return "http://127.0.0.1:11434".to_string();
+        }
+    }
+
+    eprintln!(
+        "Warning: Could not detect Ollama server, using default http://127.0.0.1:11434. \
+         Set OLLAMA_HOST or MULTILINK_OLLAMA_BASE_URL to override."
+    );
+    "http://127.0.0.1:11434".to_string()
+}
+
+fn normalize_ollama_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{}", trimmed)
+    }
+}
+
+fn is_port_open(host: &str, port: u16) -> bool {
+    let addr = format!("{}:{}", host, port);
+    TcpStream::connect_timeout(
+        &addr
+            .parse()
+            .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
+        Duration::from_millis(500),
+    )
+    .is_ok()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -233,6 +294,7 @@ impl Default for RuntimeProfile {
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
+        let ollama_url = detect_ollama_base_url();
         Self {
             max_context_tokens: 7000,
             summary_trigger_tokens: 6000,
@@ -246,14 +308,14 @@ impl Default for RuntimeConfig {
             profiles: RuntimeProfiles::default(),
             context_embeddings_enabled: true,
             context_debug: false,
-            context_embed_model: "embeddinggemma".to_string(),
-            embed_base_url: "http://127.0.0.1:11434".to_string(),
+            context_embed_model: String::new(),
+            embed_base_url: ollama_url.clone(),
             embed_connect_timeout_ms: 2_000,
             embed_request_timeout_ms: 12_000,
             embed_max_retries: 1,
             embed_batch_size: 24,
             context_project_top_k: 8,
-            context_ollama_base_url: "http://127.0.0.1:11434".to_string(),
+            context_ollama_base_url: ollama_url,
             context_engine: "v1".to_string(),
             context_index_refresh_on_query: true,
             context_retrieval_enable_filters: false,
@@ -272,7 +334,7 @@ impl Default for ExecutionServerRuntime {
     fn default() -> Self {
         Self {
             name: "Local Ollama".to_string(),
-            base_url: "http://127.0.0.1:11434".to_string(),
+            base_url: detect_ollama_base_url(),
             default_model: "qwen2.5-coder:3b".to_string(),
             priority: 1,
             enabled: true,
@@ -285,7 +347,7 @@ impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             embeddings_enabled: true,
-            embed_model: "embeddinggemma".to_string(),
+            embed_model: String::new(),
             embed_base_url: None,
             embed_connect_timeout_ms: None,
             embed_request_timeout_ms: None,
@@ -409,12 +471,13 @@ fn extract_model_size_billions(model: &str) -> Option<f32> {
 
 impl Default for AppConfig {
     fn default() -> Self {
+        let ollama_url = detect_ollama_base_url();
         Self {
             version: CURRENT_CONFIG_VERSION,
             servers: vec![ServerConfig {
                 name: "Local Ollama".to_string(),
                 provider: ProviderKind::Ollama,
-                base_url: "http://127.0.0.1:11434".to_string(),
+                base_url: ollama_url.clone(),
                 default_model: "qwen2.5-coder:3b".to_string(),
                 priority: 1,
                 enabled: true,
@@ -631,7 +694,7 @@ impl AppConfig {
             .embed_base_url
             .clone()
             .or_else(|| self.primary_server().map(|s| s.base_url.clone()))
-            .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
+            .unwrap_or_else(detect_ollama_base_url);
 
         let mut execution_servers: Vec<ExecutionServerRuntime> = self
             .servers
@@ -688,12 +751,6 @@ impl AppConfig {
                     server.name
                 )));
             }
-        }
-
-        if self.context.embeddings_enabled && self.context.embed_model.trim().is_empty() {
-            return Err(ConfigError::Invalid(
-                "context.embed_model cannot be empty when embeddings are enabled".to_string(),
-            ));
         }
 
         if let Some(url) = self.context.embed_base_url.as_ref() {
