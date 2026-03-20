@@ -115,7 +115,7 @@ pub struct PerformanceConfig {
     pub max_parallel_streams: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct NetworkConfig {
     pub allow_remote: bool,
@@ -373,16 +373,6 @@ impl Default for PerformanceConfig {
     }
 }
 
-impl Default for NetworkConfig {
-    fn default() -> Self {
-        Self {
-            allow_remote: false,
-            shared_secret: String::new(),
-            allowed_ips: Vec::new(),
-        }
-    }
-}
-
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -503,7 +493,19 @@ impl AppConfig {
         if path.exists() {
             let content = fs::read_to_string(path).await?;
             let mut parsed = toml::from_str::<Self>(&content)?;
-            if parsed.migrate_to_current()? {
+            let mut needs_write = parsed.migrate_to_current()?;
+
+            if parsed.network.shared_secret.is_empty() {
+                parsed.network.shared_secret = generate_lan_secret();
+                needs_write = true;
+                eprintln!(
+                    "[multilink] LAN secret generado automaticamente.\n\n  shared_secret = \"{}\"\n\nCopia este codigo en tus otros dispositivos.\nEjecuta `/doctor --security` para verlo en cualquier momento.",
+                    parsed.network.shared_secret
+                );
+            }
+
+            if needs_write {
+                parsed.sync_runtime_from_sections();
                 let rewritten = toml::to_string_pretty(&parsed)?;
                 fs::write(path, rewritten).await?;
                 restrict_permissions(path)?;
@@ -519,6 +521,11 @@ impl AppConfig {
         }
 
         let mut default = Self::default();
+        default.network.shared_secret = generate_lan_secret();
+        eprintln!(
+            "[multilink] Configuracion creada. LAN secret generado:\n\n  shared_secret = \"{}\"\n\nGuarda este codigo para configurar tus otros dispositivos.\nEjecuta `/doctor --security` para verlo en cualquier momento.",
+            default.network.shared_secret
+        );
         default.sync_runtime_from_sections();
         let content = toml::to_string_pretty(&default)?;
         fs::write(path, content).await?;
@@ -893,6 +900,35 @@ fn restrict_permissions(path: &Path) -> Result<(), std::io::Error> {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) -> Result<(), std::io::Error> {
     Ok(())
+}
+
+pub fn generate_lan_secret() -> String {
+    use sha2::{Digest, Sha256};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut bytes = [0u8; 32];
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    let heap_addr = Box::into_raw(Box::new(0u8)) as u64;
+    let pid = std::process::id() as u64;
+
+    let mut hasher = Sha256::new();
+    hasher.update(ts.to_le_bytes());
+    hasher.update(heap_addr.to_le_bytes());
+    hasher.update(pid.to_le_bytes());
+    let intermediate = hasher.finalize();
+
+    let mut hasher2 = Sha256::new();
+    hasher2.update(intermediate);
+    hasher2.update(heap_addr.wrapping_add(pid).to_le_bytes());
+    let result = hasher2.finalize();
+    bytes.copy_from_slice(&result[..32]);
+
+    hex::encode(bytes)
 }
 
 #[derive(Debug, thiserror::Error)]
