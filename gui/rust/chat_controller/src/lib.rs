@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc, clippy::not_unsafe_ptr_arg_deref)]
+
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -5,6 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use multilink_core::config::ServerConfig;
+use multilink_core::auth::TokenStore;
+use multilink_core::providers::gemini::GeminiProvider;
+use multilink_core::providers::codex::CodexProvider;
 use multilink_core::providers::ollama::OllamaProvider;
 use multilink_core::{
     AppConfig, ChatRuntime, ProviderId, ProviderKind, ProviderRouter, StreamEvent,
@@ -118,6 +123,35 @@ pub extern "C" fn chat_backend_create(
         selected_server.default_model.clone(),
     )));
 
+    let token_store_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("multilink");
+    let token_store = TokenStore::for_path(token_store_path.clone());
+    let gemini_token = runtime.block_on(async {
+        token_store.load("gemini").await.ok().flatten()
+            .map(|t| t.access_token)
+    });
+    let codex_token = runtime.block_on(async {
+        token_store.load("codex").await.ok().flatten()
+            .map(|t| t.access_token)
+    });
+
+    if let Ok(gemini) = GeminiProvider::new(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent".to_string(),
+        gemini_token,
+        120,
+    ) {
+        router.register(Arc::new(gemini));
+    }
+
+    if let Ok(codex) = CodexProvider::new(
+        "https://api.openai.com/v1/responses".to_string(),
+        codex_token,
+        120,
+    ) {
+        router.register(Arc::new(codex));
+    }
+
     let chat_runtime = Arc::new(
         ChatRuntime::new_portable_with_settings(
             Arc::new(router),
@@ -134,7 +168,7 @@ pub extern "C" fn chat_backend_create(
         }),
     );
 
-    let _ = runtime.block_on(chat_runtime.load_sessions_from_disk());
+    let _ = runtime.block_on(chat_runtime.start());
     let active_session_id = runtime.block_on(async {
         if let Some(existing_active) = chat_runtime.active_session().await {
             return existing_active;
@@ -192,7 +226,6 @@ pub unsafe extern "C" fn chat_backend_destroy(handle: *mut BackendHandle) {
     if handle.is_null() {
         return;
     }
-    // SAFETY: pointer originates from Box::into_raw in chat_backend_create
     let _ = unsafe { Box::from_raw(handle) };
 }
 
@@ -984,8 +1017,101 @@ pub unsafe extern "C" fn chat_backend_string_free(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }
-    // SAFETY: pointer allocated by CString::into_raw
     let _ = unsafe { CString::from_raw(ptr) };
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn chat_backend_save_provider_token(
+    handle: *mut BackendHandle,
+    provider_cstr: *const c_char,
+    token_cstr: *const c_char,
+) -> i32 {
+    let Some(backend) = (unsafe { handle.as_ref() }) else { return 0 };
+    let provider = unsafe { CStr::from_ptr(provider_cstr) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+    let token = unsafe { CStr::from_ptr(token_cstr) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+
+    if provider.is_empty() || token.is_empty() {
+        return 0;
+    }
+
+    let stored = multilink_core::StoredToken {
+        access_token: token,
+        refresh_token: None,
+        expires_at: None,
+        token_type: Some("Bearer".to_string()),
+    };
+
+    let store_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("multilink");
+    let store = TokenStore::for_path(store_path);
+    match backend.runtime.block_on(store.save(&provider, &stored)) {
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn chat_backend_clear_provider_token(
+    handle: *mut BackendHandle,
+    provider_cstr: *const c_char,
+) -> i32 {
+    let Some(backend) = (unsafe { handle.as_ref() }) else { return 0 };
+    let provider = unsafe { CStr::from_ptr(provider_cstr) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+
+    if provider.is_empty() {
+        return 0;
+    }
+
+    let store_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("multilink");
+    let store = TokenStore::for_path(store_path);
+    let empty_token = multilink_core::StoredToken {
+        access_token: String::new(),
+        refresh_token: None,
+        expires_at: None,
+        token_type: None,
+    };
+    match backend.runtime.block_on(store.save(&provider, &empty_token)) {
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn chat_backend_has_provider_token(
+    handle: *mut BackendHandle,
+    provider_cstr: *const c_char,
+) -> i32 {
+    let Some(backend) = (unsafe { handle.as_ref() }) else { return 0 };
+    let provider = unsafe { CStr::from_ptr(provider_cstr) }
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+
+    let store_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("multilink");
+    let store = TokenStore::for_path(store_path);
+    let has_token = backend.runtime.block_on(async {
+        store.load(&provider).await
+            .ok()
+            .flatten()
+            .map(|t| !t.access_token.is_empty())
+            .unwrap_or(false)
+    });
+
+    if has_token { 1 } else { 0 }
 }
 
 fn emit_string(callback: Option<StringCallback>, ctx: *mut c_void, text: &str) {
@@ -1331,7 +1457,6 @@ mod tests {
         assert!(!handle.is_null());
 
         let empty = CString::new("").expect("valid cstring");
-        // SAFETY: handle is valid and created above
         unsafe {
             chat_backend_send_prompt(handle, empty.as_ptr());
             chat_backend_stop_generation(handle);
