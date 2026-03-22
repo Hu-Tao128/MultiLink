@@ -28,6 +28,7 @@ use crate::observability::{ContextRetrievalMetrics, ExecutionMetrics};
 use crate::providers::{PromptOptions, ProviderId};
 use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
+use crate::skills::{Skill, SkillLoader, SkillOrchestrator};
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -135,6 +136,20 @@ impl ChatRuntime {
         let server =
             LanAgentServer::bind(addr, runtime, shared_secret, allowed_ips, allow_remote).await?;
         Ok(server)
+    }
+
+    /// Bootstrap runtime services required at startup.
+    pub async fn start(&self) -> Result<(), ChatRuntimeError> {
+        // Ensure we do not leave duplicate monitor tasks running.
+        self.router.stop_health_monitor().await;
+        self.router.init_health_states().await;
+        self.router.start_health_monitor().await;
+        self.load_sessions_from_disk().await
+    }
+
+    /// Stop background runtime services.
+    pub async fn stop(&self) {
+        self.router.stop_health_monitor().await;
     }
 
     pub fn new_portable(
@@ -390,33 +405,123 @@ impl ChatRuntime {
         let prompt = request.prompt;
 
         // Handle system commands (/init, /doctor, /write-file) using command router
-        use crate::commands::{route_command, get_project_root, init_command, doctor_command};
+        use crate::commands::{
+            doctor_command, get_project_root, get_project_root_for_init, init_command,
+            route_command,
+        };
 
         if let Some(command) = route_command(&prompt) {
-            let project_root = {
+            let (project_root, provider, model) = {
                 let guard = self.sessions.read().await;
-                guard
-                    .get(session_id)
-                    .and_then(|s| s.project_root.clone())
+                let session = guard.get(session_id);
+                (
+                    session.and_then(|s| s.project_root.clone()),
+                    session.map(|s| s.provider).unwrap_or(ProviderId::Ollama),
+                    session.and_then(|s| s.model.clone()),
+                )
             };
-
-            let root = get_project_root(project_root, session_id);
 
             let response = match command {
                 crate::commands::ChatCommand::Init(cmd) => {
+                    let root = get_project_root_for_init(project_root.clone(), session_id);
                     let result = init_command::run_init(&root, &cmd);
-                    format_init_result(&result)
+                    let mut response = format!(
+                        "📁 Root usado para /init: `{}`\n\n{}",
+                        root.display(),
+                        format_init_result(&result)
+                    );
+
+                    if result.project_info.is_some() {
+                        match generate_model_init_analysis(self, provider, model.clone(), &result)
+                            .await
+                        {
+                            Ok(model_analysis) if !model_analysis.trim().is_empty() => {
+                                let model_analysis =
+                                    sanitize_model_init_analysis(&model_analysis, &result);
+                                if let Some(path) = result.file_path.as_ref() {
+                                    match upsert_model_analysis_section(path, &model_analysis) {
+                                        Ok(()) => {
+                                            response.push_str(
+                                                "\n\n🤖 Análisis del modelo agregado a `MULTILINK.md`.",
+                                            );
+                                        }
+                                        Err(err) => {
+                                            response.push_str(&format!(
+                                                "\n\n⚠️ No se pudo persistir el análisis del modelo en MULTILINK.md: {}",
+                                                err
+                                            ));
+                                        }
+                                    }
+                                }
+                                response.push_str("\n\n## 🤖 Model Analysis\n\n");
+                                response.push_str(&model_analysis);
+                            }
+                            Ok(_) => {
+                                response.push_str(
+                                    "\n\n⚠️ El modelo respondió vacío para el análisis de /init.",
+                                );
+                            }
+                            Err(err) => {
+                                response.push_str(&format!(
+                                    "\n\n⚠️ No se pudo generar análisis con el modelo: {}",
+                                    err
+                                ));
+                            }
+                        }
+                    }
+
+                    response
                 }
-                crate::commands::ChatCommand::Doctor => {
-                    let result = doctor_command::DoctorCommand::run(&root);
-                    format_doctor_result(&result)
+                crate::commands::ChatCommand::Doctor { security } => {
+                    let root = get_project_root(project_root.clone(), session_id);
+                    let result = doctor_command::DoctorCommand::run(
+                        root.as_path(),
+                        &doctor_command::DoctorOptions { security },
+                    );
+                    let mut response = format_doctor_result(&result);
+
+                    if security {
+                        match generate_model_doctor_security_analysis(
+                            self,
+                            provider,
+                            model.clone(),
+                            &result,
+                            project_root.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(analysis) if !analysis.trim().is_empty() => {
+                                let analysis = sanitize_model_markdown(&analysis);
+                                response.push_str("\n\n## 🤖 Skill-Based Security Analysis\n\n");
+                                response.push_str(&analysis);
+                            }
+                            Ok(_) => response.push_str(
+                                "\n\n⚠️ El modelo devolvió análisis vacío para `/doctor --security`.",
+                            ),
+                            Err(err) => response.push_str(&format!(
+                                "\n\n⚠️ No se pudo ejecutar análisis enriquecido de skills: {}",
+                                err
+                            )),
+                        }
+                    }
+
+                    response
                 }
-                crate::commands::ChatCommand::WriteFile { relative_path: _, content: _ } => {
+                crate::commands::ChatCommand::WriteFile {
+                    relative_path: _,
+                    content: _,
+                } => {
+                    let root = get_project_root(project_root, session_id);
                     let write_cmd = parse_write_file_command(&prompt);
                     if let Some(wc) = write_cmd {
-                        let root_str = if root.is_dir() { Some(root.to_string_lossy().to_string()) } else { None };
+                        let root_str = if root.is_dir() {
+                            Some(root.to_string_lossy().to_string())
+                        } else {
+                            None
+                        };
                         let result = execute_write_file_command(root_str.as_deref(), &wc).await;
-                        result.map(|p| format!("Archivo creado: {}", p.display()))
+                        result
+                            .map(|p| format!("Archivo creado: {}", p.display()))
                             .unwrap_or_else(|e| format!("Error: {}", e))
                     } else {
                         "Error parsing write command".to_string()
@@ -471,7 +576,23 @@ impl ChatRuntime {
                 ),
             };
 
-            // ... rest of write handling
+            let assistant_snapshot = {
+                let mut guard = self.sessions.write().await;
+                if let Some(session) = guard.get_mut(session_id) {
+                    session.add_assistant_message(assistant_text.clone());
+                    session.set_state(final_state);
+                }
+                guard.get(session_id).cloned()
+            };
+            if let Some(snapshot) = assistant_snapshot {
+                persist_session(&self.storage_dir, &snapshot).await?;
+            }
+
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let _ = event_tx.send(StreamEvent::Started).await;
+            let _ = event_tx.send(StreamEvent::Chunk(assistant_text)).await;
+            let _ = event_tx.send(StreamEvent::Finished).await;
+            return Ok(ChatResponse { events: event_rx });
         }
 
         let (provider, model, session_project_root) = {
@@ -531,7 +652,7 @@ impl ChatRuntime {
                     effective_runtime.max_project_context_tokens =
                         effective_runtime.max_project_context_tokens.min(512);
                     effective_runtime.context_project_top_k =
-                        effective_runtime.context_project_top_k.min(3).max(2);
+                        effective_runtime.context_project_top_k.clamp(2, 3);
                 }
                 model_profile = Some(profile);
             }
@@ -1212,7 +1333,9 @@ impl ChatRuntime {
         }
 
         if let Some(system_context_path) = &self.system_context_dir {
-            match build_system_context(system_context_path, effective_runtime.clone()).await {
+            match build_system_context(system_context_path.as_path(), effective_runtime.clone())
+                .await
+            {
                 Ok(context) => {
                     if context_debug_enabled(&self.runtime_config) {
                         eprintln!(
@@ -1651,10 +1774,10 @@ async fn build_project_context_for_root(
 }
 
 async fn build_system_context(
-    system_context_dir: &PathBuf,
+    system_context_dir: &Path,
     runtime_config: RuntimeConfig,
 ) -> Result<String, ChatRuntimeError> {
-    let root_for_task = system_context_dir.clone();
+    let root_for_task = system_context_dir.to_path_buf();
     tokio::task::spawn_blocking(move || collect_project_snapshot(&root_for_task, &runtime_config))
         .await
         .map_err(|e| ChatRuntimeError::Path(format!("system context scan task failed: {}", e)))
@@ -1991,8 +2114,17 @@ fn format_init_result(result: &crate::commands::InitResult) -> String {
     output.push_str(&format!("{}\n\n", result.message));
 
     if let Some(health) = result.health_score {
-        let health_emoji = if health >= 80 { "🟢" } else if health >= 50 { "🟡" } else { "🔴" };
-        output.push_str(&format!("{} **Health Score:** {}/100\n", health_emoji, health));
+        let health_emoji = if health >= 80 {
+            "🟢"
+        } else if health >= 50 {
+            "🟡"
+        } else {
+            "🔴"
+        };
+        output.push_str(&format!(
+            "{} **Health Score:** {}/100\n",
+            health_emoji, health
+        ));
         if let Some(crit) = result.critical_issues {
             if crit > 0 {
                 output.push_str(&format!("⚠️ **Critical issues:** {}\n", crit));
@@ -2003,7 +2135,7 @@ fn format_init_result(result: &crate::commands::InitResult) -> String {
                 output.push_str(&format!("⚡ **Warnings:** {}\n", warn));
             }
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     if let Some(info) = &result.project_info {
@@ -2013,9 +2145,18 @@ fn format_init_result(result: &crate::commands::InitResult) -> String {
         output.push_str(&format!("- **Type:** {}\n", info.project_type));
         output.push_str(&format!("- **Stack:** {}\n", stack_str));
         output.push_str(&format!("- **Complexity:** {}\n", info.complexity));
-        output.push_str(&format!("- **Has Tests:** {}\n", if info.has_tests { "✅" } else { "❌" }));
-        output.push_str(&format!("- **Has Docs:** {}\n", if info.has_docs { "✅" } else { "❌" }));
-        output.push_str(&format!("- **Has Docker:** {}\n", if info.has_docker { "✅" } else { "❌" }));
+        output.push_str(&format!(
+            "- **Has Tests:** {}\n",
+            if info.has_tests { "✅" } else { "❌" }
+        ));
+        output.push_str(&format!(
+            "- **Has Docs:** {}\n",
+            if info.has_docs { "✅" } else { "❌" }
+        ));
+        output.push_str(&format!(
+            "- **Has Docker:** {}\n",
+            if info.has_docker { "✅" } else { "❌" }
+        ));
 
         if !info.detected_paths.is_empty() {
             output.push_str("\n### 📂 Directories\n\n");
@@ -2057,6 +2198,323 @@ fn format_init_result(result: &crate::commands::InitResult) -> String {
 fn format_doctor_result(result: &crate::commands::DoctorResult) -> String {
     use crate::commands::doctor_command::format_doctor_report;
     format_doctor_report(result)
+}
+
+async fn generate_model_init_analysis(
+    runtime: &ChatRuntime,
+    provider: ProviderId,
+    model: Option<String>,
+    result: &crate::commands::InitResult,
+) -> Result<String, ChatRuntimeError> {
+    let mut prompt = String::from(
+        "Analiza el estado del proyecto para un comando /init y responde SOLO en Markdown limpio (sin code fences).\n",
+    );
+    prompt.push_str(
+        "Reglas estrictas:\n- No inventes datos ni supuestos\n- Usa exclusivamente el JSON entregado\n- No contradigas ningún campo booleano\n- No uses bloques de código (no ``` )\n- Máximo 180 palabras\n\n",
+    );
+    prompt.push_str("Formato requerido:\n");
+    prompt.push_str("### Quality Notes\n- 2 a 4 bullets basados en hechos\n");
+    prompt.push_str("### Risks\n- 1 a 3 bullets con riesgos reales detectados\n");
+    prompt.push_str("### Next Actions\n- 2 a 4 bullets accionables y priorizados\n\n");
+    prompt.push_str("Si no hay riesgos reales, en Risks escribe exactamente: '- No se detectaron riesgos críticos con la evidencia actual.'\n\n");
+
+    let payload = serde_json::to_string_pretty(result)
+        .map_err(|e| ChatRuntimeError::Provider(format!("error serializing init result: {}", e)))?;
+    prompt.push_str("Datos de entrada (JSON):\n");
+    prompt.push_str(&payload);
+    prompt.push('\n');
+
+    let options = PromptOptions {
+        model,
+        temperature: Some(0.1),
+        system_context_dir: runtime.system_context_dir.clone(),
+        ..PromptOptions::default()
+    };
+
+    let response = runtime
+        .router
+        .send(provider, prompt, options)
+        .await
+        .map_err(|e| ChatRuntimeError::Provider(e.to_string()))?;
+
+    Ok(response.text.trim().to_string())
+}
+
+async fn generate_model_doctor_security_analysis(
+    runtime: &ChatRuntime,
+    provider: ProviderId,
+    model: Option<String>,
+    result: &crate::commands::DoctorResult,
+    project_root: Option<&String>,
+) -> Result<String, ChatRuntimeError> {
+    let root = project_root.map(PathBuf::from);
+    let all_skills = SkillLoader::load_all(root.as_ref());
+
+    let orchestrator = SkillOrchestrator::new(all_skills.clone());
+    let trigger_prompt =
+        "security hardcoded secrets credenciales env vars owasp escalabilidad deploy";
+
+    let mut selected: Vec<Skill> = Vec::new();
+    if let Some(skill) = orchestrator.find_matching_skill(trigger_prompt) {
+        selected.push(skill.clone());
+    }
+
+    for skill in all_skills {
+        let name = skill.manifest.name.to_ascii_lowercase();
+        if [
+            "gestion-secretos",
+            "auditor-escalabilidad",
+            "auditor-owasp-api",
+            "linux-sec-audit",
+        ]
+        .iter()
+        .any(|needle| name.contains(needle))
+            && !selected
+                .iter()
+                .any(|already| already.manifest.name == skill.manifest.name)
+        {
+            selected.push(skill.clone());
+        }
+    }
+
+    let skill_context = if selected.is_empty() {
+        String::from("No se detectaron skills relevantes instaladas para seguridad.")
+    } else {
+        selected
+            .iter()
+            .take(6)
+            .map(|skill| {
+                let excerpt = read_skill_markdown_excerpt(skill, 420)
+                    .map(|e| format!(" | excerpt: {}", e))
+                    .unwrap_or_default();
+                format!(
+                    "- {}: {} | triggers: {}{}",
+                    skill.manifest.name,
+                    skill.manifest.description,
+                    skill.manifest.triggers.join(", "),
+                    excerpt
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let mut prompt = String::from(
+        "Genera un análisis de seguridad accionable para `/doctor --security` usando el reporte y skills disponibles.\n",
+    );
+    prompt.push_str(
+        "Reglas:\n- Responde en Markdown, sin bloques de código\n- No inventes hallazgos nuevos fuera del reporte\n- Prioriza riesgos reales y acciones concretas\n- Máximo 220 palabras\n\n",
+    );
+    prompt.push_str("Formato:\n");
+    prompt.push_str("### Skill Coverage\n- 2 a 4 bullets\n");
+    prompt.push_str("### Risk Review\n- 2 a 4 bullets\n");
+    prompt.push_str("### Hardening Plan\n- 3 a 5 bullets priorizados\n\n");
+    prompt.push_str("Skills relevantes:\n");
+    prompt.push_str(&skill_context);
+    prompt.push_str("\n\nDoctor result JSON:\n");
+    prompt.push_str(
+        &serde_json::to_string_pretty(result)
+            .map_err(|e| ChatRuntimeError::Provider(format!("serialize doctor result: {}", e)))?,
+    );
+
+    let options = PromptOptions {
+        model,
+        temperature: Some(0.1),
+        system_context_dir: runtime.system_context_dir.clone(),
+        ..PromptOptions::default()
+    };
+
+    let response = runtime
+        .router
+        .send(provider, prompt, options)
+        .await
+        .map_err(|e| ChatRuntimeError::Provider(e.to_string()))?;
+
+    Ok(response.text.trim().to_string())
+}
+
+fn sanitize_model_markdown(raw: &str) -> String {
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for line in raw.lines() {
+        let t = line.trim();
+        if t.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    out.join("\n").trim().to_string()
+}
+
+fn read_skill_markdown_excerpt(skill: &Skill, max_chars: usize) -> Option<String> {
+    let mut candidates = vec![
+        skill.path.with_extension("md"),
+        skill.path.parent()?.join("SKILL.md"),
+    ];
+
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(
+            PathBuf::from(home)
+                .join(".config")
+                .join("opencode")
+                .join("skills")
+                .join(&skill.manifest.name)
+                .join("SKILL.md"),
+        );
+    }
+
+    for candidate in candidates {
+        let Ok(content) = stdfs::read_to_string(&candidate) else {
+            continue;
+        };
+        let excerpt = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" ");
+        if excerpt.is_empty() {
+            continue;
+        }
+
+        let compact = excerpt.chars().take(max_chars).collect::<String>();
+        return Some(compact);
+    }
+
+    None
+}
+
+fn upsert_model_analysis_section(file_path: &Path, analysis: &str) -> Result<(), String> {
+    const START: &str = "<!-- multilink:model_analysis:start -->";
+    const END: &str = "<!-- multilink:model_analysis:end -->";
+
+    let content = stdfs::read_to_string(file_path).map_err(|e| e.to_string())?;
+    let section = format!(
+        "{}\n## 🤖 Model Analysis\n\n{}\n{}",
+        START,
+        analysis.trim(),
+        END
+    );
+
+    let updated = if let (Some(start), Some(end)) = (content.find(START), content.find(END)) {
+        let after_end = end + END.len();
+        format!("{}{}{}", &content[..start], section, &content[after_end..])
+    } else if let Some(anchor) = content.find("## 🤖 Generated by MultiLink") {
+        format!(
+            "{}\n\n{}\n\n{}",
+            &content[..anchor],
+            section,
+            &content[anchor..]
+        )
+    } else {
+        format!("{}\n\n{}", content.trim_end(), section)
+    };
+
+    stdfs::write(file_path, updated).map_err(|e| e.to_string())
+}
+
+fn sanitize_model_init_analysis(raw: &str, result: &crate::commands::InitResult) -> String {
+    let info = result.project_info.as_ref();
+    let has_tests = info.map(|i| i.has_tests).unwrap_or(false);
+    let has_linting = info.map(|i| i.has_linting).unwrap_or(false);
+    let has_docker = info.map(|i| i.has_docker).unwrap_or(false);
+
+    let mut cleaned_lines = Vec::new();
+    let mut in_code_fence = false;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_fence = !in_code_fence;
+            continue;
+        }
+        if in_code_fence {
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            if cleaned_lines
+                .last()
+                .map(|l: &String| l.is_empty())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            cleaned_lines.push(String::new());
+            continue;
+        }
+
+        let normalized = if trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
+            && trimmed.contains('.')
+        {
+            let bullet = trimmed
+                .split_once('.')
+                .map(|(_, rest)| rest.trim())
+                .unwrap_or(trimmed);
+            format!("- {}", bullet)
+        } else {
+            trimmed.to_string()
+        };
+
+        if is_contradictory_bullet(&normalized, has_tests, has_linting, has_docker) {
+            continue;
+        }
+
+        cleaned_lines.push(normalized);
+    }
+
+    let mut text = cleaned_lines.join("\n");
+    text = text.trim().to_string();
+
+    if text.is_empty() {
+        return String::from(
+            "### Quality Notes\n- Se generó `MULTILINK.md` con datos detectados del proyecto.\n\n### Risks\n- No se detectaron riesgos críticos con la evidencia actual.\n\n### Next Actions\n- Revisar y ajustar `MULTILINK.md` según convenciones internas del equipo.\n- Ejecutar comandos de validación detectados antes de continuar cambios.",
+        );
+    }
+
+    text
+}
+
+fn is_contradictory_bullet(
+    line: &str,
+    has_tests: bool,
+    has_linting: bool,
+    has_docker: bool,
+) -> bool {
+    let lower = line.to_ascii_lowercase();
+
+    let mentions_add_tests = lower.contains("agregar test")
+        || lower.contains("añadir test")
+        || lower.contains("implement test")
+        || lower.contains("add test")
+        || lower.contains("write test");
+    if has_tests && mentions_add_tests {
+        return true;
+    }
+
+    let mentions_add_lint = lower.contains("agregar linter")
+        || lower.contains("implementar linter")
+        || lower.contains("configurar linter")
+        || lower.contains("add lint")
+        || lower.contains("configure lint");
+    if has_linting && mentions_add_lint {
+        return true;
+    }
+
+    let mentions_add_docker = lower.contains("configurar docker")
+        || lower.contains("agregar docker")
+        || lower.contains("add docker")
+        || lower.contains("create dockerfile")
+        || lower.contains("configurar imagen docker");
+    if has_docker && mentions_add_docker {
+        return true;
+    }
+
+    false
 }
 
 fn detect_natural_write_target(prompt: &str) -> Option<String> {
@@ -2442,7 +2900,13 @@ async fn recover_partials_from_wal(
 
 #[cfg(test)]
 mod tests {
-    use super::extract_nonempty_file_payload_from_assistant;
+    use super::{
+        execute_write_file_command, extract_nonempty_file_payload_from_assistant,
+        parse_write_file_command, sanitize_model_init_analysis, sanitize_model_markdown,
+        WriteFileCommand,
+    };
+    use crate::commands::{InitAction, InitResult, ProjectInfo};
+    use std::collections::HashSet;
 
     #[test]
     fn extract_nonempty_payload_returns_none_for_empty_text() {
@@ -2466,6 +2930,113 @@ mod tests {
             extract_nonempty_file_payload_from_assistant("```md\n# Hola\n```"),
             Some("# Hola".to_string())
         );
+    }
+
+    #[test]
+    fn sanitize_model_analysis_removes_fences_and_contradictions() {
+        let result = InitResult {
+            success: true,
+            message: "ok".to_string(),
+            file_path: None,
+            project_info: Some(ProjectInfo {
+                name: "demo".to_string(),
+                stack: HashSet::new(),
+                project_type: "backend API".to_string(),
+                has_tests: true,
+                has_docs: true,
+                has_docker: true,
+                has_linting: true,
+                complexity: "small".to_string(),
+                detected_paths: vec!["src".to_string()],
+                readme_content: None,
+                validation_commands: vec![],
+                guidance_files: vec![],
+                markdown_files: vec![],
+                roadmap_files: vec![],
+                module_readmes: vec![],
+            }),
+            analysis: None,
+            action: InitAction::Created,
+            health_score: Some(100),
+            critical_issues: Some(0),
+            warnings: Some(0),
+        };
+
+        let raw = "```markdown\n### Quality Notes\n- Proyecto estable\n\n### Next Actions\n1. Implementar linter\n2. Configurar Docker\n3. Add tests\n```";
+        let cleaned = sanitize_model_init_analysis(raw, &result);
+
+        assert!(!cleaned.contains("```"));
+        assert!(!cleaned.to_ascii_lowercase().contains("implementar linter"));
+        assert!(!cleaned.to_ascii_lowercase().contains("configurar docker"));
+        assert!(!cleaned.to_ascii_lowercase().contains("add tests"));
+        assert!(cleaned.contains("### Quality Notes"));
+    }
+
+    #[test]
+    fn sanitize_model_markdown_removes_code_fences() {
+        let raw = "### A\n```markdown\n- x\n```\n### B\n- y";
+        let cleaned = sanitize_model_markdown(raw);
+        assert!(!cleaned.contains("```"));
+        assert!(cleaned.contains("### A"));
+        assert!(cleaned.contains("### B"));
+    }
+
+    #[test]
+    fn parse_write_file_extracts_path_and_content() {
+        let prompt = "/write-file src/foo.rs\nfn main() {}";
+        let cmd = parse_write_file_command(prompt).expect("parse");
+        assert_eq!(cmd.relative_path, "src/foo.rs");
+        assert_eq!(cmd.content.trim(), "fn main() {}");
+    }
+
+    #[test]
+    fn parse_write_file_strips_fence() {
+        let prompt = "/write-file README.md\n```md\n# Hola\n```";
+        let cmd = parse_write_file_command(prompt).expect("parse");
+        assert_eq!(cmd.content.trim(), "# Hola");
+    }
+
+    #[test]
+    fn parse_write_file_rejects_missing_path() {
+        assert!(parse_write_file_command("/write-file").is_none());
+        assert!(parse_write_file_command("/write-file \ncontent").is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_write_file_rejects_absolute_path() {
+        let cmd = WriteFileCommand {
+            relative_path: "/etc/passwd".to_string(),
+            content: "evil".to_string(),
+        };
+        let result = execute_write_file_command(None, &cmd).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_write_file_rejects_path_traversal() {
+        let cmd = WriteFileCommand {
+            relative_path: "../outside/secret.txt".to_string(),
+            content: "evil".to_string(),
+        };
+        let result = execute_write_file_command(None, &cmd).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_write_file_creates_file_and_dirs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let cmd = WriteFileCommand {
+            relative_path: "sub/dir/hello.txt".to_string(),
+            content: "hola mundo".to_string(),
+        };
+        let result = execute_write_file_command(tmp.path().to_str(), &cmd).await;
+
+        assert!(result.is_ok(), "error: {:?}", result.err());
+        let written = result.expect("written path");
+        assert!(written.exists(), "el archivo debe existir");
+        let read_back = std::fs::read_to_string(&written).expect("read file");
+        assert_eq!(read_back, "hola mundo");
     }
 }
 

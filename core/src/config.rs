@@ -903,31 +903,11 @@ fn restrict_permissions(_path: &Path) -> Result<(), std::io::Error> {
 }
 
 pub fn generate_lan_secret() -> String {
-    use sha2::{Digest, Sha256};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use ring::rand::{SecureRandom, SystemRandom};
 
+    let rng = SystemRandom::new();
     let mut bytes = [0u8; 32];
-
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-
-    let heap_addr = Box::into_raw(Box::new(0u8)) as u64;
-    let pid = std::process::id() as u64;
-
-    let mut hasher = Sha256::new();
-    hasher.update(ts.to_le_bytes());
-    hasher.update(heap_addr.to_le_bytes());
-    hasher.update(pid.to_le_bytes());
-    let intermediate = hasher.finalize();
-
-    let mut hasher2 = Sha256::new();
-    hasher2.update(intermediate);
-    hasher2.update(heap_addr.wrapping_add(pid).to_le_bytes());
-    let result = hasher2.finalize();
-    bytes.copy_from_slice(&result[..32]);
-
+    rng.fill(&mut bytes).expect("secure random failed");
     hex::encode(bytes)
 }
 

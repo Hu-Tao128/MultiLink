@@ -1,4 +1,6 @@
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -7,12 +9,44 @@ use tokio::sync::RwLock;
 
 use crate::chat_runtime::ChatRuntime;
 
+type HmacSha256 = Hmac<Sha256>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LanEnvelope {
     pub protocol_version: u8,
     pub request_id: String,
     pub timestamp_ms: u64,
+    /// HMAC-SHA256 del payload serializado.
+    /// Formato esperado: "sha256=<hex>".
+    #[serde(default)]
+    pub hmac_signature: String,
     pub payload: LanPayload,
+}
+
+impl LanEnvelope {
+    const MAX_REQUEST_ID_LEN: usize = 64;
+    const MAX_CLOCK_SKEW_MS: u64 = 300_000; // 5 minutes
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.protocol_version > 2 {
+            return Err("unsupported protocol version");
+        }
+        if self.request_id.is_empty() {
+            return Err("request_id cannot be empty");
+        }
+        if self.request_id.len() > Self::MAX_REQUEST_ID_LEN {
+            return Err("request_id too long");
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if self.timestamp_ms > now.saturating_add(Self::MAX_CLOCK_SKEW_MS) {
+            return Err("timestamp too far in future");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +96,39 @@ fn constant_time_compare(a: &str, b: &str) -> bool {
         .zip(b.as_bytes())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
+}
+
+/// Valida la firma HMAC-SHA256 del payload.
+/// `signature_header` debe tener formato `sha256=<hex>`.
+pub fn verify_hmac(
+    secret: &str,
+    payload_bytes: &[u8],
+    signature_header: &str,
+) -> Result<(), &'static str> {
+    let expected_hex = signature_header
+        .strip_prefix("sha256=")
+        .ok_or("invalid signature format")?;
+
+    if expected_hex.is_empty() {
+        return Err("empty signature");
+    }
+
+    let expected_bytes = hex::decode(expected_hex).map_err(|_| "invalid hex signature")?;
+
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| "invalid secret")?;
+    mac.update(payload_bytes);
+    mac.verify_slice(&expected_bytes)
+        .map_err(|_| "signature mismatch")
+}
+
+/// Firma un payload serializado en formato `sha256=<hex>`.
+pub fn sign_payload(secret: &str, payload_bytes: &[u8]) -> Result<String, &'static str> {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| "invalid secret")?;
+    mac.update(payload_bytes);
+    Ok(format!(
+        "sha256={}",
+        hex::encode(mac.finalize().into_bytes())
+    ))
 }
 
 pub struct LanAgentServer {
@@ -136,17 +203,7 @@ impl LanAgentServer {
     }
 
     fn is_ip_allowed(&self, client_ip: &IpAddr) -> bool {
-        if self.allowed_ips.is_empty() {
-            return true;
-        }
-
-        let is_local = client_ip.is_loopback();
-
-        if self.allow_remote {
-            true
-        } else {
-            is_local || self.allowed_ips.contains(client_ip)
-        }
+        is_ip_allowed(self.allowed_ips.as_slice(), self.allow_remote, client_ip)
     }
 
     async fn handle_connection(
@@ -169,6 +226,7 @@ impl LanAgentServer {
                     protocol_version: 1,
                     request_id: String::new(),
                     timestamp_ms: unix_timestamp_ms(),
+                    hmac_signature: String::new(),
                     payload: LanPayload::Error {
                         message: format!("decode error: {}", e),
                     },
@@ -177,6 +235,65 @@ impl LanAgentServer {
                 return Ok(());
             }
         };
+
+        if let Err(e) = request.validate() {
+            let response = LanEnvelope {
+                protocol_version: request.protocol_version,
+                request_id: request.request_id,
+                timestamp_ms: unix_timestamp_ms(),
+                hmac_signature: String::new(),
+                payload: LanPayload::Error {
+                    message: format!("validation error: {}", e),
+                },
+            };
+            Self::write_response(&mut stream, &response).await?;
+            return Ok(());
+        }
+
+        if shared_secret.is_empty() {
+            let response = LanEnvelope {
+                protocol_version: request.protocol_version,
+                request_id: request.request_id,
+                timestamp_ms: unix_timestamp_ms(),
+                hmac_signature: String::new(),
+                payload: LanPayload::Error {
+                    message: "server not configured with shared secret".to_string(),
+                },
+            };
+            Self::write_response(&mut stream, &response).await?;
+            return Ok(());
+        }
+
+        let payload_bytes = match encode_messagepack(&request.payload) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                let response = LanEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    timestamp_ms: unix_timestamp_ms(),
+                    hmac_signature: String::new(),
+                    payload: LanPayload::Error {
+                        message: "internal error serializing payload for verification".to_string(),
+                    },
+                };
+                Self::write_response(&mut stream, &response).await?;
+                return Ok(());
+            }
+        };
+
+        if verify_hmac(&shared_secret, &payload_bytes, &request.hmac_signature).is_err() {
+            let response = LanEnvelope {
+                protocol_version: request.protocol_version,
+                request_id: request.request_id,
+                timestamp_ms: unix_timestamp_ms(),
+                hmac_signature: String::new(),
+                payload: LanPayload::Error {
+                    message: "unauthorized".to_string(),
+                },
+            };
+            Self::write_response(&mut stream, &response).await?;
+            return Ok(());
+        }
 
         let response = Self::process_request(request, &runtime, &shared_secret).await;
         Self::write_response(&mut stream, &response).await?;
@@ -194,6 +311,7 @@ impl LanAgentServer {
                 protocol_version: request.protocol_version,
                 request_id: request.request_id,
                 timestamp_ms: unix_timestamp_ms(),
+                hmac_signature: String::new(),
                 payload: LanPayload::Error {
                     message: "server not configured with shared secret".to_string(),
                 },
@@ -232,6 +350,7 @@ impl LanAgentServer {
             protocol_version: request.protocol_version,
             request_id: request.request_id,
             timestamp_ms: unix_timestamp_ms(),
+            hmac_signature: String::new(),
             payload: response_payload,
         }
     }
@@ -247,6 +366,12 @@ impl LanAgentServer {
         Ok(())
     }
 
+    /// Devuelve la dirección local donde el servidor está escuchando.
+    /// Útil en tests para obtener el puerto asignado automáticamente.
+    pub fn local_addr(&self) -> Result<std::net::SocketAddr, std::io::Error> {
+        self.listener.local_addr()
+    }
+
     pub async fn shutdown(&self) {
         let mut guard = self.shutdown.write().await;
         *guard = true;
@@ -260,6 +385,26 @@ fn unix_timestamp_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn is_ip_allowed(allowed_ips: &[IpAddr], allow_remote: bool, client_ip: &IpAddr) -> bool {
+    if client_ip.is_loopback() {
+        return true;
+    }
+    if allowed_ips.is_empty() {
+        return allow_remote;
+    }
+    allowed_ips.contains(client_ip)
+}
+
+/// Expuesto para integration tests — permite verificar la lógica de allowlist
+/// sin necesitar una conexión TCP real desde IPs remotas.
+pub fn ip_allowed_for_test(
+    allowed_ips: &[IpAddr],
+    allow_remote: bool,
+    client_ip: &IpAddr,
+) -> bool {
+    is_ip_allowed(allowed_ips, allow_remote, client_ip)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +415,7 @@ mod tests {
             protocol_version: 1,
             request_id: "req-1".to_string(),
             timestamp_ms: 123,
+            hmac_signature: String::new(),
             payload: LanPayload::Ping,
         };
 
@@ -285,5 +431,64 @@ mod tests {
         assert!(shared_secret_matches("abc", "abc"));
         assert!(!shared_secret_matches("abc", "abd"));
         assert!(!shared_secret_matches("", "abc"));
+    }
+
+    fn ping_payload_bytes() -> Vec<u8> {
+        encode_messagepack(&LanPayload::Ping).expect("encode ping")
+    }
+
+    #[test]
+    fn hmac_valido_acepta() {
+        let secret = "test-secret-123";
+        let payload = ping_payload_bytes();
+        let sig = sign_payload(secret, &payload).expect("sign payload");
+        assert!(verify_hmac(secret, &payload, &sig).is_ok());
+    }
+
+    #[test]
+    fn hmac_sin_firma_rechaza() {
+        let payload = ping_payload_bytes();
+        assert!(verify_hmac("secret", &payload, "").is_err());
+    }
+
+    #[test]
+    fn hmac_secret_incorrecto_rechaza() {
+        let payload = ping_payload_bytes();
+        let sig = sign_payload("other-secret", &payload).expect("sign payload");
+        assert!(verify_hmac("secret", &payload, &sig).is_err());
+    }
+
+    #[test]
+    fn hmac_payload_modificado_rechaza() {
+        let secret = "mi-secret";
+        let payload_original = ping_payload_bytes();
+        let sig = sign_payload(secret, &payload_original).expect("sign payload");
+
+        let payload_distinto = encode_messagepack(&LanPayload::Error {
+            message: "tampered".to_string(),
+        })
+        .expect("encode payload");
+        assert!(verify_hmac(secret, &payload_distinto, &sig).is_err());
+    }
+
+    #[test]
+    fn allowlist_vacia_deniega_no_loopback() {
+        let ip: IpAddr = "192.168.1.50".parse().expect("parse ip");
+        assert!(!is_ip_allowed(&[], false, &ip));
+    }
+
+    #[test]
+    fn allowlist_ip_permitida() {
+        let ip: IpAddr = "192.168.1.50".parse().expect("parse ip");
+        let list = vec![ip];
+        assert!(is_ip_allowed(&list, false, &ip));
+    }
+
+    #[test]
+    fn allowlist_ip_no_en_lista() {
+        let allowed: IpAddr = "192.168.1.50".parse().expect("parse ip");
+        let stranger: IpAddr = "192.168.1.99".parse().expect("parse ip");
+        let list = vec![allowed];
+        assert!(!is_ip_allowed(&list, true, &stranger));
     }
 }
