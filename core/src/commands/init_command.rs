@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,10 @@ pub struct ProjectInfo {
     pub detected_paths: Vec<String>,
     pub readme_content: Option<String>,
     pub validation_commands: Vec<ValidationCommand>,
+    pub guidance_files: Vec<String>,
+    pub markdown_files: Vec<String>,
+    pub roadmap_files: Vec<String>,
+    pub module_readmes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,21 +84,16 @@ impl ProjectAnalysis {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InitCommand {
+    #[serde(default)]
     pub force: bool,
+    #[serde(default)]
     pub smart: bool,
+    #[serde(default)]
     pub merge: bool,
-}
-
-impl Default for InitCommand {
-    fn default() -> Self {
-        Self {
-            force: false,
-            smart: false,
-            merge: false,
-        }
-    }
+    #[serde(default)]
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,8 +143,8 @@ pub fn run_init(project_root: &Path, command: &InitCommand) -> InitResult {
     let (health_score, critical_issues, warnings) = calculate_health_from_info(&info, &analysis);
 
     if multilink_path.exists() && !command.force && !command.merge {
-        if command.smart {
-            return InitResult {
+        return if command.smart {
+            InitResult {
                 success: true,
                 message: "MULTILINK.md ya existe. Usa --force para sobrescribir o --merge para actualizar.".to_string(),
                 file_path: Some(multilink_path),
@@ -155,9 +154,9 @@ pub fn run_init(project_root: &Path, command: &InitCommand) -> InitResult {
                 health_score: Some(health_score),
                 critical_issues: Some(critical_issues),
                 warnings: Some(warnings),
-            };
+            }
         } else {
-            return InitResult {
+            InitResult {
                 success: false,
                 message: "MULTILINK.md ya existe. Usa /init --force para sobrescribir.".to_string(),
                 file_path: Some(multilink_path),
@@ -167,8 +166,8 @@ pub fn run_init(project_root: &Path, command: &InitCommand) -> InitResult {
                 health_score: Some(health_score),
                 critical_issues: Some(critical_issues),
                 warnings: Some(warnings),
-            };
-        }
+            }
+        };
     }
 
     if command.smart {
@@ -185,7 +184,7 @@ pub fn run_init(project_root: &Path, command: &InitCommand) -> InitResult {
         };
     }
 
-    let content = generate_multilink_md(&info, &analysis, project_root);
+    let content = generate_multilink_md(&info, &analysis, project_root, command.strict);
 
     if command.merge && multilink_path.exists() {
         match merge_multilink(&multilink_path, &content) {
@@ -315,6 +314,10 @@ pub fn scan_project(project_root: &Path) -> ProjectInfo {
         detected_paths: Vec::new(),
         readme_content: None,
         validation_commands: Vec::new(),
+        guidance_files: Vec::new(),
+        markdown_files: Vec::new(),
+        roadmap_files: Vec::new(),
+        module_readmes: Vec::new(),
     };
 
     info.name = detect_project_name(project_root);
@@ -327,13 +330,24 @@ pub fn scan_project(project_root: &Path) -> ProjectInfo {
     detect_linting(project_root, &mut info);
 
     info.validation_commands = detect_validation_commands(project_root, &info);
+    info.guidance_files = detect_guidance_files(project_root);
+
+    let (markdown_files, roadmap_files, module_readmes) = detect_markdown_files(project_root);
+    info.markdown_files = markdown_files;
+    info.roadmap_files = roadmap_files;
+    info.module_readmes = module_readmes;
+    if !info.markdown_files.is_empty() {
+        info.has_docs = true;
+    }
 
     info.project_type = infer_project_type(&info);
     info.complexity = infer_complexity(project_root);
 
-    if let Ok(readme) = fs::read_to_string(project_root.join("README.md")) {
-        let first_lines: String = readme.lines().take(10).collect::<Vec<_>>().join("\n");
-        info.readme_content = Some(first_lines);
+    if let Some(readme_path) = find_readme_path(project_root) {
+        if let Ok(readme) = fs::read_to_string(readme_path) {
+            let first_lines: String = readme.lines().take(10).collect::<Vec<_>>().join("\n");
+            info.readme_content = Some(first_lines);
+        }
     }
 
     info
@@ -442,23 +456,259 @@ fn detect_stack_files(root: &Path, info: &mut ProjectInfo) {
     }
 
     let entries = walkdir::WalkDir::new(root)
-        .max_depth(3)
+        .max_depth(8)
         .into_iter()
+        .filter_entry(|e| !is_ignored_path(e.path()))
         .filter_map(|e| e.ok());
+
+    let mut has_html = false;
+    let mut has_css = false;
+    let mut has_js = false;
+    let mut has_ts = false;
+    let mut has_csharp = false;
+    let mut has_prisma = false;
+    let mut has_sql = false;
+    let mut web_signal_outside_flutter_web_dir = false;
+
+    let is_flutter_project = root.join("pubspec.yaml").exists();
 
     for entry in entries {
         if let Some(name) = entry.file_name().to_str() {
-            if name.ends_with(".qml") {
+            let lower = name.to_ascii_lowercase();
+
+            if lower.ends_with(".qml") {
                 info.stack.insert("Qt/QML".to_string());
             }
-            if name.ends_with(".csproj") {
+            if lower.ends_with(".csproj") {
                 info.stack.insert("C#".to_string());
+                has_csharp = true;
             }
-            if name.ends_with(".cs") && name.to_lowercase().contains("xamarin") {
+            if lower.ends_with(".cs") {
+                has_csharp = true;
+            }
+            if lower.ends_with(".cs") && lower.contains("xamarin") {
                 info.stack.insert("Xamarin".to_string());
+            }
+            if lower.ends_with(".prisma") || lower == "schema.prisma" {
+                has_prisma = true;
+            }
+            if lower.ends_with(".sql") {
+                has_sql = true;
+            }
+            let is_flutter_scaffold_web =
+                is_flutter_project && is_flutter_web_scaffold_file(root, entry.path());
+
+            if (lower.ends_with(".html") || lower.ends_with(".htm")) && !is_flutter_scaffold_web {
+                has_html = true;
+                if is_flutter_project && !is_under_directory(root, entry.path(), "web") {
+                    web_signal_outside_flutter_web_dir = true;
+                }
+            }
+            if lower.ends_with(".css") && !is_flutter_scaffold_web {
+                has_css = true;
+                if is_flutter_project && !is_under_directory(root, entry.path(), "web") {
+                    web_signal_outside_flutter_web_dir = true;
+                }
+            }
+            if (lower.ends_with(".js") || lower.ends_with(".jsx")) && !is_flutter_scaffold_web {
+                has_js = true;
+                if is_flutter_project && !is_under_directory(root, entry.path(), "web") {
+                    web_signal_outside_flutter_web_dir = true;
+                }
+            }
+            if (lower.ends_with(".ts") || lower.ends_with(".tsx")) && !is_flutter_scaffold_web {
+                has_ts = true;
+                if is_flutter_project && !is_under_directory(root, entry.path(), "web") {
+                    web_signal_outside_flutter_web_dir = true;
+                }
             }
         }
     }
+
+    if is_flutter_project && !web_signal_outside_flutter_web_dir {
+        has_html = false;
+        has_css = false;
+        has_js = false;
+        has_ts = false;
+    }
+
+    if has_html || has_css || has_js || has_ts {
+        let mut web_stack = Vec::new();
+        if has_html {
+            web_stack.push("HTML");
+        }
+        if has_css {
+            web_stack.push("CSS");
+        }
+        if has_js {
+            web_stack.push("JavaScript");
+        }
+        if has_ts {
+            web_stack.push("TypeScript");
+        }
+        for tech in web_stack {
+            info.stack.insert(tech.to_string());
+        }
+    }
+
+    if has_csharp {
+        info.stack.insert("C#".to_string());
+    }
+    if has_prisma {
+        info.stack.insert("Prisma".to_string());
+    }
+    if has_sql {
+        info.stack.insert("SQL".to_string());
+    }
+
+    let package_json = root.join("package.json");
+    if package_json.exists()
+        && fs::read_to_string(&package_json)
+            .map(|content| {
+                let lower = content.to_ascii_lowercase();
+                lower.contains("\"react\"") || lower.contains("\"react-dom\"")
+            })
+            .unwrap_or(false)
+    {
+        info.stack.insert("React".to_string());
+    }
+}
+
+fn is_under_directory(root: &Path, path: &Path, directory: &str) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .map(|component| match component {
+            Component::Normal(name) => name
+                .to_str()
+                .map(|s| s.eq_ignore_ascii_case(directory))
+                .unwrap_or(false),
+            _ => false,
+        })
+        .unwrap_or(false)
+}
+
+fn is_flutter_web_scaffold_file(root: &Path, path: &Path) -> bool {
+    if !is_under_directory(root, path, "web") {
+        return false;
+    }
+
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+
+    matches!(
+        name,
+        "index.html" | "manifest.json" | "flutter_service_worker.js" | "favicon.png"
+    )
+}
+
+fn detect_guidance_files(root: &Path) -> Vec<String> {
+    let candidates = [
+        "AGENTS.md",
+        "agents.md",
+        "GEMINI.md",
+        "gemini.md",
+        "CLAUDE.md",
+        "claude.md",
+        "COPILOT.md",
+        "copilot.md",
+        ".cursorrules",
+        ".github/copilot-instructions.md",
+    ];
+
+    let mut files = candidates
+        .iter()
+        .filter_map(|relative| {
+            let path = root.join(relative);
+            if path.is_file() {
+                Some(relative.to_string())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let cursor_rules_dir = root.join(".cursor").join("rules");
+    if cursor_rules_dir.is_dir() {
+        let entries = walkdir::WalkDir::new(&cursor_rules_dir)
+            .max_depth(2)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter_map(|e| {
+                e.path()
+                    .strip_prefix(root)
+                    .ok()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+            })
+            .take(10)
+            .collect::<Vec<_>>();
+
+        if entries.is_empty() {
+            files.push(".cursor/rules/".to_string());
+        } else {
+            files.extend(entries);
+        }
+    }
+
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn detect_markdown_files(root: &Path) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut markdown_files = Vec::new();
+    let mut roadmap_files = Vec::new();
+    let mut module_readmes = Vec::new();
+
+    let entries = walkdir::WalkDir::new(root)
+        .max_depth(8)
+        .into_iter()
+        .filter_entry(|e| !is_ignored_path(e.path()))
+        .filter_map(|e| e.ok());
+
+    for entry in entries {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+
+        if !ext.eq_ignore_ascii_case("md") {
+            continue;
+        }
+
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+
+        let rel = relative.to_string_lossy().replace('\\', "/");
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        markdown_files.push(rel.clone());
+
+        if file_name.contains("roadmap") {
+            roadmap_files.push(rel.clone());
+        }
+
+        if file_name == "readme.md" && path.parent().map(|p| p != root).unwrap_or(false) {
+            module_readmes.push(rel);
+        }
+    }
+
+    markdown_files.sort();
+    roadmap_files.sort();
+    module_readmes.sort();
+
+    (markdown_files, roadmap_files, module_readmes)
 }
 
 fn detect_test_files(root: &Path, info: &mut ProjectInfo) {
@@ -471,10 +721,10 @@ fn detect_test_files(root: &Path, info: &mut ProjectInfo) {
         }
     }
 
-    if root.join("Cargo.toml").exists() {
-        if root.join("tests").is_dir() || root.join("src/tests").is_dir() {
-            info.has_tests = true;
-        }
+    if root.join("Cargo.toml").exists()
+        && (root.join("tests").is_dir() || root.join("src/tests").is_dir())
+    {
+        info.has_tests = true;
     }
 
     if let Ok(content) = fs::read_to_string(root.join("package.json")) {
@@ -485,7 +735,7 @@ fn detect_test_files(root: &Path, info: &mut ProjectInfo) {
 }
 
 fn detect_docs(root: &Path, info: &mut ProjectInfo) {
-    if root.join("README.md").exists() || root.join("readme.md").exists() {
+    if find_readme_path(root).is_some() {
         info.has_docs = true;
     }
     if root.join("docs").is_dir() {
@@ -513,6 +763,7 @@ fn detect_linting(root: &Path, info: &mut ProjectInfo) {
         "prettier.config.js",
         "tslint.json",
         ".editorconfig",
+        "analysis_options.yaml",
     ];
 
     for file in linting_files {
@@ -623,6 +874,12 @@ fn infer_project_type(info: &ProjectInfo) -> String {
         }
         return "fullstack web app".to_string();
     }
+    if info.stack.contains("HTML")
+        || info.stack.contains("CSS")
+        || info.stack.contains("JavaScript")
+    {
+        return "web frontend".to_string();
+    }
     if info.stack.contains("Python") {
         return "backend API".to_string();
     }
@@ -655,6 +912,7 @@ fn count_source_files(root: &Path) -> usize {
     let entries = walkdir::WalkDir::new(root)
         .max_depth(5)
         .into_iter()
+        .filter_entry(|e| !is_ignored_path(e.path()))
         .filter_map(|e| e.ok());
 
     entries
@@ -669,10 +927,111 @@ fn count_source_files(root: &Path) -> usize {
         .count()
 }
 
+fn is_ignored_path(path: &Path) -> bool {
+    const IGNORED_DIRS: [&str; 14] = [
+        ".git",
+        "node_modules",
+        "target",
+        "build",
+        "dist",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".idea",
+        ".vscode",
+        "coverage",
+        "vendor",
+        "out",
+        "bin",
+    ];
+
+    path.components().any(|component| {
+        let Component::Normal(name) = component else {
+            return false;
+        };
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        IGNORED_DIRS
+            .iter()
+            .any(|ignored| name.eq_ignore_ascii_case(ignored))
+    })
+}
+
+fn format_markdown_paths(paths: &[String], limit: usize, empty_message: &str) -> String {
+    if paths.is_empty() {
+        return format!("- ({})", empty_message);
+    }
+
+    let mut rows = paths
+        .iter()
+        .take(limit)
+        .map(|p| format!("- `{}`", p))
+        .collect::<Vec<_>>();
+
+    if paths.len() > limit {
+        rows.push(format!("- ... y {} archivos más", paths.len() - limit));
+    }
+
+    rows.join("\n")
+}
+
+fn build_markdown_highlights(
+    project_root: &Path,
+    markdown_files: &[String],
+    max_files: usize,
+    max_highlights: usize,
+) -> Vec<(String, String)> {
+    let mut highlights = Vec::new();
+
+    for relative in markdown_files.iter().take(max_files) {
+        let path = project_root.join(relative);
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+
+        if let Some(line) = extract_first_meaningful_markdown_line(&content) {
+            highlights.push((relative.clone(), line));
+        }
+
+        if highlights.len() >= max_highlights {
+            break;
+        }
+    }
+
+    highlights
+}
+
+fn extract_first_meaningful_markdown_line(content: &str) -> Option<String> {
+    let mut in_code_fence = false;
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.starts_with("```") {
+            in_code_fence = !in_code_fence;
+            continue;
+        }
+        if in_code_fence || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let cleaned = line
+            .trim_start_matches(['-', '*', '>'])
+            .trim()
+            .replace('`', "");
+        if cleaned.len() >= 24 {
+            return Some(cleaned);
+        }
+    }
+
+    None
+}
+
 pub fn generate_multilink_md(
     info: &ProjectInfo,
     analysis: &ProjectAnalysis,
     project_root: &Path,
+    strict: bool,
 ) -> String {
     let name = &info.name;
     let project_type = &info.project_type;
@@ -690,6 +1049,8 @@ pub fn generate_multilink_md(
         .collect::<Vec<_>>()
         .join("\n");
 
+    let markdown_highlights = build_markdown_highlights(project_root, &info.markdown_files, 8, 4);
+
     let overview = info
         .readme_content
         .as_ref()
@@ -700,14 +1061,58 @@ pub fn generate_multilink_md(
                 .collect::<Vec<_>>()
                 .join("\n")
         })
-        .unwrap_or_else(|| format!("{} project with {} stack.", project_type, stack_str));
+        .or_else(|| {
+            if markdown_highlights.is_empty() {
+                None
+            } else {
+                Some(
+                    markdown_highlights
+                        .iter()
+                        .take(2)
+                        .map(|(_, line)| line.clone())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            }
+        })
+        .unwrap_or_else(|| {
+            if strict {
+                "No se detectó resumen desde archivos .md".to_string()
+            } else {
+                format!("{} project with {} stack.", project_type, stack_str)
+            }
+        });
 
     let validation_str = if info.validation_commands.is_empty() {
-        "- (No standard validation commands detected)".to_string()
+        if strict {
+            "- (No se detectaron comandos de validación)".to_string()
+        } else {
+            "- (No standard validation commands detected)".to_string()
+        }
     } else {
         info.validation_commands
             .iter()
             .map(|v| format!("- `{}`: {}", v.name, v.command))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let runtime_commands = generate_runtime_commands(info);
+    let quick_reference = generate_quick_reference(info);
+    let architecture_boundaries = generate_architecture_boundaries(info);
+    let roadmaps_str =
+        format_markdown_paths(&info.roadmap_files, 8, "No se detectaron roadmaps en docs/");
+    let module_docs_str = format_markdown_paths(
+        &info.module_readmes,
+        10,
+        "No se detectaron README.md por módulo",
+    );
+    let markdown_highlights_str = if markdown_highlights.is_empty() {
+        "- (No se detectaron highlights en documentación markdown)".to_string()
+    } else {
+        markdown_highlights
+            .iter()
+            .map(|(path, line)| format!("- `{}`: {}", path, line))
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -739,8 +1144,22 @@ pub fn generate_multilink_md(
         "complexity": info.complexity,
         "paths": info.detected_paths,
         "validation_commands": info.validation_commands,
+        "guidance_files": info.guidance_files,
+        "roadmap_files": info.roadmap_files,
+        "module_readmes": info.module_readmes,
+        "markdown_files": info.markdown_files,
     })
     .to_string();
+
+    let guidance_str = if info.guidance_files.is_empty() {
+        "- (No se detectaron archivos de guía de agentes)".to_string()
+    } else {
+        info.guidance_files
+            .iter()
+            .map(|p| format!("- `{}`", p))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
     format!(
         r#"# {name} — Project Definition
@@ -787,10 +1206,15 @@ pub fn generate_multilink_md(
 
 ## 🗺️ Active Roadmaps
 
-Lee los archivos en `docs/` para ver la planificación:
+{roadmaps}
 
-- `docs/ROADMAP_*.md` — Roadmap general
-- `docs/*_ROADMAP.md` — Roadmaps específicos
+### Module Docs
+
+{module_docs}
+
+### Markdown Highlights
+
+{markdown_highlights}
 
 ---
 
@@ -805,6 +1229,10 @@ Lee los archivos en `docs/` para ver la planificación:
 ### Comandos de Validación
 
 {validation}
+
+### Agent Guidance Files
+
+{guidance_files}
 
 ---
 
@@ -821,30 +1249,17 @@ Lee los archivos en `docs/` para ver la planificación:
 
 ### Runtime Commands
 
-- **Build (core):** `cargo build --manifest-path core/Cargo.toml`
-- **Test (core):** `cargo test --manifest-path core/Cargo.toml`
-- **Lint:** `cargo clippy --manifest-path core/Cargo.toml -- -D warnings`
-- **Format:** `cargo fmt --all --manifest-path core/Cargo.toml`
+{runtime_commands}
 
 ### Quick Reference
 
 ```bash
-# Run tests
-cargo test --manifest-path core/Cargo.toml
-
-# Build GUI
-cmake -S gui -B build/gui -DCMAKE_BUILD_TYPE=Release
-cmake --build build/gui --config Release
-
-# Run app
-./build/gui/multilink_gui
+{quick_reference}
 ```
 
 ### Architecture Boundaries
 
-- `core/` → Runtime, routing, providers, persistence, auth
-- `gui/` → Presentation and user interaction
-- C++/Qt shim stays thin; business logic belongs in Rust core
+{architecture_boundaries}
 
 ---
 
@@ -917,9 +1332,16 @@ Puedes editar la sección `custom_notes` para agregar notas específicas del pro
         has_docker = if info.has_docker { "✅" } else { "❌" },
         has_linting = if info.has_linting { "✅" } else { "❌" },
         validation = validation_str,
+        guidance_files = guidance_str,
         issues = issues_str,
         suggestions = suggestions_str,
         overview = overview,
+        runtime_commands = runtime_commands,
+        quick_reference = quick_reference,
+        architecture_boundaries = architecture_boundaries,
+        roadmaps = roadmaps_str,
+        module_docs = module_docs_str,
+        markdown_highlights = markdown_highlights_str,
         machine_json = machine_readable,
         date = chrono::Local::now().format("%Y-%m-%d"),
         tags = info
@@ -929,6 +1351,189 @@ Puedes editar la sección `custom_notes` para agregar notas específicas del pro
             .collect::<Vec<_>>()
             .join(" ")
     )
+}
+
+fn find_readme_path(project_root: &Path) -> Option<PathBuf> {
+    let root_canonical = project_root.canonicalize().ok();
+    ["README.md", "readme.md", "Readme.md"]
+        .iter()
+        .map(|name| project_root.join(name))
+        .find(|candidate| {
+            if !candidate.is_file() {
+                return false;
+            }
+
+            if let (Some(root), Ok(candidate_canonical)) =
+                (root_canonical.as_ref(), candidate.canonicalize())
+            {
+                return candidate_canonical.starts_with(root);
+            }
+
+            true
+        })
+}
+
+fn generate_runtime_commands(info: &ProjectInfo) -> String {
+    let mut commands: Vec<String> = Vec::new();
+
+    if info.stack.contains("Rust") {
+        commands.push("- **Build:** `cargo build`".to_string());
+        commands.push("- **Test:** `cargo test`".to_string());
+        commands.push("- **Single test:** `cargo test <test_name_substring>`".to_string());
+        commands.push("- **Lint:** `cargo clippy -- -D warnings`".to_string());
+        commands.push("- **Format:** `cargo fmt --all`".to_string());
+    }
+
+    if info.stack.contains("Node.js") {
+        commands.push("- **Install:** `npm install`".to_string());
+        commands.push("- **Test:** `npm test`".to_string());
+        commands.push("- **Single test:** `npm test -- <path-or-pattern>`".to_string());
+        commands.push("- **Build:** `npm run build`".to_string());
+    }
+
+    if info.stack.contains("TypeScript") {
+        commands.push("- **Typecheck:** `npx tsc --noEmit`".to_string());
+    }
+
+    if info.stack.contains("React") {
+        commands.push("- **Dev server:** `npm run dev`".to_string());
+        commands.push("- **React test (single):** `npm test -- <component-or-spec>`".to_string());
+    }
+
+    if info.stack.contains("Python") {
+        commands.push("- **Install:** `python -m pip install -r requirements.txt`".to_string());
+        commands.push("- **Test:** `pytest`".to_string());
+        commands.push("- **Single test:** `pytest path/to/test_file.py::test_name`".to_string());
+    }
+
+    if info.stack.contains("C++") {
+        commands.push("- **Configure:** `cmake -S . -B build`".to_string());
+        commands.push("- **Build:** `cmake --build build`".to_string());
+    }
+
+    if info.stack.contains("Go") {
+        commands.push("- **Build:** `go build ./...`".to_string());
+        commands.push("- **Test:** `go test ./...`".to_string());
+        commands.push("- **Single test:** `go test ./path/to/pkg -run TestName`".to_string());
+    }
+
+    if info.stack.contains("C#") {
+        commands.push("- **Restore:** `dotnet restore`".to_string());
+        commands.push("- **Build:** `dotnet build`".to_string());
+        commands.push("- **Test:** `dotnet test`".to_string());
+        commands.push(
+            "- **Single test:** `dotnet test --filter FullyQualifiedName~TestName`".to_string(),
+        );
+    }
+
+    if info.stack.contains("Prisma") {
+        commands.push("- **Prisma validate:** `npx prisma validate`".to_string());
+        commands.push("- **Prisma migrate status:** `npx prisma migrate status`".to_string());
+        commands.push("- **Prisma migrate dev:** `npx prisma migrate dev`".to_string());
+    }
+
+    if info.stack.contains("Flutter") {
+        commands.push("- **Install:** `flutter pub get`".to_string());
+        commands.push("- **Analyze:** `flutter analyze`".to_string());
+        commands.push("- **Test:** `flutter test`".to_string());
+        commands.push("- **Single file test:** `flutter test test/widget_test.dart`".to_string());
+        commands
+            .push("- **Single named test:** `flutter test --plain-name \"test name\"`".to_string());
+    }
+
+    if commands.is_empty() {
+        "- (No runtime commands detected)".to_string()
+    } else {
+        commands.join("\n")
+    }
+}
+
+fn generate_quick_reference(info: &ProjectInfo) -> String {
+    let mut commands = Vec::new();
+
+    if info.stack.contains("Rust") {
+        commands.push("cargo build");
+        commands.push("cargo test");
+        commands.push("cargo test <test_name_substring>");
+    }
+    if info.stack.contains("Node.js") {
+        commands.push("npm install");
+        commands.push("npm run build");
+        commands.push("npm test -- <path-or-pattern>");
+    }
+    if info.stack.contains("TypeScript") {
+        commands.push("npx tsc --noEmit");
+    }
+    if info.stack.contains("React") {
+        commands.push("npm run dev");
+    }
+    if info.stack.contains("Python") {
+        commands.push("python -m pip install -r requirements.txt");
+        commands.push("pytest");
+        commands.push("pytest path/to/test_file.py::test_name");
+    }
+    if info.stack.contains("C++") {
+        commands.push("cmake -S . -B build");
+        commands.push("cmake --build build");
+    }
+    if info.stack.contains("Go") {
+        commands.push("go test ./...");
+        commands.push("go test ./path/to/pkg -run TestName");
+    }
+    if info.stack.contains("C#") {
+        commands.push("dotnet test");
+        commands.push("dotnet test --filter FullyQualifiedName~TestName");
+    }
+    if info.stack.contains("Prisma") {
+        commands.push("npx prisma validate");
+        commands.push("npx prisma migrate status");
+    }
+    if info.stack.contains("Flutter") {
+        commands.push("flutter pub get");
+        commands.push("flutter test");
+        commands.push("flutter test test/widget_test.dart");
+        commands.push("flutter test --plain-name \"test name\"");
+    }
+
+    if commands.is_empty() {
+        "# No quick reference commands detected".to_string()
+    } else {
+        commands.join("\n")
+    }
+}
+
+fn generate_architecture_boundaries(info: &ProjectInfo) -> String {
+    let mut boundaries = Vec::new();
+
+    if info
+        .detected_paths
+        .iter()
+        .any(|p| p == "core" || p == "lib" || p == "shared")
+    {
+        boundaries.push("- `core/` o `lib/` → lógica de dominio y componentes reutilizables");
+    }
+
+    if info
+        .detected_paths
+        .iter()
+        .any(|p| p == "gui" || p == "frontend" || p == "app")
+    {
+        boundaries.push("- `gui/`, `frontend/` o `app/` → capa de UI e interacción");
+    }
+
+    if info
+        .detected_paths
+        .iter()
+        .any(|p| p == "backend" || p == "api")
+    {
+        boundaries.push("- `backend/` o `api/` → servicios, endpoints e integración externa");
+    }
+
+    if boundaries.is_empty() {
+        "- (No se detectaron límites de arquitectura explícitos)".to_string()
+    } else {
+        boundaries.join("\n")
+    }
 }
 
 fn calculate_health_from_info(info: &ProjectInfo, analysis: &ProjectAnalysis) -> (u8, u8, u8) {
@@ -969,6 +1574,8 @@ fn calculate_health_from_info(info: &ProjectInfo, analysis: &ProjectAnalysis) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::iter::FromIterator;
+    use tempfile::tempdir;
 
     #[test]
     fn test_project_analysis() {
@@ -984,10 +1591,112 @@ mod tests {
             detected_paths: vec![],
             readme_content: None,
             validation_commands: vec![],
+            guidance_files: vec![],
+            markdown_files: vec![],
+            roadmap_files: vec![],
+            module_readmes: vec![],
         };
 
         let analysis = ProjectAnalysis::analyze(&info);
         assert!(!analysis.issues.is_empty());
         assert!(analysis.suggestions.len() > 2);
+    }
+
+    #[test]
+    fn test_generate_multilink_md_runtime_commands_are_dynamic() {
+        let info = ProjectInfo {
+            name: "fitbalance-backend".to_string(),
+            stack: HashSet::from_iter(["Node.js".to_string()]),
+            project_type: "backend API".to_string(),
+            has_tests: true,
+            has_docs: true,
+            has_docker: false,
+            has_linting: true,
+            complexity: "small".to_string(),
+            detected_paths: vec!["backend".to_string(), "api".to_string()],
+            readme_content: Some("API backend para una app de nutricion".to_string()),
+            validation_commands: vec![ValidationCommand {
+                name: "Build".to_string(),
+                command: "npm run build".to_string(),
+            }],
+            guidance_files: vec!["AGENTS.md".to_string()],
+            markdown_files: vec!["README.md".to_string()],
+            roadmap_files: vec![],
+            module_readmes: vec![],
+        };
+
+        let analysis = ProjectAnalysis::analyze(&info);
+        let content = generate_multilink_md(&info, &analysis, Path::new("."), false);
+
+        assert!(content.contains("npm run build"));
+        assert!(!content.contains("cargo build --manifest-path core/Cargo.toml"));
+        assert!(!content.contains("./build/gui/multilink_gui"));
+    }
+
+    #[test]
+    fn test_generate_multilink_md_strict_does_not_use_generic_overview_fallback() {
+        let info = ProjectInfo {
+            name: "sample".to_string(),
+            stack: HashSet::new(),
+            project_type: "software project".to_string(),
+            has_tests: false,
+            has_docs: false,
+            has_docker: false,
+            has_linting: false,
+            complexity: "prototype".to_string(),
+            detected_paths: vec![],
+            readme_content: None,
+            validation_commands: vec![],
+            guidance_files: vec![],
+            markdown_files: vec![],
+            roadmap_files: vec![],
+            module_readmes: vec![],
+        };
+
+        let analysis = ProjectAnalysis::analyze(&info);
+        let content = generate_multilink_md(&info, &analysis, Path::new("."), true);
+
+        assert!(content.contains("No se detectó resumen desde archivos .md"));
+        assert!(!content.contains("project with"));
+    }
+
+    #[test]
+    fn flutter_project_ignores_default_web_scaffold_html() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+
+        fs::write(
+            root.join("pubspec.yaml"),
+            "name: study_medical\nenvironment:\n  sdk: '>=3.0.0 <4.0.0'\n",
+        )
+        .expect("write pubspec");
+        fs::create_dir_all(root.join("lib")).expect("create lib");
+        fs::write(root.join("lib/main.dart"), "void main() {}\n").expect("write dart");
+        fs::create_dir_all(root.join("web")).expect("create web");
+        fs::write(root.join("web/index.html"), "<html></html>\n").expect("write index html");
+
+        let info = scan_project(root);
+        assert!(info.stack.contains("Flutter"));
+        assert!(!info.stack.contains("HTML"));
+    }
+
+    #[test]
+    fn flutter_project_detects_html_when_outside_web_scaffold() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path();
+
+        fs::write(
+            root.join("pubspec.yaml"),
+            "name: study_medical\nenvironment:\n  sdk: '>=3.0.0 <4.0.0'\n",
+        )
+        .expect("write pubspec");
+        fs::create_dir_all(root.join("lib")).expect("create lib");
+        fs::write(root.join("lib/main.dart"), "void main() {}\n").expect("write dart");
+        fs::create_dir_all(root.join("docs")).expect("create docs");
+        fs::write(root.join("docs/landing.html"), "<html></html>\n").expect("write html");
+
+        let info = scan_project(root);
+        assert!(info.stack.contains("Flutter"));
+        assert!(info.stack.contains("HTML"));
     }
 }
