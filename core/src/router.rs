@@ -181,10 +181,7 @@ impl ProviderRouter {
                     }
                     _ = interval_timer.tick() => {
                         for (provider_id, provider) in &providers {
-                            let is_healthy = match provider.health_check().await {
-                                Ok(healthy) => healthy,
-                                Err(_) => false,
-                            };
+                            let is_healthy = provider.health_check().await.unwrap_or_default();
 
                             let mut states = health_states.write().await;
                             if let Some(state) = states.get_mut(provider_id) {
@@ -387,15 +384,13 @@ impl ProviderRouter {
 }
 
 fn is_retryable_error(error: &LLMError) -> bool {
-    match error {
-        LLMError::Timeout => true,
-        LLMError::RateLimited => true,
-        LLMError::Http(_) => true,
-        _ => false,
-    }
+    matches!(
+        error,
+        LLMError::Timeout | LLMError::RateLimited | LLMError::Http(_)
+    )
 }
 
 fn calculate_backoff(attempt: u32, initial_ms: u64, max_ms: u64) -> u64 {
-    let backoff = initial_ms * 2u64.pow(attempt.saturating_sub(1) as u32);
+    let backoff = initial_ms * 2u64.pow(attempt.saturating_sub(1));
     backoff.min(max_ms)
 }

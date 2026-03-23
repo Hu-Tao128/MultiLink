@@ -135,22 +135,12 @@ impl ReleaseCriteria {
     }
 }
 
+#[derive(Default)]
 pub struct ReleaseChecklist {
     pub core_tests_pass: bool,
     pub gui_builds: Vec<String>,
     pub benchmarks_pass: bool,
     pub documentation_updated: bool,
-}
-
-impl Default for ReleaseChecklist {
-    fn default() -> Self {
-        Self {
-            core_tests_pass: false,
-            gui_builds: Vec::new(),
-            benchmarks_pass: false,
-            documentation_updated: false,
-        }
-    }
 }
 
 impl ReleaseChecklist {

@@ -155,9 +155,8 @@ impl OllamaProvider {
         let supports_embedding = capabilities_raw.contains(&"embedding".to_string());
 
         let supports_vision = capabilities_raw.contains(&"vision".to_string())
-            || model_info.map_or(false, |m| {
-                m.keys().any(|k| k.contains("vision") || k.contains("mm."))
-            });
+            || model_info
+                .is_some_and(|m| m.keys().any(|k| k.contains("vision") || k.contains("mm.")));
 
         let parameter_count = model_info.and_then(extract_parameter_count);
         let quantization_level = model_info.and_then(extract_quantization_level);
@@ -638,11 +637,7 @@ impl LLMProvider for OllamaProvider {
                                             LLMError::Http(error_msg)
                                         };
 
-                                        if is_retryable && attempt_num < stream_retries {
-                                            let _ = tx.send(Err(enhanced_error)).await;
-                                        } else {
-                                            let _ = tx.send(Err(enhanced_error)).await;
-                                        }
+                                        let _ = tx.send(Err(enhanced_error)).await;
                                         return;
                                     }
                                     None => {

@@ -86,13 +86,13 @@ impl ExecutionDispatcher {
             Ok(stream) => {
                 self.record_status(primary_key.clone(), true, started.elapsed().as_millis(), 1)
                     .await;
-                return Ok(ExecutionDispatchResult {
+                Ok(ExecutionDispatchResult {
                     stream,
                     server_used: primary_key,
                     fallback_used: false,
                     retries: 0,
                     latency_ms: started.elapsed().as_millis(),
-                });
+                })
             }
             Err(primary_err) => {
                 self.record_status(primary_key.clone(), false, started.elapsed().as_millis(), 0)
