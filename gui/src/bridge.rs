@@ -67,7 +67,7 @@ impl Default for ChatBridge {
                             )
                         }),
                 );
-                let _ = chat_runtime.load_sessions_from_disk().await;
+                let _ = chat_runtime.start().await;
                 chat_runtime
             })
         } else {
