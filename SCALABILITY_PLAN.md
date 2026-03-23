@@ -54,11 +54,11 @@ El proyecto MultiLink presenta una arquitectura bien diseñada con separación c
   - `docker-compose.yml` - configuración para desarrollo y producción
 - **Estado:** Resuelto
 
-### DT-03: Modelo de embeddings por defecto no disponible ⚪ Pendiente
+### DT-03: Modelo de embeddings por defecto no disponible ✅ RESUELTO
 - **Área:** Backend
 - **Descripción:** El config especifica `embed_model = "embeddinggemma"` que no existe por defecto en Ollama.
 - **Esfuerzo estimado:** 1 hora
-- **Estado:** Pendiente (baja prioridad - solo afecta si embeddings están habilitados)
+- **Estado:** Resuelto (auto-detección activa y `embed_model` vacío por defecto)
 
 ---
 
