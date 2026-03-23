@@ -109,6 +109,11 @@ Debug context behavior:
 MULTILINK_DEBUG_CONTEXT=1 ./build/gui/multilink_gui
 ```
 
+Smoke test (headless):
+```bash
+QT_QPA_PLATFORM=offscreen timeout 8s ./build/gui/multilink_gui
+```
+
 ## Lint/Format Commands
 
 ### Rust formatting
@@ -181,7 +186,8 @@ If linting is noisy due to toolchain/platform differences, document it in PR not
 
 For core behavior changes, run:
 1. `cargo test --manifest-path core/Cargo.toml`
-2. `cmake --build build/gui --config Release`
+2. `cargo clippy --manifest-path core/Cargo.toml -- -D warnings`
+3. `cmake --build build/gui --config Release`
 
 For GUI bridge changes, also smoke-run app:
 ```bash
@@ -194,11 +200,53 @@ For config/routing changes, manually verify:
 - Model list refresh from configured servers
 - At least one prompt round-trip
 
+For LAN Agent changes:
+- Run `cargo test --manifest-path core/Cargo.toml --test lan_agent_tests`
+- Manually test TCP connectivity from another device on the LAN
+- Verify HMAC signature rejection with wrong secret
+- Verify `allow_remote=false` denies non-loopback IPs with empty allowlist
+
+## Manual GUI Testing Checklist
+
+After building, test these features manually:
+
+### First Run
+- [ ] Config auto-created with LAN secret printed to stderr
+- [ ] No crash on startup
+- [ ] Ollama auto-detection works
+
+### Settings → Servers
+- [ ] Add server button works
+- [ ] "Probar conexion" shows correct OK/error
+- [ ] Save persists after restart
+- [ ] Provider dropdown shows: ollama, gemini, codex
+
+### Chat
+- [ ] Send prompt → get response from Ollama
+- [ ] New session button works
+- [ ] Delete session works
+- [ ] Model selector changes active model
+
+### LAN Agent (multi-device)
+- [ ] `/doctor --security` shows LAN secret
+- [ ] Remote device can connect with correct HMAC secret
+- [ ] Remote device rejected with wrong secret
+
+### Known GUI Gaps (not yet wired)
+- Provider OAuth token UI not implemented (Gemini/Codex tokens via file only)
+
 ## Commit Guidance
 
 - Keep commits scoped by concern: `feat(core): ...`, `fix(gui): ...`, `docs: ...`
 - Do not mix major refractors with unrelated docs churn
 - Include tests when changing runtime, config, routing, or retrieval behavior
+
+## Agent Working Notes
+
+- Read current diffs before editing; do not revert unrelated user changes
+- Prefer non-destructive fixes and incremental refactors
+- If a CI/platform issue appears (Qt version differences), add compatibility fallback
+- When uncertain, choose the option that preserves runtime correctness first
 
 ## Agent Working Notes
 
