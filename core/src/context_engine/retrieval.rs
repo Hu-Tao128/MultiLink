@@ -27,6 +27,7 @@ pub struct RetrievalResult {
     pub budget_used: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn hybrid_retrieval(
     prompt: &str,
     chunks: &[SemanticChunk],
@@ -148,7 +149,7 @@ pub async fn hybrid_retrieval(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let top_k = (token_budget / 150).max(2).min(24);
+    let top_k = (token_budget / 150).clamp(2, 24);
     let ranked_limited: Vec<RankedChunk> = if let Some(active_filters) = filters.as_ref() {
         if active_filters.languages.len() > 1 {
             partitioned_merge_by_language(ranked, top_k)

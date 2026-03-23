@@ -21,6 +21,7 @@ pub struct EmbeddingBlendResult {
     pub model: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn blend_embedding_scores(
     prompt: &str,
     candidates: &[SemanticChunk],
@@ -33,6 +34,18 @@ pub async fn blend_embedding_scores(
     cache_dir: &Path,
 ) -> EmbeddingBlendResult {
     let started = Instant::now();
+    if model.trim().is_empty() {
+        return EmbeddingBlendResult {
+            scores: HashMap::new(),
+            used_embeddings: false,
+            reason: "optional_not_configured".to_string(),
+            latency_ms: 0,
+            attempts: 0,
+            base_url: base_url.to_string(),
+            model: String::new(),
+        };
+    }
+
     if candidates.is_empty() {
         return EmbeddingBlendResult {
             scores: HashMap::new(),
@@ -176,6 +189,81 @@ struct OllamaEmbedResponse {
     embeddings: Vec<Vec<f32>>,
 }
 
+#[derive(serde::Serialize)]
+struct OllamaEmbeddingsRequest {
+    model: String,
+    prompt: String,
+    keep_alive: String,
+}
+
+#[derive(serde::Deserialize)]
+struct OllamaEmbeddingsResponse {
+    embedding: Vec<f32>,
+}
+
+async fn embed_inputs_legacy_endpoint(
+    client: &reqwest::Client,
+    base_url: &str,
+    model: &str,
+    input: &[String],
+    max_retries: u8,
+) -> Option<Vec<Vec<f32>>> {
+    let url = format!("{}/api/embeddings", base_url.trim_end_matches('/'));
+    let max_attempts = max_retries.saturating_add(1);
+    let mut vectors = Vec::with_capacity(input.len());
+
+    for prompt in input {
+        let body = OllamaEmbeddingsRequest {
+            model: model.to_string(),
+            prompt: prompt.clone(),
+            keep_alive: "10m".to_string(),
+        };
+
+        let mut attempt = 0u8;
+        loop {
+            attempt = attempt.saturating_add(1);
+            let resp = match client.post(&url).json(&body).send().await {
+                Ok(v) => v,
+                Err(_) => {
+                    if attempt < max_attempts {
+                        tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
+                        continue;
+                    }
+                    return None;
+                }
+            };
+
+            if !resp.status().is_success() {
+                if attempt < max_attempts {
+                    tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
+                    continue;
+                }
+                return None;
+            }
+
+            let parsed = match resp.json::<OllamaEmbeddingsResponse>().await {
+                Ok(v) => v,
+                Err(_) => {
+                    if attempt < max_attempts {
+                        tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
+                        continue;
+                    }
+                    return None;
+                }
+            };
+
+            if parsed.embedding.is_empty() {
+                return None;
+            }
+
+            vectors.push(parsed.embedding);
+            break;
+        }
+    }
+
+    Some(vectors)
+}
+
 async fn embed_inputs(
     base_url: &str,
     model: &str,
@@ -196,7 +284,7 @@ async fn embed_inputs(
 
     let body = OllamaEmbedRequest {
         model: model.to_string(),
-        input,
+        input: input.clone(),
         truncate: true,
         keep_alive: "10m".to_string(),
     };
@@ -216,6 +304,10 @@ async fn embed_inputs(
             }
         };
         if !resp.status().is_success() {
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                return embed_inputs_legacy_endpoint(&client, base_url, model, &input, max_retries)
+                    .await;
+            }
             if attempt < max_attempts {
                 tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
                 continue;

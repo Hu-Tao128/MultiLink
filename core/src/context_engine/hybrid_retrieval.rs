@@ -129,7 +129,7 @@ impl HybridRetrieval {
         results.into_iter().collect()
     }
 
-    fn embedding_search(&self, query: &str, store: &EmbeddingStore) -> HashMap<usize, f32> {
+    fn embedding_search(&self, _query: &str, store: &EmbeddingStore) -> HashMap<usize, f32> {
         let dummy_vector = vec![0.0; 384];
         let results = store.search(&dummy_vector, self.config.embedding_top_k);
 

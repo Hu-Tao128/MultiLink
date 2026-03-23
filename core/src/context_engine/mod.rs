@@ -11,31 +11,29 @@ pub mod retrieval;
 pub mod tokenizer;
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 pub use retrieval::RetrievalResult;
 
 use crate::config::detect_ollama_base_url;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ContextEngineVersion {
+    #[default]
     V1,
     V2,
     V2Plus,
 }
 
-impl Default for ContextEngineVersion {
-    fn default() -> Self {
-        Self::V1
-    }
-}
+impl FromStr for ContextEngineVersion {
+    type Err = ();
 
-impl ContextEngineVersion {
-    pub fn from_str(s: &str) -> Self {
-        match s.trim().to_lowercase().as_str() {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.trim().to_lowercase().as_str() {
             "v2plus" | "v2+" => Self::V2Plus,
             "v2" | "2" => Self::V2,
             _ => Self::V1,
-        }
+        })
     }
 }
 
