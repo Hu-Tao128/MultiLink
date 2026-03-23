@@ -110,32 +110,82 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        let content = params.content_changes[0].text.clone();
 
-        {
+        let content = {
             let mut docs = self.documents.lock().await;
-            docs.put(uri.clone(), content.clone());
-        }
+
+            let mut current = docs.get(&uri).unwrap_or_default();
+
+            for change in &params.content_changes {
+                match change.range {
+                    None => {
+                        current = change.text.clone();
+                    }
+                    Some(range) => {
+                        current = apply_text_change(&current, range, &change.text);
+                    }
+                }
+            }
+
+            docs.put(uri.clone(), current.clone());
+            current
+        };
 
         let language = Self::get_language(&uri);
         if language != SourceLanguage::Unknown {
             self.ast_cache.parse(uri.as_str(), &content, language);
-            
+
             let uri_for_debounce = uri.clone();
             let pending_clone = self.pending_parse.clone();
-            
+            let documents_clone = self.documents.clone();
+            let ast_cache_clone = self.ast_cache.clone();
+            let symbol_index_clone = self.symbol_index.clone();
+            let client_clone = self.client.clone();
+
             tokio::spawn(async move {
                 let uri_str = uri_for_debounce.to_string();
                 {
                     let mut p = pending_clone.lock().await;
                     p.insert(uri_str.clone(), true);
                 }
-                
+
                 tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
-                
+
                 {
                     let mut p = pending_clone.lock().await;
+                    if !p.contains_key(&uri_str) {
+                        return;
+                    }
                     p.remove(&uri_str);
+                }
+
+                let latest_content = {
+                    let docs = documents_clone.lock().await;
+                    docs.get(&uri_for_debounce)
+                };
+
+                if let Some(content) = latest_content {
+                    let language = Backend::get_language(&uri_for_debounce);
+                    if language != SourceLanguage::Unknown {
+                        if let Some(tree) = ast_cache_clone.get(&uri_str) {
+                            let analyzer = SemanticAnalyzer::new(language);
+                            let analysis = analyzer.analyze(&content, &tree.root_node(), &uri_str);
+                            symbol_index_clone.update(&uri_str, analysis);
+                        }
+
+                        let mut diagnostics = Vec::new();
+                        if let Some(tree) = ast_cache_clone.get(&uri_str) {
+                            Self::collect_diagnostics_static(
+                                &tree.root_node(),
+                                &content,
+                                &uri_str,
+                                &mut diagnostics,
+                            );
+                        }
+                        client_clone
+                            .publish_diagnostics(uri_for_debounce, diagnostics, None)
+                            .await;
+                    }
                 }
             });
         }
@@ -219,6 +269,39 @@ impl LanguageServer for Backend {
 }
 
 impl Backend {
+    fn collect_diagnostics_static(
+        node: &tree_sitter::Node,
+        source: &str,
+        uri: &str,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        if node.is_error() || node.kind() == "ERROR" {
+            let start = node.start_position();
+            let end = node.end_position();
+            diagnostics.push(Diagnostic {
+                range: Range {
+                    start: Position {
+                        line: start.row as u32,
+                        character: start.column as u32,
+                    },
+                    end: Position {
+                        line: end.row as u32,
+                        character: end.column as u32,
+                    },
+                },
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String("syntax-error".to_string())),
+                source: Some("MultiLink LSP".to_string()),
+                message: "Syntax error".to_string(),
+                ..Default::default()
+            });
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            Self::collect_diagnostics_static(&child, source, uri, diagnostics);
+        }
+    }
+
     async fn run_diagnostics(&self, uri: &Url, content: &str) {
         let language = Self::get_language(uri);
         if language == SourceLanguage::Unknown {
@@ -321,6 +404,56 @@ fn find_symbol_in_tree(node: &tree_sitter::Node, source: &str, symbol_name: &str
     None
 }
 
+fn apply_text_change(current: &str, range: Range, new_text: &str) -> String {
+    let start_line = range.start.line as usize;
+    let start_char = range.start.character as usize;
+    let end_line = range.end.line as usize;
+    let end_char = range.end.character as usize;
+
+    let lines: Vec<&str> = current.split('\n').collect();
+    let total_lines = lines.len();
+
+    let start_line = start_line.min(total_lines.saturating_sub(1));
+    let end_line = end_line.min(total_lines.saturating_sub(1));
+
+    let start_line_content = lines[start_line];
+    let start_byte = char_offset_to_byte(start_line_content, start_char);
+    let prefix = format!(
+        "{}{}",
+        lines[..start_line].join("\n"),
+        if start_line > 0 { "\n" } else { "" }
+    ) + &start_line_content[..start_byte];
+
+    let end_line_content = lines[end_line];
+    let end_byte = char_offset_to_byte(end_line_content, end_char);
+    let suffix = format!(
+        "{}{}",
+        &end_line_content[end_byte..],
+        if end_line + 1 < total_lines {
+            format!("\n{}", lines[end_line + 1..].join("\n"))
+        } else {
+            String::new()
+        }
+    );
+
+    format!("{}{}{}", prefix, new_text, suffix)
+}
+
+fn char_offset_to_byte(line: &str, char_offset: usize) -> usize {
+    if line.is_ascii() {
+        return char_offset.min(line.len());
+    }
+
+    let mut utf16_count = 0usize;
+    for (byte_idx, ch) in line.char_indices() {
+        if utf16_count >= char_offset {
+            return byte_idx;
+        }
+        utf16_count += ch.len_utf16();
+    }
+    line.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +492,96 @@ mod tests {
         let url = Url::parse("file:///src/main.xyz").unwrap();
         let lang = Backend::get_language(&url);
         assert_eq!(lang, SourceLanguage::Unknown);
+    }
+
+    #[test]
+    fn apply_full_replacement_no_range() {
+        let original = "fn main() {}
+";
+        let result = apply_text_change(
+            original,
+            Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 0 },
+            },
+            r#"fn main() { println!("ok"); }
+"#,
+        );
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn apply_patch_single_line_insert() {
+        let original = "fn main() {}";
+        let patched = apply_text_change(
+            original,
+            Range {
+                start: Position { line: 0, character: 10 },
+                end: Position { line: 0, character: 10 },
+            },
+            " /* hi */",
+        );
+        assert_eq!(patched, "fn main()  /* hi */{}");
+    }
+
+    #[test]
+    fn apply_patch_replace_word_in_line() {
+        let original = "let x = 42;";
+        let patched = apply_text_change(
+            original,
+            Range {
+                start: Position { line: 0, character: 4 },
+                end: Position { line: 0, character: 5 },
+            },
+            "counter",
+        );
+        assert_eq!(patched, "let counter = 42;");
+    }
+
+    #[test]
+    fn apply_patch_multiline_replace() {
+        let original = "fn a() {}
+fn b() {}
+fn c() {}";
+        let patched = apply_text_change(
+            original,
+            Range {
+                start: Position { line: 1, character: 0 },
+                end: Position { line: 1, character: 10 },
+            },
+            "fn new() {}",
+        );
+        assert_eq!(patched, "fn a() {}
+fn new() {}
+fn c() {}");
+    }
+
+    #[test]
+    fn apply_patch_delete_range() {
+        let original = "hello world";
+        let patched = apply_text_change(
+            original,
+            Range {
+                start: Position { line: 0, character: 5 },
+                end: Position { line: 0, character: 11 },
+            },
+            "",
+        );
+        assert_eq!(patched, "hello");
+    }
+
+    #[test]
+    fn apply_patch_out_of_bounds_does_not_panic() {
+        let original = "short";
+        let result = apply_text_change(
+            original,
+            Range {
+                start: Position { line: 99, character: 0 },
+                end: Position { line: 99, character: 10 },
+            },
+            "x",
+        );
+        assert!(!result.contains("panic"));
     }
 
     #[tokio::test]
