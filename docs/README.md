@@ -9,6 +9,8 @@ This directory serves as the central repository for comprehensive documentation 
 *   **`auth.md`**: Explains MultiLink's authentication and security model, specifically focusing on the OAuth flow, token management, and strategies for securing user credentials and sensitive data.
 *   **`roadmap.md`**: Outlines the project's implementation timeline, key milestones, and future development plans, giving an overview of where MultiLink is headed.
 *   **`network-troubleshooting.md`**: Practical guide for remote Ollama connectivity (LAN/Tailscale), including bind mode, UFW rules, and verification commands.
+*   **`CONTEXT_AB_VALIDATION.md`**: Reproducible A/B protocol for validating context engine quality/performance (`v2` vs `v2plus`) with prompt suite and promotion/rollback criteria.
+*   **`CONTEXT_AB_RESULTS_TEMPLATE.md`**: Template for recording A/B metrics, reasons, and final release decision.
 
 ## 🤝 Contribution Guidelines
 

@@ -17,7 +17,7 @@
 - [x] Implementar `retrieval/lexical_search.rs`: pipeline query → tokenize → lookup → score → top_k.
 - [x] Implementar `context_retrieval.rs`: entry point con branch `embeddings_enabled`.
 - [x] Test unitario: indexar 3 chunks de prueba y verificar que la query devuelve el correcto.
-- [ ] Benchmark: verificar latencia < 10ms con 1 000 chunks sintéticos.
+- [ ] Benchmark: alinear objetivo documentado con gate real implementado (<50ms) o ajustar test para <10ms con corpus controlado.
 
 ## Fase 2 — Tree-sitter Semantic Chunking
 
@@ -53,15 +53,15 @@
 - [x] Implementar `symbol_index.rs` para el workspace activo.
 - [x] Implementar `hover`: devolver código + docstring del símbolo bajo el cursor.
 - [x] Implementar `publishDiagnostics`: errores semánticos desde el AST.
-- [x] **Integración:** el LSP puede consultar el `Context Engine` para enriquecer respuestas.
-- [x] Validación manual en VSCode con `languageClient`.
-- [x] Validación manual en Neovim con `nvim-lspconfig`.
+- [ ] **Integración:** conectar LSP con `Context Engine` real (estado actual: bridge `NoOp`).
+- [ ] Validación manual en VSCode con `languageClient`.
+- [ ] Validación manual en Neovim con `nvim-lspconfig`.
 
 ## Fase 4.5 — Live Context
 
 - [x] `document_cache`: mantener texto actual de archivos abiertos en memoria.
 - [x] Re-parsear con tree-sitter en cada `didChange` (parsing incremental).
-- [x] Exponer `symbol_table` al context engine para queries en tiempo real.
+- [ ] Exponer `symbol_table` al context engine para queries en tiempo real.
 - [x] Debounce 300ms en `didChange` antes de re-indexar.
 
 ## Fase 5 — QA y Rendimiento

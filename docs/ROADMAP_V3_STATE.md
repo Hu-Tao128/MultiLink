@@ -1,11 +1,15 @@
 # Roadmap V3 State
 
-Last updated: 2026-03-17
+Last updated: 2026-03-18
 
-CURRENT_PHASE = release
-NEXT_PHASE = maintenance
+CURRENT_PHASE = stabilization
+NEXT_PHASE = release
 
-## All Phases Complete
+## Canonical Status
+
+This file is the single source of truth for roadmap status.
+
+## Phase Status
 
 | Phase | Status |
 |-------|--------|
@@ -14,24 +18,26 @@ NEXT_PHASE = maintenance
 | Phase 3 Model-aware budgeting | complete |
 | Phase 4 Intent-aware budgeting | complete |
 | Phase 5 Hardware-aware caps | complete |
-| Phase 6 Context Engine v2 | complete |
+| Phase 6 Context Engine v2/v2plus | in_progress |
 | Phase 7 Network security enforcement | complete |
 | Phase 8 Multi-server router hardening | complete |
 | Phase 8.5 LAN Agent + MCP adapter | complete |
 | Phase 9 Orchestrator + Skills | complete |
-| Phase 10 Benchmark/release gate | complete |
+| Phase 10 Benchmark/release gate | in_progress |
+| LSP Phase 6 (language extensibility) | in_progress |
+| LSP Phase 7 (manual QA/perf) | in_progress |
 
 ## Immediate Focus
 
-1. Maintenance mode: ongoing improvements and bug fixes.
+1. Close doc/code consistency gaps across Context Engine and LSP plans.
+2. Finish v2plus Step 6 A/B validation and promotion criteria.
+3. Close LSP manual validation and profiling tasks.
 
 ## What is behind
 
-- Phase 7: complete.
-- Phase 8: complete.
-- Phase 8.5: complete.
-- Phase 9: complete.
-- Phase 10: complete.
+- Context Engine v2plus Step 6: pending validation evidence.
+- LSP Phase 6: Prisma/Dart/Bash pending by tree-sitter version compatibility.
+- LSP Phase 7: manual validation and profiling pending.
 
 ## MCP Strategy
 
@@ -55,16 +61,19 @@ NEXT_PHASE = maintenance
 
 ---
 
-## 🔄 Actualización — 2026-03-17
+## 🔄 Actualización — 2026-03-18
 
-### Nuevos Completados
-- Context Engine v2 Plus: Observabilidad (context_latency_ms, hit_rate, truncation_rate)
-- LSP Server: tower-lsp con tree-sitter para Rust, Python, JS/TS
-- Benchmarks: lexical search (1k, 10k chunks), indexing (100, 1k files)
+### Reconciliación de estado
+- `docs/LSP_ROADMAP.md` y `docs/context_engine_v2plus_plan.md` prevalecen para tareas en progreso.
+- Se removió el estado "all phases complete" para evitar contradicciones.
 
 ### En Progreso
 - LSP Server Phase 6: Extensibilidad de lenguajes (Prisma/Dart/Bash pendientes por versión tree-sitter)
 - LSP Server Phase 7: Tests y validación manual
+- Context Engine v2plus Step 6: Observabilidad + A/B con criterios de promoción/rollback
 
 ### Notas
-- SCALABILITY_PLAN.md actualizado: todos los hallazgos críticos resueltos
+- Este archivo queda como fuente canónica; al actualizar estados, sincronizar en la misma PR:
+  - `docs/LSP_ROADMAP.md`
+  - `docs/context_engine_v2plus_plan.md`
+  - `docs/CONTEXT_ENGINE_ROADMAP.md`
