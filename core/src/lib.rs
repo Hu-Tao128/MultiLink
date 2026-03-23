@@ -38,15 +38,17 @@ pub use intent_budget::{
     budget_for_intent, detect_query_intent, task_weight_for_prompt, IntentBudget, QueryIntent,
 };
 pub use lan_agent::{
-    decode_messagepack, encode_messagepack, shared_secret_matches, LanAgentServer, LanEnvelope,
-    LanPayload,
+    decode_messagepack, encode_messagepack, ip_allowed_for_test, shared_secret_matches,
+    sign_payload, verify_hmac, LanAgentServer, LanEnvelope, LanPayload,
 };
 pub use mcp_adapter::{
     McpContent, McpError, McpResult, McpToolCall, McpToolResponse, ThinMcpAdapter,
 };
 pub use model_manager::{ModelInfo, ModelManager, ModelStatus, ProviderType};
 pub use model_profile::{ModelClass, ModelProfile, RetrievalBudget};
-pub use observability::ExecutionMetrics;
+pub use observability::{
+    ContextRetrievalMetrics, ExecutionMetrics, LatencyTracker, RouteLatencyMetrics,
+};
 pub use providers::{
     LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId,
     TokenEvent, TokenStream,

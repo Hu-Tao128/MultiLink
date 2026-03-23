@@ -463,20 +463,11 @@ async fn maybe_embedding_scores(
     diag.model = model.clone();
 
     if model.is_empty() {
-        let models = fetch_ollama_model_details(base_url, config)
-            .await
-            .unwrap_or_default();
-        let available: Vec<String> = models.iter().map(|(n, _)| n.clone()).collect();
-        let capable: Vec<String> = models
-            .iter()
-            .filter(|(_, c)| c.supports_embedding)
-            .map(|(n, _)| n.clone())
-            .collect();
-
-        diag.reason = format!(
-            "no_embedding_capable_model available={:?} capable={:?}",
-            available, capable
-        );
+        diag.reason = if config.embed_model.trim().is_empty() {
+            "optional_not_configured".to_string()
+        } else {
+            "configured_model_not_available".to_string()
+        };
         return (None, diag);
     }
 
@@ -487,7 +478,7 @@ async fn maybe_embedding_scores(
             let mut text = String::new();
             text.push_str("Path: ");
             text.push_str(&chunk.path);
-            text.push_str("\n");
+            text.push('\n');
             text.push_str(&chunk.content.chars().take(1800).collect::<String>());
             text
         })
@@ -506,7 +497,11 @@ async fn maybe_embedding_scores(
             }
         }
         Err(reason) => {
-            diag.reason = format!("embed_api_error model={}: {}", model, reason);
+            let normalized = match reason.as_str() {
+                "unsupported_endpoint" => "unsupported_endpoint",
+                _ => "embed_api_error",
+            };
+            diag.reason = format!("{} model={}: {}", normalized, model, reason);
             diag.latency_ms = started.elapsed().as_millis();
             return (None, diag);
         }
@@ -718,7 +713,7 @@ async fn fetch_ollama_model_details(
                 if let Ok(show) = resp_show.json::<OllamaShowResponse>().await {
                     let supports_embedding = show
                         .capabilities
-                        .map_or(false, |c| c.contains(&"embedding".to_string()));
+                        .is_some_and(|c| c.contains(&"embedding".to_string()));
                     results.push((model.name, SimpleModelInfo { supports_embedding }));
                 }
             }
@@ -765,6 +760,85 @@ struct OllamaEmbedResponse {
     embeddings: Vec<Vec<f32>>,
 }
 
+#[derive(serde::Serialize)]
+struct OllamaEmbeddingsRequest {
+    model: String,
+    prompt: String,
+    keep_alive: String,
+}
+
+#[derive(serde::Deserialize)]
+struct OllamaEmbeddingsResponse {
+    embedding: Vec<f32>,
+}
+
+async fn embed_inputs_legacy_endpoint(
+    client: &reqwest::Client,
+    base_url: &str,
+    model: &str,
+    input: &[String],
+    config: &RetrievalConfig,
+) -> Result<Vec<Vec<f32>>, String> {
+    let url = format!("{}/api/embeddings", base_url.trim_end_matches('/'));
+    let max_attempts = config.embed_max_retries.saturating_add(1);
+    let mut vectors = Vec::with_capacity(input.len());
+
+    for prompt in input {
+        let body = OllamaEmbeddingsRequest {
+            model: model.to_string(),
+            prompt: prompt.clone(),
+            keep_alive: "10m".to_string(),
+        };
+
+        let mut attempt: u8 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
+            match client.post(&url).json(&body).send().await {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                            return Err("unsupported_endpoint".to_string());
+                        }
+                        if attempt < max_attempts {
+                            tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt)))
+                                .await;
+                            continue;
+                        }
+                        return Err(format!("http_status:{}", resp.status()));
+                    }
+
+                    match resp.json::<OllamaEmbeddingsResponse>().await {
+                        Ok(parsed) => {
+                            if parsed.embedding.is_empty() {
+                                return Err("empty_embeddings".to_string());
+                            }
+                            vectors.push(parsed.embedding);
+                            break;
+                        }
+                        Err(err) => {
+                            if attempt < max_attempts {
+                                tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt)))
+                                    .await;
+                                continue;
+                            }
+                            return Err(format!("invalid_json:{}", err));
+                        }
+                    }
+                }
+                Err(err) => {
+                    if attempt < max_attempts {
+                        tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
+                        continue;
+                    }
+                    return Err(format!("request_error:{}", err));
+                }
+            }
+        }
+    }
+
+    Ok(vectors)
+}
+
 async fn embed_inputs(
     base_url: &str,
     model: &str,
@@ -783,7 +857,7 @@ async fn embed_inputs(
 
     let body = OllamaEmbedRequest {
         model: model.to_string(),
-        input,
+        input: input.clone(),
         truncate: true,
         keep_alive: "10m".to_string(),
     };
@@ -796,6 +870,12 @@ async fn embed_inputs(
         match client.post(&url).json(&body).send().await {
             Ok(resp) => {
                 if !resp.status().is_success() {
+                    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                        return embed_inputs_legacy_endpoint(
+                            &client, base_url, model, &input, config,
+                        )
+                        .await;
+                    }
                     if attempt < max_attempts {
                         tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
                         continue;
