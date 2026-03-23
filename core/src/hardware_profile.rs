@@ -38,19 +38,39 @@ impl HardwareProfile {
     }
 
     pub fn derive_caps(&self) -> HardwareCaps {
-        if self.ram_gb <= 8 && self.gpu_count == 0 {
-            return HardwareCaps {
-                max_parallel_streams: 1,
-                max_context_tokens: 3072,
-                max_project_tokens: 900,
-                max_project_top_k: 4,
-                max_model_class: ModelClass::Small,
-            };
-        }
+        if self.gpu_count == 0 {
+            if self.ram_gb <= 8 {
+                return HardwareCaps {
+                    max_parallel_streams: 1,
+                    max_context_tokens: 3072,
+                    max_project_tokens: 900,
+                    max_project_top_k: 4,
+                    max_model_class: ModelClass::Small,
+                };
+            }
 
-        if self.ram_gb <= 16 && self.gpu_count == 0 {
+            if self.ram_gb <= 16 {
+                return HardwareCaps {
+                    max_parallel_streams: self.cpu_cores.clamp(1, 2),
+                    max_context_tokens: 4096,
+                    max_project_tokens: 1200,
+                    max_project_top_k: 5,
+                    max_model_class: ModelClass::Small,
+                };
+            }
+
+            if self.ram_gb <= 32 {
+                return HardwareCaps {
+                    max_parallel_streams: self.cpu_cores.clamp(1, 2),
+                    max_context_tokens: 5120,
+                    max_project_tokens: 1500,
+                    max_project_top_k: 5,
+                    max_model_class: ModelClass::Medium,
+                };
+            }
+
             return HardwareCaps {
-                max_parallel_streams: self.cpu_cores.clamp(1, 2),
+                max_parallel_streams: self.cpu_cores.clamp(1, 3),
                 max_context_tokens: 6144,
                 max_project_tokens: 1800,
                 max_project_top_k: 6,

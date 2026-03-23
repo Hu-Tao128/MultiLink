@@ -465,3 +465,25 @@ async fn runtime_limits_parallel_streams() {
         "second send should proceed after slot frees"
     );
 }
+
+#[tokio::test]
+async fn runtime_start_bootstraps_router_health_states() {
+    let mut router = ProviderRouter::new();
+    router.register(Arc::new(SlowMockProvider));
+    let router = Arc::new(router);
+
+    let temp = tempfile::tempdir().expect("temp");
+    let runtime = ChatRuntime::new(
+        router.clone(),
+        temp.path().join("sessions"),
+        Duration::from_millis(40),
+    );
+
+    runtime.start().await.expect("runtime start");
+
+    assert!(router.health_state(ProviderId::Ollama).await.is_some());
+    assert!(router.health_state(ProviderId::Gemini).await.is_some());
+    assert!(router.health_state(ProviderId::Codex).await.is_some());
+
+    runtime.stop().await;
+}

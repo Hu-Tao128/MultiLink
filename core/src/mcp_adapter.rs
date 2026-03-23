@@ -74,6 +74,7 @@ impl ThinMcpAdapter {
             protocol_version: 1,
             request_id: call.id,
             timestamp_ms,
+            hmac_signature: String::new(),
             payload,
         }
     }
