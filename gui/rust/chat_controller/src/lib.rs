@@ -234,10 +234,10 @@ pub unsafe extern "C" fn chat_backend_send_prompt(handle: *mut BackendHandle, te
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return;
     };
-    let Some(text_cstr) = (!text.is_null()).then(|| unsafe { CStr::from_ptr(text) }) else {
+    let Some(prompt_raw) = c_char_ptr_to_string(text) else {
         return;
     };
-    let prompt = text_cstr.to_string_lossy().trim().to_string();
+    let prompt = prompt_raw.trim().to_string();
     if prompt.is_empty() {
         return;
     }
@@ -275,16 +275,13 @@ pub unsafe extern "C" fn chat_backend_send_prompt_for_session(
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return;
     };
-    let Some(session_cstr) = (!session_id.is_null()).then(|| unsafe { CStr::from_ptr(session_id) })
-    else {
+    let Some(target_session) = c_char_ptr_to_string(session_id) else {
         return;
     };
-    let Some(text_cstr) = (!text.is_null()).then(|| unsafe { CStr::from_ptr(text) }) else {
+    let Some(prompt_raw) = c_char_ptr_to_string(text) else {
         return;
     };
-
-    let target_session = session_cstr.to_string_lossy().to_string();
-    let prompt = text_cstr.to_string_lossy().trim().to_string();
+    let prompt = prompt_raw.trim().to_string();
     if target_session.is_empty() || prompt.is_empty() {
         return;
     }
@@ -488,11 +485,9 @@ pub unsafe extern "C" fn chat_backend_select_session(
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return;
     };
-    let Some(id_cstr) = (!session_id.is_null()).then(|| unsafe { CStr::from_ptr(session_id) })
-    else {
+    let Some(id) = c_char_ptr_to_string(session_id) else {
         return;
     };
-    let id = id_cstr.to_string_lossy().to_string();
     let fallback_model = backend
         .ui_state
         .lock()
@@ -538,10 +533,9 @@ pub unsafe extern "C" fn chat_backend_select_model(
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return;
     };
-    let Some(model_cstr) = (!model.is_null()).then(|| unsafe { CStr::from_ptr(model) }) else {
+    let Some(value) = c_char_ptr_to_string(model) else {
         return;
     };
-    let value = model_cstr.to_string_lossy().to_string();
     if is_embedding_like_model(&value) {
         return;
     }
@@ -574,26 +568,22 @@ pub unsafe extern "C" fn chat_backend_set_session_project_root(
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return;
     };
-    let Some(id_cstr) = (!session_id.is_null()).then(|| unsafe { CStr::from_ptr(session_id) })
-    else {
+    let Some(session_id_value) = c_char_ptr_to_string(session_id) else {
         return;
     };
-    let session_id_value = id_cstr.to_string_lossy().to_string();
     if session_id_value.is_empty() {
         return;
     }
 
-    let project_root_value = if project_root.is_null() {
-        None
-    } else {
-        let root_cstr = unsafe { CStr::from_ptr(project_root) };
-        let root = root_cstr.to_string_lossy().trim().to_string();
-        if root.is_empty() {
-            None
-        } else {
-            Some(root)
-        }
-    };
+    let project_root_value = c_char_ptr_to_string(project_root)
+        .and_then(|root| {
+            let trimmed = root.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
 
     let runtime = backend.runtime.handle().clone();
     let chat_runtime = backend.chat_runtime.clone();
@@ -664,11 +654,9 @@ pub unsafe extern "C" fn chat_backend_save_servers_config_json(
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return false;
     };
-    let Some(raw) = (!servers_json.is_null()).then(|| unsafe { CStr::from_ptr(servers_json) })
-    else {
+    let Some(payload) = c_char_ptr_to_string(servers_json) else {
         return false;
     };
-    let payload = raw.to_string_lossy().to_string();
     let parsed: Vec<ServerConfig> = match serde_json::from_str(&payload) {
         Ok(v) => v,
         Err(_) => return false,
@@ -700,10 +688,10 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return into_c_string("{\"ok\":false,\"error\":\"backend unavailable\"}".to_string());
     };
-    let Some(raw) = (!base_url.is_null()).then(|| unsafe { CStr::from_ptr(base_url) }) else {
+    let Some(base_url_value) = c_char_ptr_to_string(base_url) else {
         return into_c_string("{\"ok\":false,\"error\":\"missing base_url\"}".to_string());
     };
-    let url = normalize_base_url(raw.to_string_lossy().as_ref());
+    let url = normalize_base_url(base_url_value.as_ref());
     if url.is_empty() {
         return into_c_string("{\"ok\":false,\"error\":\"empty base_url\"}".to_string());
     }
@@ -831,11 +819,9 @@ pub unsafe extern "C" fn chat_backend_request_messages(
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return;
     };
-    let Some(id_cstr) = (!session_id.is_null()).then(|| unsafe { CStr::from_ptr(session_id) })
-    else {
+    let Some(id) = c_char_ptr_to_string(session_id) else {
         return;
     };
-    let id = id_cstr.to_string_lossy().to_string();
 
     let runtime = backend.runtime.handle().clone();
     let chat_runtime = backend.chat_runtime.clone();
@@ -961,11 +947,10 @@ pub unsafe extern "C" fn chat_backend_delete_session(
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return false;
     };
-    let Some(id_cstr) = (!session_id.is_null()).then(|| unsafe { CStr::from_ptr(session_id) })
-    else {
+    let Some(id_raw) = c_char_ptr_to_string(session_id) else {
         return false;
     };
-    let id = id_cstr.to_string_lossy().trim().to_string();
+    let id = id_raw.trim().to_string();
     if id.is_empty() {
         return false;
     }
@@ -1027,14 +1012,8 @@ pub extern "C" fn chat_backend_save_provider_token(
     token_cstr: *const c_char,
 ) -> i32 {
     let Some(backend) = (unsafe { handle.as_ref() }) else { return 0 };
-    let provider = unsafe { CStr::from_ptr(provider_cstr) }
-        .to_str()
-        .unwrap_or("")
-        .to_string();
-    let token = unsafe { CStr::from_ptr(token_cstr) }
-        .to_str()
-        .unwrap_or("")
-        .to_string();
+    let Some(provider) = c_char_ptr_to_string(provider_cstr) else { return 0 };
+    let Some(token) = c_char_ptr_to_string(token_cstr) else { return 0 };
 
     if provider.is_empty() || token.is_empty() {
         return 0;
@@ -1063,10 +1042,7 @@ pub extern "C" fn chat_backend_clear_provider_token(
     provider_cstr: *const c_char,
 ) -> i32 {
     let Some(backend) = (unsafe { handle.as_ref() }) else { return 0 };
-    let provider = unsafe { CStr::from_ptr(provider_cstr) }
-        .to_str()
-        .unwrap_or("")
-        .to_string();
+    let Some(provider) = c_char_ptr_to_string(provider_cstr) else { return 0 };
 
     if provider.is_empty() {
         return 0;
@@ -1094,10 +1070,7 @@ pub extern "C" fn chat_backend_has_provider_token(
     provider_cstr: *const c_char,
 ) -> i32 {
     let Some(backend) = (unsafe { handle.as_ref() }) else { return 0 };
-    let provider = unsafe { CStr::from_ptr(provider_cstr) }
-        .to_str()
-        .unwrap_or("")
-        .to_string();
+    let Some(provider) = c_char_ptr_to_string(provider_cstr) else { return 0 };
 
     let store_path = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -1121,6 +1094,19 @@ fn emit_string(callback: Option<StringCallback>, ctx: *mut c_void, text: &str) {
     if let Ok(value) = CString::new(text) {
         cb(ctx, value.as_ptr());
     }
+}
+
+fn c_char_ptr_to_string(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+
+    Some(
+        unsafe { CStr::from_ptr(ptr) }
+            .to_str()
+            .unwrap_or("")
+            .to_string(),
+    )
 }
 
 fn emit_session(callback: Option<SessionCallback>, ctx: *mut c_void, session_id: &str) {
@@ -1439,6 +1425,36 @@ fn backup_invalid_config(config_path: &PathBuf) -> Result<PathBuf, std::io::Erro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::raw::c_char;
+
+    #[test]
+    fn c_char_ptr_to_string_returns_none_for_null_ptr() {
+        let ptr: *const c_char = std::ptr::null();
+        assert!(c_char_ptr_to_string(ptr).is_none());
+    }
+
+    #[test]
+    fn c_char_ptr_to_string_returns_some_for_valid_ptr() {
+        let value = CString::new("gemini").expect("valid c string");
+        assert_eq!(c_char_ptr_to_string(value.as_ptr()), Some("gemini".to_string()));
+    }
+
+    #[test]
+    fn ffi_token_functions_return_error_for_null_provider_ptr() {
+        // If QML sends null pointers, FFI must fail safely without dereferencing them.
+        assert_eq!(
+            chat_backend_save_provider_token(std::ptr::null_mut(), std::ptr::null(), std::ptr::null()),
+            0
+        );
+        assert_eq!(
+            chat_backend_clear_provider_token(std::ptr::null_mut(), std::ptr::null()),
+            0
+        );
+        assert_eq!(
+            chat_backend_has_provider_token(std::ptr::null_mut(), std::ptr::null()),
+            0
+        );
+    }
 
     #[test]
     fn ffi_lifecycle_smoke() {
