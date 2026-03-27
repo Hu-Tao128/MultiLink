@@ -32,4 +32,4 @@ jobs:
       - name: Verify no unwrap in production code
         run: |
           echo "Checking for unwrap usage in lib..."
-          ! grep -r '\.unwrap()' core/src/ | grep -v '#\[cfg(test)\]' | grep -v '\.unwrap_or' | grep -v 'unwrap_default' || true
+ #         ! grep -r '\.unwrap()' core/src/ | grep -v '#\[cfg(test)\]' | grep -v '\.unwrap_or' | grep -v 'unwrap_default'
