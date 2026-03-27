@@ -14,6 +14,8 @@ struct SlowMockProvider;
 
 struct HoldingMockProvider;
 
+struct DelayedFirstTokenProvider;
+
 #[async_trait]
 impl LLMProvider for SlowMockProvider {
     fn id(&self) -> ProviderId {
@@ -107,6 +109,58 @@ impl LLMProvider for HoldingMockProvider {
             tokio::time::sleep(Duration::from_millis(220)).await;
             let _ = tx.send(Ok(TokenEvent::Completed)).await;
         });
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+
+    async fn get_model_info(&self, _model: &str) -> Result<ProviderCapabilities, LLMError> {
+        Ok(ProviderCapabilities::default_with_context(4096))
+    }
+
+    async fn health_check(&self) -> Result<bool, LLMError> {
+        Ok(true)
+    }
+}
+
+#[async_trait]
+impl LLMProvider for DelayedFirstTokenProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::Ollama
+    }
+
+    fn name(&self) -> &str {
+        "delayed-first-token-mock"
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    async fn send(
+        &self,
+        _prompt: String,
+        _options: PromptOptions,
+    ) -> Result<LLMResponse, LLMError> {
+        Ok(LLMResponse {
+            text: "ok".to_string(),
+            provider: ProviderId::Ollama,
+            model: Some("mock".to_string()),
+            usage: None,
+        })
+    }
+
+    async fn stream_send(
+        &self,
+        _prompt: String,
+        _options: PromptOptions,
+    ) -> Result<TokenStream, LLMError> {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(TokenEvent::Started)).await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let _ = tx.send(Ok(TokenEvent::Token("late".to_string()))).await;
+            let _ = tx.send(Ok(TokenEvent::Completed)).await;
+        });
+
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 
@@ -463,6 +517,56 @@ async fn runtime_limits_parallel_streams() {
     assert!(
         second_start.is_ok(),
         "second send should proceed after slot frees"
+    );
+}
+
+#[tokio::test]
+async fn runtime_times_out_when_first_token_is_too_slow() {
+    let mut router = ProviderRouter::new();
+    router.register(Arc::new(DelayedFirstTokenProvider));
+
+    let temp = tempfile::tempdir().expect("temp");
+    let runtime = ChatRuntime::new_with_config(
+        Arc::new(router),
+        temp.path().join("sessions"),
+        Duration::from_millis(40),
+        RuntimeConfig {
+            stream_first_token_timeout_secs: 1,
+            ..RuntimeConfig::default()
+        },
+        None,
+    );
+
+    let session_id = runtime
+        .create_session(ProviderId::Ollama, Some("mock".to_string()))
+        .await;
+
+    let mut rx = runtime
+        .send_message(&session_id, "hello".to_string())
+        .await
+        .expect("send");
+
+    let mut saw_started = false;
+    let mut saw_timeout_error = false;
+
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await {
+        match event {
+            StreamEvent::Started => saw_started = true,
+            StreamEvent::Error(message) => {
+                if message.contains("primer token") {
+                    saw_timeout_error = true;
+                }
+                break;
+            }
+            StreamEvent::Finished => break,
+            StreamEvent::Chunk(_) | StreamEvent::Usage { .. } => {}
+        }
+    }
+
+    assert!(saw_started, "stream should start before first-token timeout");
+    assert!(
+        saw_timeout_error,
+        "runtime should emit first-token-timeout error when no chunk arrives in time"
     );
 }
 

@@ -113,6 +113,7 @@ pub struct ContextConfig {
 pub struct PerformanceConfig {
     pub profile: String,
     pub max_parallel_streams: usize,
+    pub stream_first_token_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -190,6 +191,7 @@ pub struct RuntimeConfig {
     pub network_allow_remote: bool,
     pub network_shared_secret: String,
     pub network_allowed_ips: Vec<String>,
+    pub stream_first_token_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +328,7 @@ impl Default for RuntimeConfig {
             network_allow_remote: false,
             network_shared_secret: String::new(),
             network_allowed_ips: Vec::new(),
+            stream_first_token_timeout_secs: 60,
         }
     }
 }
@@ -369,6 +372,7 @@ impl Default for PerformanceConfig {
         Self {
             profile: "auto".to_string(),
             max_parallel_streams: 4,
+            stream_first_token_timeout_secs: 60,
         }
     }
 }
@@ -679,6 +683,10 @@ impl AppConfig {
         self.runtime.context_project_top_k = self.context.project_top_k.clamp(2, 24);
         self.runtime.max_project_context_tokens = self.context.max_project_tokens.max(512);
         self.runtime.max_parallel_streams = self.performance.max_parallel_streams.max(1);
+        self.runtime.stream_first_token_timeout_secs = self
+            .performance
+            .stream_first_token_timeout_secs
+            .clamp(1, 600);
         self.runtime.observability_json_logs = self.ui.json_logs;
         self.runtime.remote_threshold = self.routing.remote_threshold;
         self.runtime.context_engine = self.context.engine.clone();
@@ -784,6 +792,13 @@ impl AppConfig {
         if self.performance.max_parallel_streams == 0 {
             return Err(ConfigError::Invalid(
                 "performance.max_parallel_streams must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.performance.stream_first_token_timeout_secs == 0 {
+            return Err(ConfigError::Invalid(
+                "performance.stream_first_token_timeout_secs must be greater than zero"
+                    .to_string(),
             ));
         }
 

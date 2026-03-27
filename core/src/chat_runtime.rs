@@ -832,6 +832,9 @@ impl ChatRuntime {
         let metrics_top_k = effective_runtime.context_project_top_k;
         let metrics_json = effective_runtime.observability_json_logs;
         let metrics_context_tokens = context_tokens;
+        let first_token_timeout = Duration::from_secs(
+            effective_runtime.stream_first_token_timeout_secs.max(1),
+        );
         let started_at = Instant::now();
         let retries: usize = dispatcher_retries + usize::from(fallback_retry_used);
         let execution_dispatcher = self.execution_dispatcher.clone();
@@ -884,9 +887,29 @@ impl ChatRuntime {
             let mut total_retries = retries;
             let mut resilience_retries = 0usize;
             let file_write_done = false;
+            let mut first_chunk_received = false;
+            let first_token_timeout_message = format!(
+                "No se recibio el primer token en {}s. Stream cancelado por timeout.",
+                first_token_timeout.as_secs()
+            );
+            let first_token_timer = tokio::time::sleep(first_token_timeout);
+            tokio::pin!(first_token_timer);
 
             loop {
                 tokio::select! {
+                    _ = &mut first_token_timer, if !first_chunk_received => {
+                        let _ = event_tx
+                            .send(StreamEvent::Error(first_token_timeout_message.clone()))
+                            .await;
+                        let _ = finalize_error(
+                            &sessions,
+                            &storage_dir,
+                            &session_id_owned,
+                            &first_token_timeout_message,
+                        )
+                        .await;
+                        break;
+                    }
                     cancel_changed = cancel_rx.changed() => {
                         if cancel_changed.is_ok() && *cancel_rx.borrow() {
                             let _ = event_tx.send(StreamEvent::Error("Generation cancelled".to_string())).await;
@@ -897,6 +920,7 @@ impl ChatRuntime {
                     item = stream.next() => {
                         match item {
                             Some(Ok(crate::providers::TokenEvent::Token(token))) => {
+                                first_chunk_received = true;
                                 full_output.push_str(&token);
                                 pending_emit.push_str(&token);
                                 let _ = append_partial_chunk(&storage_dir, &session_id_owned, &token).await;
