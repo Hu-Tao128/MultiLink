@@ -43,6 +43,41 @@ struct ProjectChunk {
     content: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectType {
+    Rust,
+    Node,
+    Python,
+    Java,
+    Go,
+    Web,
+    CSharp,
+    PHP,
+    Unknown,
+}
+
+impl ProjectType {
+    fn as_str(self) -> &'static str {
+        match self {
+            ProjectType::Rust => "rust",
+            ProjectType::Node => "node",
+            ProjectType::Python => "python",
+            ProjectType::Java => "java",
+            ProjectType::Go => "go",
+            ProjectType::Web => "web",
+            ProjectType::CSharp => "csharp",
+            ProjectType::PHP => "php",
+            ProjectType::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProjectDetection {
+    project_type: ProjectType,
+    detected_from: String,
+}
+
 pub async fn build_relevant_project_context(
     raw_context: &str,
     prompt: &str,
@@ -76,9 +111,43 @@ pub async fn build_relevant_project_context(
     }
 
     let lexical = lexical_scores(prompt, &chunks);
+    let project_detection = detect_project_type(&chunks);
+    let preferred_fallback = context_files_for_type(project_detection.project_type, &chunks);
     let (embedding, embedding_diag) =
         maybe_embedding_scores(prompt, &chunks, &config, model_hint).await;
+    let mut embedding_diag = embedding_diag;
     let embedding_used = embedding_diag.used;
+
+    if embedding_diag.reason.is_empty() {
+        embedding_diag.reason = format!(
+            "project_type={} detected_from={}",
+            project_detection.project_type.as_str(),
+            project_detection.detected_from
+        );
+    } else {
+        embedding_diag.reason = format!(
+            "{} project_type={} detected_from={}",
+            embedding_diag.reason,
+            project_detection.project_type.as_str(),
+            project_detection.detected_from
+        );
+    }
+
+    if !embedding_used {
+        if let Some((context, selected_files, used_tokens)) =
+            build_context_from_preferred_files(&chunks, &preferred_fallback, token_budget, model_hint)
+        {
+            return RetrievalResult {
+                context,
+                selected_files,
+                used_tokens,
+                top_k: config.top_k.clamp(2, 24),
+                embedding_used,
+                embedding_diag,
+            };
+        }
+    }
+
     let mut ranked: Vec<(usize, f32)> = lexical
         .into_iter()
         .map(|(idx, score)| {
@@ -155,6 +224,263 @@ pub async fn build_relevant_project_context(
         embedding_used,
         embedding_diag,
     }
+}
+
+fn build_context_from_preferred_files(
+    chunks: &[ProjectChunk],
+    preferred_paths: &[String],
+    token_budget: usize,
+    model_hint: Option<&str>,
+) -> Option<(String, Vec<String>, usize)> {
+    if preferred_paths.is_empty() || token_budget == 0 {
+        return None;
+    }
+
+    let mut selected_blocks = Vec::new();
+    let mut selected_files = Vec::new();
+    let mut used_tokens = 0usize;
+
+    for preferred in preferred_paths {
+        let Some(chunk) = chunks.iter().find(|c| c.path == *preferred) else {
+            continue;
+        };
+
+        let block = render_chunk_block(chunk);
+        let block_tokens = estimate_tokens_for_model(&block, model_hint);
+        if used_tokens + block_tokens > token_budget {
+            if used_tokens == 0 {
+                let trimmed = truncate_to_token_budget(&block, token_budget, model_hint);
+                if !trimmed.trim().is_empty() {
+                    used_tokens = estimate_tokens_for_model(&trimmed, model_hint);
+                    selected_blocks.push(trimmed);
+                    selected_files.push(chunk.path.clone());
+                }
+            }
+            break;
+        }
+
+        used_tokens += block_tokens;
+        selected_blocks.push(block);
+        selected_files.push(chunk.path.clone());
+    }
+
+    if selected_blocks.is_empty() {
+        return None;
+    }
+
+    let mut context = String::from("Project Context:\n");
+    for block in selected_blocks {
+        context.push_str(&block);
+        context.push('\n');
+    }
+
+    if estimate_tokens_for_model(&context, model_hint) > token_budget {
+        context = truncate_to_token_budget(&context, token_budget, model_hint);
+        used_tokens = estimate_tokens_for_model(&context, model_hint);
+    }
+
+    Some((context, selected_files, used_tokens))
+}
+
+fn detect_project_type(chunks: &[ProjectChunk]) -> ProjectDetection {
+    if chunks.is_empty() {
+        return ProjectDetection {
+            project_type: ProjectType::Unknown,
+            detected_from: "none".to_string(),
+        };
+    }
+
+    let has_root = |name: &str| chunks.iter().any(|c| c.path.eq_ignore_ascii_case(name));
+    let has_src_java = chunks
+        .iter()
+        .any(|c| c.path.starts_with("src/") && c.path.ends_with(".java"));
+    let has_root_html = chunks
+        .iter()
+        .any(|c| c.path.matches('/').count() == 0 && c.path.to_ascii_lowercase().ends_with(".html"));
+    let has_csproj = chunks
+        .iter()
+        .any(|c| c.path.to_ascii_lowercase().ends_with(".csproj"));
+    let has_sln = chunks
+        .iter()
+        .any(|c| c.path.to_ascii_lowercase().ends_with(".sln"));
+
+    if has_root("Cargo.toml") {
+        return ProjectDetection {
+            project_type: ProjectType::Rust,
+            detected_from: "Cargo.toml".to_string(),
+        };
+    }
+    if has_root("package.json") {
+        return ProjectDetection {
+            project_type: ProjectType::Node,
+            detected_from: "package.json".to_string(),
+        };
+    }
+    if has_root("pyproject.toml") {
+        return ProjectDetection {
+            project_type: ProjectType::Python,
+            detected_from: "pyproject.toml".to_string(),
+        };
+    }
+    if has_root("requirements.txt") {
+        return ProjectDetection {
+            project_type: ProjectType::Python,
+            detected_from: "requirements.txt".to_string(),
+        };
+    }
+    if has_root("setup.py") {
+        return ProjectDetection {
+            project_type: ProjectType::Python,
+            detected_from: "setup.py".to_string(),
+        };
+    }
+    if has_root("pom.xml") {
+        return ProjectDetection {
+            project_type: ProjectType::Java,
+            detected_from: "pom.xml".to_string(),
+        };
+    }
+    if has_root("build.gradle") {
+        return ProjectDetection {
+            project_type: ProjectType::Java,
+            detected_from: "build.gradle".to_string(),
+        };
+    }
+    if has_src_java {
+        return ProjectDetection {
+            project_type: ProjectType::Java,
+            detected_from: "src/**/*.java".to_string(),
+        };
+    }
+    if has_root("go.mod") {
+        return ProjectDetection {
+            project_type: ProjectType::Go,
+            detected_from: "go.mod".to_string(),
+        };
+    }
+    if has_root("index.html") || has_root_html {
+        return ProjectDetection {
+            project_type: ProjectType::Web,
+            detected_from: if has_root("index.html") {
+                "index.html".to_string()
+            } else {
+                "*.html".to_string()
+            },
+        };
+    }
+    if has_csproj || has_sln {
+        return ProjectDetection {
+            project_type: ProjectType::CSharp,
+            detected_from: if has_csproj {
+                "*.csproj".to_string()
+            } else {
+                "*.sln".to_string()
+            },
+        };
+    }
+    if has_root("composer.json") || has_root("index.php") {
+        return ProjectDetection {
+            project_type: ProjectType::PHP,
+            detected_from: if has_root("composer.json") {
+                "composer.json".to_string()
+            } else {
+                "index.php".to_string()
+            },
+        };
+    }
+
+    ProjectDetection {
+        project_type: ProjectType::Unknown,
+        detected_from: "none".to_string(),
+    }
+}
+
+fn context_files_for_type(project_type: ProjectType, chunks: &[ProjectChunk]) -> Vec<String> {
+    match project_type {
+        ProjectType::Rust => vec_of_existing(
+            chunks,
+            &["Cargo.toml", "src/main.rs", "src/lib.rs", "README.md"],
+        ),
+        ProjectType::Node => vec_of_existing(
+            chunks,
+            &["package.json", "src/index.js", "index.js", "README.md"],
+        ),
+        ProjectType::Python => vec_of_existing(
+            chunks,
+            &[
+                "pyproject.toml",
+                "requirements.txt",
+                "setup.py",
+                "main.py",
+                "app.py",
+            ],
+        ),
+        ProjectType::Java => {
+            let mut out = vec_of_existing(chunks, &["pom.xml", "build.gradle"]);
+            if let Some(app) = chunks.iter().find(|c| {
+                c.path.starts_with("src/main/") && c.path.ends_with("Application.java")
+            }) {
+                out.push(app.path.clone());
+            }
+            out
+        }
+        ProjectType::Go => vec_of_existing(chunks, &["go.mod", "main.go"]),
+        ProjectType::Web => {
+            let mut out = vec_of_existing(chunks, &["index.html"]);
+            if let Some(css) = chunks.iter().find(|c| {
+                let p = c.path.to_ascii_lowercase();
+                p.matches('/').count() == 0 && (p == "styles.css" || p == "main.css" || p.ends_with(".css"))
+            }) {
+                out.push(css.path.clone());
+            }
+            if let Some(js) = chunks.iter().find(|c| {
+                let p = c.path.to_ascii_lowercase();
+                p.matches('/').count() == 0
+                    && (p == "main.js" || p == "app.js" || p == "index.js" || p.ends_with(".js"))
+            }) {
+                out.push(js.path.clone());
+            }
+            out
+        }
+        ProjectType::CSharp => {
+            let mut out = Vec::new();
+            if let Some(csproj) = chunks
+                .iter()
+                .find(|c| c.path.to_ascii_lowercase().ends_with(".csproj"))
+            {
+                out.push(csproj.path.clone());
+            }
+            out.extend(vec_of_existing(chunks, &["Program.cs"]));
+            out
+        }
+        ProjectType::PHP => {
+            let mut out = vec_of_existing(chunks, &["composer.json", "index.php"]);
+            out.dedup();
+            out
+        }
+        ProjectType::Unknown => {
+            let mut root_files: Vec<&ProjectChunk> = chunks
+                .iter()
+                .filter(|c| c.path.matches('/').count() == 0)
+                .collect();
+            root_files.sort_by(|a, b| b.content.len().cmp(&a.content.len()));
+            root_files
+                .into_iter()
+                .take(3)
+                .map(|c| c.path.clone())
+                .collect()
+        }
+    }
+}
+
+fn vec_of_existing(chunks: &[ProjectChunk], candidates: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for candidate in candidates {
+        if let Some(found) = chunks.iter().find(|c| c.path.eq_ignore_ascii_case(candidate)) {
+            out.push(found.path.clone());
+        }
+    }
+    out
 }
 
 fn parse_project_chunks(raw_context: &str) -> Vec<ProjectChunk> {
@@ -727,6 +1053,14 @@ async fn fetch_ollama_model_details(
 mod tests {
     use super::*;
 
+    fn mk(path: &str) -> ProjectChunk {
+        ProjectChunk {
+            path: path.to_string(),
+            language: "text".to_string(),
+            content: "x".to_string(),
+        }
+    }
+
     #[test]
     fn lexical_scores_prefers_root_readme_for_project_overview() {
         let chunks = vec![
@@ -744,6 +1078,60 @@ mod tests {
 
         let scores = lexical_scores("de que trata este proyecto", &chunks);
         assert!(scores[1].1 > scores[0].1);
+    }
+
+    #[test]
+    fn detect_project_type_rust() {
+        let d = detect_project_type(&[mk("Cargo.toml"), mk("src/main.rs")]);
+        assert_eq!(d.project_type, ProjectType::Rust);
+    }
+
+    #[test]
+    fn detect_project_type_node() {
+        let d = detect_project_type(&[mk("package.json"), mk("src/index.js")]);
+        assert_eq!(d.project_type, ProjectType::Node);
+    }
+
+    #[test]
+    fn detect_project_type_python() {
+        let d = detect_project_type(&[mk("pyproject.toml"), mk("app.py")]);
+        assert_eq!(d.project_type, ProjectType::Python);
+    }
+
+    #[test]
+    fn detect_project_type_java() {
+        let d = detect_project_type(&[mk("src/main/java/com/acme/Application.java")]);
+        assert_eq!(d.project_type, ProjectType::Java);
+    }
+
+    #[test]
+    fn detect_project_type_go() {
+        let d = detect_project_type(&[mk("go.mod"), mk("main.go")]);
+        assert_eq!(d.project_type, ProjectType::Go);
+    }
+
+    #[test]
+    fn detect_project_type_web() {
+        let d = detect_project_type(&[mk("index.html"), mk("main.js")]);
+        assert_eq!(d.project_type, ProjectType::Web);
+    }
+
+    #[test]
+    fn detect_project_type_csharp() {
+        let d = detect_project_type(&[mk("Api.csproj"), mk("Program.cs")]);
+        assert_eq!(d.project_type, ProjectType::CSharp);
+    }
+
+    #[test]
+    fn detect_project_type_php() {
+        let d = detect_project_type(&[mk("composer.json"), mk("index.php")]);
+        assert_eq!(d.project_type, ProjectType::PHP);
+    }
+
+    #[test]
+    fn detect_project_type_unknown() {
+        let d = detect_project_type(&[mk("docs/notes.txt")]);
+        assert_eq!(d.project_type, ProjectType::Unknown);
     }
 }
 
