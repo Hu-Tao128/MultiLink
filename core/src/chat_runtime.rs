@@ -1306,6 +1306,8 @@ impl ChatRuntime {
             None => self.runtime_config.tier_for_model(model_hint),
         };
         let prompt_intent = detect_query_intent(&current_prompt);
+        let base_index = session.summarized_messages.min(session.messages.len());
+        let prompt_tokens = estimate_tokens_for_model(&current_prompt, model_hint);
 
         let mut system_content = String::new();
 
@@ -1390,9 +1392,30 @@ impl ChatRuntime {
                 .as_ref()
                 .filter(|v| !v.trim().is_empty())
             {
+                let summary_tokens = session
+                    .summary
+                    .as_ref()
+                    .filter(|v| !v.trim().is_empty())
+                    .map(|summary| estimate_tokens_for_model(summary, model_hint))
+                    .unwrap_or(0);
+                let history_tokens: usize = session
+                    .messages
+                    .iter()
+                    .skip(base_index)
+                    .map(|msg| estimate_tokens_for_model(&msg.content, model_hint))
+                    .sum();
+                let system_tokens_without_project = estimate_tokens_for_model(&system_content, model_hint);
+                let reserved_non_project_tokens = system_tokens_without_project
+                    .saturating_add(summary_tokens)
+                    .saturating_add(history_tokens)
+                    .saturating_add(prompt_tokens);
                 let context_budget = effective_runtime
                     .max_project_context_tokens
-                    .min(effective_runtime.max_context_tokens.saturating_sub(tokens));
+                    .min(
+                        effective_runtime
+                            .max_context_tokens
+                            .saturating_sub(reserved_non_project_tokens),
+                    );
                 if context_budget > 0 {
                     let start = Instant::now();
                     let retrieval: RetrievalResult =
@@ -1563,10 +1586,10 @@ impl ChatRuntime {
             });
         }
 
-        let base_index = session.summarized_messages.min(session.messages.len());
+        let history_budget = effective_runtime.max_context_tokens.saturating_sub(prompt_tokens);
         for msg in session.messages.iter().skip(base_index) {
             let t = estimate_tokens_for_model(&msg.content, model_hint);
-            if tokens + t > effective_runtime.max_context_tokens {
+            if tokens + t > history_budget {
                 break;
             }
             tokens += t;
