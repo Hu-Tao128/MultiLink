@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+const CLUSTER_EMBED_SERVER_TIMEOUT_SECS: u64 = 2;
+
 #[derive(Debug, Clone)]
 pub struct RetrievalConfig {
     pub embeddings_enabled: bool,
@@ -34,6 +36,98 @@ pub struct RetrievalResult {
     pub top_k: usize,
     pub embedding_used: bool,
     pub embedding_diag: EmbeddingDiagnostics,
+}
+
+pub async fn resolve_cluster_embedding_server(
+    config: &RetrievalConfig,
+    candidate_servers: &[String],
+) -> Option<String> {
+    let servers = unique_nonempty_servers(candidate_servers);
+    if servers.is_empty() {
+        return None;
+    }
+
+    if !config.embed_model.trim().is_empty() {
+        for server in &servers {
+            let found = tokio::time::timeout(
+                Duration::from_secs(CLUSTER_EMBED_SERVER_TIMEOUT_SECS),
+                model_exists_on_server(server, &config.embed_model, config),
+            )
+            .await
+            .ok()
+            .unwrap_or(false);
+            if found {
+                return Some(server.clone());
+            }
+        }
+    }
+
+    for server in &servers {
+        let capable = tokio::time::timeout(
+            Duration::from_secs(CLUSTER_EMBED_SERVER_TIMEOUT_SECS),
+            server_has_embedding_capability(server, config),
+        )
+        .await
+        .ok()
+        .unwrap_or(false);
+        if capable {
+            return Some(server.clone());
+        }
+    }
+
+    None
+}
+
+fn unique_nonempty_servers(candidates: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for candidate in candidates {
+        let trimmed = candidate.trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized = trimmed.to_string();
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    }
+    out
+}
+
+async fn model_exists_on_server(base_url: &str, model: &str, config: &RetrievalConfig) -> bool {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(config.embed_connect_timeout_ms.min(2_000)))
+        .timeout(Duration::from_millis(config.embed_request_timeout_ms.min(2_000)))
+        .build();
+    let Ok(client) = client else {
+        return false;
+    };
+
+    let body = serde_json::json!({ "model": model });
+    let response = client
+        .post(format!("{}/api/show", base_url.trim_end_matches('/')))
+        .json(&body)
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return false;
+    };
+    response.status().is_success()
+}
+
+async fn server_has_embedding_capability(base_url: &str, config: &RetrievalConfig) -> bool {
+    let mut probe_cfg = config.clone();
+    probe_cfg.embed_base_url = base_url.to_string();
+    probe_cfg.embed_max_retries = 0;
+    probe_cfg.embed_connect_timeout_ms = probe_cfg.embed_connect_timeout_ms.min(2_000);
+    probe_cfg.embed_request_timeout_ms = probe_cfg.embed_request_timeout_ms.min(2_000);
+
+    match fetch_ollama_model_details(base_url, &probe_cfg).await {
+        Ok(details) => details
+            .iter()
+            .any(|(name, info)| info.supports_embedding || name.to_ascii_lowercase().contains("embed")),
+        Err(_) => false,
+    }
 }
 
 #[derive(Clone)]

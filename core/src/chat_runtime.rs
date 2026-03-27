@@ -18,7 +18,9 @@ use crate::context_engine::{
     ContextEngine, ContextEngineV2, ContextEngineV2Plus, ContextEngineVersion,
     ContextRetrievalConfig, RetrievalResult,
 };
-use crate::context_retrieval::{build_relevant_project_context, RetrievalConfig};
+use crate::context_retrieval::{
+    build_relevant_project_context, resolve_cluster_embedding_server, RetrievalConfig,
+};
 use crate::execution::{ExecutionDispatchRequest, ExecutionDispatcher};
 use crate::hardware_profile::{HardwareCaps, HardwareProfile};
 use crate::intent_budget::{budget_for_intent, detect_query_intent, task_weight_for_prompt};
@@ -60,6 +62,7 @@ pub struct ChatRuntime {
     sessions: Arc<RwLock<HashMap<String, ChatSession>>>,
     active_session_id: Arc<RwLock<Option<String>>>,
     cancellation: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    embedding_server_cache: Arc<Mutex<HashMap<String, String>>>,
     stream_slots: Arc<Semaphore>,
     storage_dir: PathBuf,
     persist_interval: Duration,
@@ -117,6 +120,7 @@ impl ChatRuntime {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             active_session_id: Arc::new(RwLock::new(None)),
             cancellation: Arc::new(Mutex::new(HashMap::new())),
+            embedding_server_cache: Arc::new(Mutex::new(HashMap::new())),
             stream_slots: Arc::new(Semaphore::new(runtime_config.max_parallel_streams.max(1))),
             storage_dir,
             persist_interval,
@@ -273,6 +277,7 @@ impl ChatRuntime {
         for id in &ids_to_delete {
             let path = self.storage_dir.join(format!("{}.json", id));
             let _ = tokio::fs::remove_file(path).await;
+            self.embedding_server_cache.lock().await.remove(id);
         }
 
         let ids = self.sessions.read().await.keys().cloned().collect();
@@ -284,6 +289,7 @@ impl ChatRuntime {
         if let Some(cancel) = self.cancellation.lock().await.remove(session_id) {
             let _ = cancel.send(true);
         }
+        self.embedding_server_cache.lock().await.remove(session_id);
 
         {
             let mut guard = self.sessions.write().await;
@@ -1308,6 +1314,56 @@ impl ChatRuntime {
         let prompt_intent = detect_query_intent(&current_prompt);
         let base_index = session.summarized_messages.min(session.messages.len());
         let prompt_tokens = estimate_tokens_for_model(&current_prompt, model_hint);
+        let mut resolved_embed_base_url = effective_runtime.embed_base_url.clone();
+        let mut embeddings_enabled_for_request = effective_runtime.context_embeddings_enabled;
+
+        if embeddings_enabled_for_request {
+            if let Some(cached_embed_url) = self.embedding_server_cache.lock().await.get(session_id).cloned() {
+                resolved_embed_base_url = cached_embed_url;
+            } else {
+                let mut cluster_servers: Vec<String> = effective_runtime
+                    .execution_servers
+                    .iter()
+                    .filter(|s| s.enabled)
+                    .map(|s| s.base_url.clone())
+                    .collect();
+                if cluster_servers.is_empty() {
+                    cluster_servers.push(effective_runtime.embed_base_url.clone());
+                } else if !cluster_servers.iter().any(|url| {
+                    url.trim_end_matches('/')
+                        == effective_runtime.context_ollama_base_url.trim_end_matches('/')
+                }) {
+                    cluster_servers.push(effective_runtime.context_ollama_base_url.clone());
+                }
+
+                let probe_config = RetrievalConfig {
+                    embeddings_enabled: effective_runtime.context_embeddings_enabled,
+                    embed_model: effective_runtime.context_embed_model.clone(),
+                    embed_base_url: effective_runtime.embed_base_url.clone(),
+                    ollama_base_url: effective_runtime.context_ollama_base_url.clone(),
+                    embed_connect_timeout_ms: effective_runtime.embed_connect_timeout_ms,
+                    embed_request_timeout_ms: effective_runtime.embed_request_timeout_ms,
+                    embed_max_retries: effective_runtime.embed_max_retries,
+                    embed_batch_size: effective_runtime.embed_batch_size,
+                    top_k: effective_runtime.context_project_top_k,
+                };
+
+                if effective_runtime.execution_servers.is_empty() {
+                    resolved_embed_base_url = effective_runtime.embed_base_url.clone();
+                } else if let Some(selected_embed_url) =
+                    resolve_cluster_embedding_server(&probe_config, &cluster_servers).await
+                {
+                    resolved_embed_base_url = selected_embed_url.clone();
+                    self.embedding_server_cache
+                        .lock()
+                        .await
+                        .insert(session_id.to_string(), selected_embed_url);
+                } else {
+                    embeddings_enabled_for_request = false;
+                    eprintln!("[context] no embedding-capable server found in cluster");
+                }
+            }
+        }
 
         let mut system_content = String::new();
 
@@ -1425,9 +1481,9 @@ impl ChatRuntime {
                                 .join("multilink")
                                 .join("index");
                             let config = ContextRetrievalConfig {
-                                embeddings_enabled: effective_runtime.context_embeddings_enabled,
+                                embeddings_enabled: embeddings_enabled_for_request,
                                 embed_model: effective_runtime.context_embed_model.clone(),
-                                embed_base_url: effective_runtime.embed_base_url.clone(),
+                                embed_base_url: resolved_embed_base_url.clone(),
                                 ollama_base_url: effective_runtime.context_ollama_base_url.clone(),
                                 embed_connect_timeout_ms: effective_runtime
                                     .embed_connect_timeout_ms,
@@ -1476,10 +1532,9 @@ impl ChatRuntime {
                                 context_budget,
                                 model_hint,
                                 RetrievalConfig {
-                                    embeddings_enabled: effective_runtime
-                                        .context_embeddings_enabled,
+                                    embeddings_enabled: embeddings_enabled_for_request,
                                     embed_model: effective_runtime.context_embed_model.clone(),
-                                    embed_base_url: effective_runtime.embed_base_url.clone(),
+                                    embed_base_url: resolved_embed_base_url.clone(),
                                     ollama_base_url: effective_runtime
                                         .context_ollama_base_url
                                         .clone(),
@@ -1520,8 +1575,12 @@ impl ChatRuntime {
                         system_content.push_str(&retrieval.context);
                         system_content.push('\n');
                         if context_debug_enabled(&self.runtime_config) {
+                            let embed_server_delegated = retrieval.embedding_used
+                                && !retrieval.embed_base_url.is_empty()
+                                && retrieval.embed_base_url.trim_end_matches('/')
+                                    != effective_runtime.context_ollama_base_url.trim_end_matches('/');
                             eprintln!(
-                                "[context] session={} model={:?} engine={} top_k={} embeddings={} reason={} embed_attempts={} embed_latency_ms={} embed_model={} embed_url={} is_truncated={} selected_files={:?} context_tokens={}",
+                                "[context] session={} model={:?} engine={} top_k={} embeddings={} reason={} embed_attempts={} embed_latency_ms={} embed_model={} embed_url={} embed_server_delegated={} is_truncated={} selected_files={:?} context_tokens={}",
                                 session_id,
                                 model_hint,
                                 effective_runtime.context_engine,
@@ -1532,6 +1591,7 @@ impl ChatRuntime {
                                 retrieval.embedding_latency_ms,
                                 retrieval.embed_model,
                                 retrieval.embed_base_url,
+                                embed_server_delegated,
                                 retrieval.is_truncated,
                                 retrieval.selected_files,
                                 retrieval.budget_used
