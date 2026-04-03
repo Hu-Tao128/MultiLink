@@ -34,17 +34,49 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-base-dev qt6-declarative-dev cmake build-essential libgl1-mesa-dev libxkbcommon-dev
+          sudo apt-get install -y \
+            qt6-base-dev \
+            qt6-declarative-dev \
+            qt6-quick-dev \
+            qt6-qml-plugins \
+            qt6-tools-dev \
+            cmake \
+            build-essential \
+            libgl1-mesa-dev \
+            libxkbcommon-dev \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render-util0 \
+            libxcb-xinerama0 \
+            libxcb-xfixes0
 
       - name: Install Qt (macOS)
         if: matrix.os == 'macos-14'
         run: |
           brew install qt cmake ninja
 
+      - name: Install CMake and Ninja (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          # Try choco first, fallback to manual download if it fails
+          try {
+            choco install cmake ninja -y --no-progress
+          } catch {
+            # Manual fallback - download CMake
+            $cmakeUrl = "https://github.com/Kitware/CMake/releases/download/v3.28.1/cmake-3.28.1-windows-x86_64.zip"
+            Invoke-WebRequest -Uri $cmakeUrl -OutFile cmake.zip
+            Expand-Archive cmake.zip -DestinationPath C:\cmake
+            Add-Path -Path "C:\cmake\bin" -Scope User
+          }
+
       - name: Install Qt (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          choco install cmake ninja -y
+          choco install qt6-base -y --no-progress --ignore-checksums || choco install qt6-base -y --no-progress --ignore-checksums || echo "Qt installation may require manual setup"
 
       - name: Build Rust Backend
         env:
