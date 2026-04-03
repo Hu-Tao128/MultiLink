@@ -114,6 +114,7 @@ pub struct PerformanceConfig {
     pub profile: String,
     pub max_parallel_streams: usize,
     pub stream_first_token_timeout_secs: u64,
+    pub thinking_model_timeout_multiplier: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -192,6 +193,7 @@ pub struct RuntimeConfig {
     pub network_shared_secret: String,
     pub network_allowed_ips: Vec<String>,
     pub stream_first_token_timeout_secs: u64,
+    pub thinking_model_timeout_multiplier: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -329,6 +331,7 @@ impl Default for RuntimeConfig {
             network_shared_secret: String::new(),
             network_allowed_ips: Vec::new(),
             stream_first_token_timeout_secs: 60,
+            thinking_model_timeout_multiplier: 5,
         }
     }
 }
@@ -373,6 +376,7 @@ impl Default for PerformanceConfig {
             profile: "auto".to_string(),
             max_parallel_streams: 4,
             stream_first_token_timeout_secs: 60,
+            thinking_model_timeout_multiplier: 5,
         }
     }
 }
@@ -687,6 +691,10 @@ impl AppConfig {
             .performance
             .stream_first_token_timeout_secs
             .clamp(1, 600);
+        self.runtime.thinking_model_timeout_multiplier = self
+            .performance
+            .thinking_model_timeout_multiplier
+            .clamp(1, 20);
         self.runtime.observability_json_logs = self.ui.json_logs;
         self.runtime.remote_threshold = self.routing.remote_threshold;
         self.runtime.context_engine = self.context.engine.clone();
@@ -797,7 +805,13 @@ impl AppConfig {
 
         if self.performance.stream_first_token_timeout_secs == 0 {
             return Err(ConfigError::Invalid(
-                "performance.stream_first_token_timeout_secs must be greater than zero"
+                "performance.stream_first_token_timeout_secs must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.performance.thinking_model_timeout_multiplier == 0 {
+            return Err(ConfigError::Invalid(
+                "performance.thinking_model_timeout_multiplier must be greater than zero"
                     .to_string(),
             ));
         }

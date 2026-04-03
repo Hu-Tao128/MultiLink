@@ -24,6 +24,7 @@ engine = "v2"
 [performance]
 profile = "auto"
 max_parallel_streams = 4
+thinking_model_timeout_multiplier = 5
 
 [routing]
 remote_threshold = "heavy"

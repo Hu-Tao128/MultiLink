@@ -563,10 +563,79 @@ async fn runtime_times_out_when_first_token_is_too_slow() {
         }
     }
 
-    assert!(saw_started, "stream should start before first-token timeout");
+    assert!(
+        saw_started,
+        "stream should start before first-token timeout"
+    );
     assert!(
         saw_timeout_error,
         "runtime should emit first-token-timeout error when no chunk arrives in time"
+    );
+}
+
+#[tokio::test]
+async fn runtime_extends_first_token_timeout_for_thinking_models() {
+    let mut router = ProviderRouter::new();
+    router.register(Arc::new(DelayedFirstTokenProvider));
+
+    let temp = tempfile::tempdir().expect("temp");
+    let runtime = ChatRuntime::new_with_config(
+        Arc::new(router),
+        temp.path().join("sessions"),
+        Duration::from_millis(40),
+        RuntimeConfig {
+            stream_first_token_timeout_secs: 1,
+            thinking_model_timeout_multiplier: 5,
+            ..RuntimeConfig::default()
+        },
+        None,
+    );
+
+    let session_id = runtime
+        .create_session(ProviderId::Ollama, Some("deepseek-r1:14b".to_string()))
+        .await;
+
+    let mut rx = runtime
+        .send_message(&session_id, "hello".to_string())
+        .await
+        .expect("send");
+
+    let mut saw_chunk = false;
+    let mut saw_finished = false;
+    let mut saw_timeout_error = false;
+
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(7), rx.recv()).await {
+        match event {
+            StreamEvent::Chunk(chunk) => {
+                if chunk.contains("late") {
+                    saw_chunk = true;
+                }
+            }
+            StreamEvent::Error(message) => {
+                if message.contains("primer token") {
+                    saw_timeout_error = true;
+                }
+                break;
+            }
+            StreamEvent::Finished => {
+                saw_finished = true;
+                break;
+            }
+            StreamEvent::Started | StreamEvent::Usage { .. } => {}
+        }
+    }
+
+    assert!(
+        !saw_timeout_error,
+        "thinking model should not hit first-token timeout with multiplier"
+    );
+    assert!(
+        saw_chunk,
+        "thinking model stream should receive delayed chunk"
+    );
+    assert!(
+        saw_finished,
+        "thinking model stream should finish when timeout is extended"
     );
 }
 

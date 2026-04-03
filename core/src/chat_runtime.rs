@@ -838,9 +838,23 @@ impl ChatRuntime {
         let metrics_top_k = effective_runtime.context_project_top_k;
         let metrics_json = effective_runtime.observability_json_logs;
         let metrics_context_tokens = context_tokens;
-        let first_token_timeout = Duration::from_secs(
-            effective_runtime.stream_first_token_timeout_secs.max(1),
-        );
+        let base_first_token_timeout_secs =
+            effective_runtime.stream_first_token_timeout_secs.max(1);
+        let thinking_timeout_multiplier =
+            effective_runtime.thinking_model_timeout_multiplier.max(1);
+        let thinking_model = is_thinking_model(&model_used, model_profile.as_ref());
+        let first_token_timeout_secs = if thinking_model {
+            base_first_token_timeout_secs.saturating_mul(thinking_timeout_multiplier)
+        } else {
+            base_first_token_timeout_secs
+        };
+        if thinking_model {
+            eprintln!(
+                "[stream] model={} thinking_model=true timeout_secs={}",
+                model_used, first_token_timeout_secs
+            );
+        }
+        let first_token_timeout = Duration::from_secs(first_token_timeout_secs);
         let started_at = Instant::now();
         let retries: usize = dispatcher_retries + usize::from(fallback_retry_used);
         let execution_dispatcher = self.execution_dispatcher.clone();
@@ -1318,7 +1332,13 @@ impl ChatRuntime {
         let mut embeddings_enabled_for_request = effective_runtime.context_embeddings_enabled;
 
         if embeddings_enabled_for_request {
-            if let Some(cached_embed_url) = self.embedding_server_cache.lock().await.get(session_id).cloned() {
+            if let Some(cached_embed_url) = self
+                .embedding_server_cache
+                .lock()
+                .await
+                .get(session_id)
+                .cloned()
+            {
                 resolved_embed_base_url = cached_embed_url;
             } else {
                 let mut cluster_servers: Vec<String> = effective_runtime
@@ -1331,7 +1351,9 @@ impl ChatRuntime {
                     cluster_servers.push(effective_runtime.embed_base_url.clone());
                 } else if !cluster_servers.iter().any(|url| {
                     url.trim_end_matches('/')
-                        == effective_runtime.context_ollama_base_url.trim_end_matches('/')
+                        == effective_runtime
+                            .context_ollama_base_url
+                            .trim_end_matches('/')
                 }) {
                     cluster_servers.push(effective_runtime.context_ollama_base_url.clone());
                 }
@@ -1460,18 +1482,17 @@ impl ChatRuntime {
                     .skip(base_index)
                     .map(|msg| estimate_tokens_for_model(&msg.content, model_hint))
                     .sum();
-                let system_tokens_without_project = estimate_tokens_for_model(&system_content, model_hint);
+                let system_tokens_without_project =
+                    estimate_tokens_for_model(&system_content, model_hint);
                 let reserved_non_project_tokens = system_tokens_without_project
                     .saturating_add(summary_tokens)
                     .saturating_add(history_tokens)
                     .saturating_add(prompt_tokens);
-                let context_budget = effective_runtime
-                    .max_project_context_tokens
-                    .min(
-                        effective_runtime
-                            .max_context_tokens
-                            .saturating_sub(reserved_non_project_tokens),
-                    );
+                let context_budget = effective_runtime.max_project_context_tokens.min(
+                    effective_runtime
+                        .max_context_tokens
+                        .saturating_sub(reserved_non_project_tokens),
+                );
                 if context_budget > 0 {
                     let start = Instant::now();
                     let retrieval: RetrievalResult =
@@ -1578,7 +1599,9 @@ impl ChatRuntime {
                             let embed_server_delegated = retrieval.embedding_used
                                 && !retrieval.embed_base_url.is_empty()
                                 && retrieval.embed_base_url.trim_end_matches('/')
-                                    != effective_runtime.context_ollama_base_url.trim_end_matches('/');
+                                    != effective_runtime
+                                        .context_ollama_base_url
+                                        .trim_end_matches('/');
                             eprintln!(
                                 "[context] session={} model={:?} engine={} top_k={} embeddings={} reason={} embed_attempts={} embed_latency_ms={} embed_model={} embed_url={} embed_server_delegated={} is_truncated={} selected_files={:?} context_tokens={}",
                                 session_id,
@@ -1646,7 +1669,9 @@ impl ChatRuntime {
             });
         }
 
-        let history_budget = effective_runtime.max_context_tokens.saturating_sub(prompt_tokens);
+        let history_budget = effective_runtime
+            .max_context_tokens
+            .saturating_sub(prompt_tokens);
         for msg in session.messages.iter().skip(base_index) {
             let t = estimate_tokens_for_model(&msg.content, model_hint);
             if tokens + t > history_budget {
@@ -1795,6 +1820,24 @@ fn likely_context_overflow(message: &str) -> bool {
         || lower.contains("maximum context")
         || lower.contains("prompt is too long")
         || lower.contains("token limit")
+}
+
+fn is_thinking_model(model_name: &str, profile: Option<&ModelProfile>) -> bool {
+    is_thinking_model_name(model_name)
+        || profile
+            .map(|p| model_class_is_reasoning(p.class))
+            .unwrap_or(false)
+}
+
+fn is_thinking_model_name(model_name: &str) -> bool {
+    let lower = model_name.to_ascii_lowercase();
+    ["thinking", "deepseek-r", "qwq", "gemma4", "r1", "r2"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+fn model_class_is_reasoning(class: ModelClass) -> bool {
+    format!("{:?}", class).eq_ignore_ascii_case("reasoning")
 }
 
 fn role_label(role: &str) -> &str {
