@@ -139,6 +139,7 @@ impl OllamaProvider {
     }
 
     fn detect_capabilities(
+        model_name: &str,
         response: &OllamaShowResponse,
         context_length: usize,
     ) -> ProviderCapabilities {
@@ -158,6 +159,14 @@ impl OllamaProvider {
             || model_info
                 .is_some_and(|m| m.keys().any(|k| k.contains("vision") || k.contains("mm.")));
 
+        let model_name_l = model_name.to_ascii_lowercase();
+        let supports_thinking = capabilities_raw.contains(&"thinking".to_string())
+            || model_name_l.contains("thinking")
+            || model_name_l.contains("r1")
+            || model_name_l.contains("qwq");
+
+        let context_length_u32 = context_length.min(u32::MAX as usize) as u32;
+
         let parameter_count = model_info.and_then(extract_parameter_count);
         let quantization_level = model_info.and_then(extract_quantization_level);
         let embedding_length = model_info.and_then(extract_embedding_length);
@@ -166,6 +175,9 @@ impl OllamaProvider {
             chat: true,
             tools: supports_tools,
             fim: supports_fim,
+            supports_vision,
+            supports_thinking,
+            context_length: context_length_u32,
             vision: supports_vision,
             supports_embedding,
             max_context_tokens: context_length,
@@ -187,7 +199,7 @@ impl OllamaProvider {
 
         let response = self.fetch_model_info(model).await?;
         let context_length = Self::extract_context_length(&response.model_info);
-        let capabilities = Self::detect_capabilities(&response, context_length);
+        let capabilities = Self::detect_capabilities(model, &response, context_length);
 
         let mut cache = self.model_cache.write().await;
         cache.insert(

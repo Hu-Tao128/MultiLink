@@ -52,7 +52,14 @@ impl ModelInfo {
     pub fn supports_vision(&self) -> bool {
         self.capabilities
             .as_ref()
-            .map(|c| c.vision)
+            .map(|c| c.supports_vision || c.vision)
+            .unwrap_or(false)
+    }
+
+    pub fn supports_thinking(&self) -> bool {
+        self.capabilities
+            .as_ref()
+            .map(|c| c.supports_thinking)
             .unwrap_or(false)
     }
 }

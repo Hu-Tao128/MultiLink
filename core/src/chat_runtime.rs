@@ -27,7 +27,7 @@ use crate::intent_budget::{budget_for_intent, detect_query_intent, task_weight_f
 use crate::lan_agent::LanAgentServer;
 use crate::model_profile::{ModelClass, ModelProfile};
 use crate::observability::{ContextRetrievalMetrics, ExecutionMetrics};
-use crate::providers::{PromptOptions, ProviderId};
+use crate::providers::{PromptOptions, ProviderCapabilities, ProviderId};
 use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
 use crate::skills::{Skill, SkillLoader, SkillOrchestrator};
@@ -244,6 +244,23 @@ impl ChatRuntime {
             .await
             .get(session_id)
             .map(|s| s.messages.clone())
+    }
+
+    pub async fn get_session_model_capabilities(
+        &self,
+        session_id: &str,
+    ) -> Option<(String, ProviderCapabilities)> {
+        let (provider, model_name) = {
+            let guard = self.sessions.read().await;
+            let session = guard.get(session_id)?;
+            let model_name = session.model.clone()?;
+            (session.provider, model_name)
+        };
+
+        match self.router.get_model_info(provider, &model_name).await {
+            Ok(capabilities) => Some((model_name, capabilities)),
+            Err(_) => None,
+        }
     }
 
     pub async fn delete_empty_sessions(&self) -> Result<(), ChatRuntimeError> {
@@ -639,8 +656,10 @@ impl ChatRuntime {
             .max(2);
 
         let mut model_profile: Option<ModelProfile> = None;
+        let mut model_capabilities: Option<ProviderCapabilities> = None;
         if let Some(model_name) = model.as_ref() {
             if let Ok(caps) = self.router.get_model_info(provider, model_name).await {
+                model_capabilities = Some(caps.clone());
                 let profile = ModelProfile::from_capabilities(model_name.clone(), &caps);
                 let budget = profile.retrieval_budget();
                 effective_runtime.max_context_tokens = effective_runtime
@@ -660,6 +679,15 @@ impl ChatRuntime {
                     effective_runtime.context_project_top_k =
                         effective_runtime.context_project_top_k.clamp(2, 3);
                 }
+
+                eprintln!(
+                    "[model] name={} vision={} thinking={} ctx={}",
+                    model_name,
+                    caps.supports_vision || caps.vision,
+                    caps.supports_thinking,
+                    caps.context_length
+                        .max(caps.max_context_tokens.min(u32::MAX as usize) as u32)
+                );
                 model_profile = Some(profile);
             }
         }
@@ -842,7 +870,11 @@ impl ChatRuntime {
             effective_runtime.stream_first_token_timeout_secs.max(1);
         let thinking_timeout_multiplier =
             effective_runtime.thinking_model_timeout_multiplier.max(1);
-        let thinking_model = is_thinking_model(&model_used, model_profile.as_ref());
+        let thinking_model = is_thinking_model(
+            &model_used,
+            model_capabilities.as_ref(),
+            model_profile.as_ref(),
+        );
         let first_token_timeout_secs = if thinking_model {
             base_first_token_timeout_secs.saturating_mul(thinking_timeout_multiplier)
         } else {
@@ -1822,8 +1854,13 @@ fn likely_context_overflow(message: &str) -> bool {
         || lower.contains("token limit")
 }
 
-fn is_thinking_model(model_name: &str, profile: Option<&ModelProfile>) -> bool {
-    is_thinking_model_name(model_name)
+fn is_thinking_model(
+    model_name: &str,
+    capabilities: Option<&ProviderCapabilities>,
+    profile: Option<&ModelProfile>,
+) -> bool {
+    capabilities.map(|c| c.supports_thinking).unwrap_or(false)
+        || is_thinking_model_name(model_name)
         || profile
             .map(|p| model_class_is_reasoning(p.class))
             .unwrap_or(false)

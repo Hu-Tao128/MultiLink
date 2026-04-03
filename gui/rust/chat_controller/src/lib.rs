@@ -2,14 +2,14 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use multilink_core::config::ServerConfig;
 use multilink_core::auth::TokenStore;
-use multilink_core::providers::gemini::GeminiProvider;
+use multilink_core::config::ServerConfig;
 use multilink_core::providers::codex::CodexProvider;
+use multilink_core::providers::gemini::GeminiProvider;
 use multilink_core::providers::ollama::OllamaProvider;
 use multilink_core::{
     AppConfig, ChatRuntime, ProviderId, ProviderKind, ProviderRouter, StreamEvent,
@@ -104,17 +104,18 @@ pub extern "C" fn chat_backend_create(
     let config_path = AppConfig::default_user_config_path();
     let (config, startup_notice) = load_config_with_recovery(&runtime, &config_path);
 
-    let mut selected_server = config
-        .primary_server()
-        .cloned()
-        .unwrap_or_else(|| multilink_core::config::ServerConfig {
-            name: "Local Ollama".to_string(),
-            provider: ProviderKind::Ollama,
-            base_url: "http://127.0.0.1:11434".to_string(),
-            default_model: "qwen2.5-coder:3b".to_string(),
-            priority: 1,
-            enabled: true,
-        });
+    let mut selected_server =
+        config
+            .primary_server()
+            .cloned()
+            .unwrap_or_else(|| multilink_core::config::ServerConfig {
+                name: "Local Ollama".to_string(),
+                provider: ProviderKind::Ollama,
+                base_url: "http://127.0.0.1:11434".to_string(),
+                default_model: "qwen2.5-coder:3b".to_string(),
+                priority: 1,
+                enabled: true,
+            });
     selected_server.base_url = normalize_base_url(&selected_server.base_url);
 
     let mut router = ProviderRouter::new();
@@ -128,16 +129,25 @@ pub extern "C" fn chat_backend_create(
         .join("multilink");
     let token_store = TokenStore::for_path(token_store_path.clone());
     let gemini_token = runtime.block_on(async {
-        token_store.load("gemini").await.ok().flatten()
+        token_store
+            .load("gemini")
+            .await
+            .ok()
+            .flatten()
             .map(|t| t.access_token)
     });
     let codex_token = runtime.block_on(async {
-        token_store.load("codex").await.ok().flatten()
+        token_store
+            .load("codex")
+            .await
+            .ok()
+            .flatten()
             .map(|t| t.access_token)
     });
 
     if let Ok(gemini) = GeminiProvider::new(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent".to_string(),
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+            .to_string(),
         gemini_token,
         120,
     ) {
@@ -180,7 +190,10 @@ pub extern "C" fn chat_backend_create(
         }
 
         chat_runtime
-            .create_session(ProviderId::Ollama, Some(selected_server.default_model.clone()))
+            .create_session(
+                ProviderId::Ollama,
+                Some(selected_server.default_model.clone()),
+            )
             .await
     });
 
@@ -338,7 +351,12 @@ fn spawn_send_prompt(
                                 &chunk,
                             );
                         }
-                        StreamEvent::Usage { prompt_tokens, completion_tokens, total_tokens, is_estimated } => {
+                        StreamEvent::Usage {
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens,
+                            is_estimated,
+                        } => {
                             if let Some(callback) = callbacks.on_token_usage {
                                 let session_cstr = CString::new(stream_session.clone()).unwrap();
                                 callback(
@@ -448,9 +466,11 @@ pub unsafe extern "C" fn chat_backend_new_session(handle: *mut BackendHandle) ->
         Some(model)
     };
 
-    let id = backend
-        .runtime
-        .block_on(backend.chat_runtime.create_session(ProviderId::Ollama, selected_model));
+    let id = backend.runtime.block_on(
+        backend
+            .chat_runtime
+            .create_session(ProviderId::Ollama, selected_model),
+    );
 
     if let Ok(mut active) = backend.active_session_id.lock() {
         *active = id.clone();
@@ -504,7 +524,10 @@ pub unsafe extern "C" fn chat_backend_select_session(
         if chat_runtime.select_session(&id).await.is_ok() {
             let sessions = chat_runtime.list_sessions().await;
             if let Some(session) = sessions.iter().find(|s| s.id == id) {
-                let mut selected_model_for_ui = session.model.clone().unwrap_or_else(|| fallback_model.clone());
+                let mut selected_model_for_ui = session
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| fallback_model.clone());
                 if let Some(model) = session.model.as_ref() {
                     if is_embedding_like_model(model) {
                         let _ = chat_runtime
@@ -575,15 +598,14 @@ pub unsafe extern "C" fn chat_backend_set_session_project_root(
         return;
     }
 
-    let project_root_value = c_char_ptr_to_string(project_root)
-        .and_then(|root| {
-            let trimmed = root.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        });
+    let project_root_value = c_char_ptr_to_string(project_root).and_then(|root| {
+        let trimmed = root.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
 
     let runtime = backend.runtime.handle().clone();
     let chat_runtime = backend.chat_runtime.clone();
@@ -616,15 +638,11 @@ pub unsafe extern "C" fn chat_backend_models_json(handle: *mut BackendHandle) ->
         return into_c_string("[]".to_string());
     };
 
-    let payload = backend
-        .runtime
-        .block_on(async {
-            let base_url = resolve_active_base_url_from_path(
-                &backend.config_path,
-                &backend.ollama_base_url,
-            );
-            build_models_json(&backend.config_path, &base_url).await
-        });
+    let payload = backend.runtime.block_on(async {
+        let base_url =
+            resolve_active_base_url_from_path(&backend.config_path, &backend.ollama_base_url);
+        build_models_json(&backend.config_path, &base_url).await
+    });
     into_c_string(payload)
 }
 
@@ -704,8 +722,9 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
             hint: "Usa la IP real del servidor (ej. 192.168.x.x o 100.x.x.x) o http://127.0.0.1:11434 si es esta misma maquina.".to_string(),
         };
         return into_c_string(
-            serde_json::to_string(&result)
-                .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialization failed\"}".to_string()),
+            serde_json::to_string(&result).unwrap_or_else(|_| {
+                "{\"ok\":false,\"error\":\"serialization failed\"}".to_string()
+            }),
         );
     }
 
@@ -735,7 +754,7 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
                     models: Vec::new(),
                     error: err_text.clone(),
                     hint: connection_hint_for_error(&url, &err_text),
-                }
+                };
             }
         };
 
@@ -772,7 +791,10 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
         }
     });
 
-    into_c_string(serde_json::to_string(&result).unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialization failed\"}".to_string()))
+    into_c_string(
+        serde_json::to_string(&result)
+            .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialization failed\"}".to_string()),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -920,6 +942,68 @@ pub unsafe extern "C" fn chat_backend_get_startup_notice(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_get_model_capabilities(
+    handle: *mut BackendHandle,
+    session_id: *const c_char,
+) -> *mut c_char {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return into_c_string(
+            json!({
+                "supports_vision": false,
+                "supports_thinking": false,
+                "context_length": 0,
+                "model_name": ""
+            })
+            .to_string(),
+        );
+    };
+
+    let Some(session_id_value) = c_char_ptr_to_string(session_id) else {
+        return into_c_string(
+            json!({
+                "supports_vision": false,
+                "supports_thinking": false,
+                "context_length": 0,
+                "model_name": ""
+            })
+            .to_string(),
+        );
+    };
+
+    let payload = backend.runtime.block_on(async {
+        match backend
+            .chat_runtime
+            .get_session_model_capabilities(&session_id_value)
+            .await
+        {
+            Some((model_name, capabilities)) => {
+                let context_length = if capabilities.context_length > 0 {
+                    capabilities.context_length
+                } else {
+                    capabilities.max_context_tokens.min(u32::MAX as usize) as u32
+                };
+                json!({
+                    "supports_vision": capabilities.supports_vision || capabilities.vision,
+                    "supports_thinking": capabilities.supports_thinking,
+                    "context_length": context_length,
+                    "model_name": model_name
+                })
+                .to_string()
+            }
+            None => json!({
+                "supports_vision": false,
+                "supports_thinking": false,
+                "context_length": 0,
+                "model_name": ""
+            })
+            .to_string(),
+        }
+    });
+
+    into_c_string(payload)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn chat_backend_clear_startup_notice(handle: *mut BackendHandle) {
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return;
@@ -1011,9 +1095,15 @@ pub extern "C" fn chat_backend_save_provider_token(
     provider_cstr: *const c_char,
     token_cstr: *const c_char,
 ) -> i32 {
-    let Some(backend) = (unsafe { handle.as_ref() }) else { return 0 };
-    let Some(provider) = c_char_ptr_to_string(provider_cstr) else { return 0 };
-    let Some(token) = c_char_ptr_to_string(token_cstr) else { return 0 };
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return 0;
+    };
+    let Some(provider) = c_char_ptr_to_string(provider_cstr) else {
+        return 0;
+    };
+    let Some(token) = c_char_ptr_to_string(token_cstr) else {
+        return 0;
+    };
 
     if provider.is_empty() || token.is_empty() {
         return 0;
@@ -1041,8 +1131,12 @@ pub extern "C" fn chat_backend_clear_provider_token(
     handle: *mut BackendHandle,
     provider_cstr: *const c_char,
 ) -> i32 {
-    let Some(backend) = (unsafe { handle.as_ref() }) else { return 0 };
-    let Some(provider) = c_char_ptr_to_string(provider_cstr) else { return 0 };
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return 0;
+    };
+    let Some(provider) = c_char_ptr_to_string(provider_cstr) else {
+        return 0;
+    };
 
     if provider.is_empty() {
         return 0;
@@ -1058,7 +1152,10 @@ pub extern "C" fn chat_backend_clear_provider_token(
         expires_at: None,
         token_type: None,
     };
-    match backend.runtime.block_on(store.save(&provider, &empty_token)) {
+    match backend
+        .runtime
+        .block_on(store.save(&provider, &empty_token))
+    {
         Ok(_) => 1,
         Err(_) => 0,
     }
@@ -1069,22 +1166,32 @@ pub extern "C" fn chat_backend_has_provider_token(
     handle: *mut BackendHandle,
     provider_cstr: *const c_char,
 ) -> i32 {
-    let Some(backend) = (unsafe { handle.as_ref() }) else { return 0 };
-    let Some(provider) = c_char_ptr_to_string(provider_cstr) else { return 0 };
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return 0;
+    };
+    let Some(provider) = c_char_ptr_to_string(provider_cstr) else {
+        return 0;
+    };
 
     let store_path = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("multilink");
     let store = TokenStore::for_path(store_path);
     let has_token = backend.runtime.block_on(async {
-        store.load(&provider).await
+        store
+            .load(&provider)
+            .await
             .ok()
             .flatten()
             .map(|t| !t.access_token.is_empty())
             .unwrap_or(false)
     });
 
-    if has_token { 1 } else { 0 }
+    if has_token {
+        1
+    } else {
+        0
+    }
 }
 
 fn emit_string(callback: Option<StringCallback>, ctx: *mut c_void, text: &str) {
@@ -1228,8 +1335,7 @@ async fn fetch_models_for_server(server_name: &str, base_url: &str) -> Vec<serde
         Err(_) => return Vec::new(),
     };
 
-    tags
-        .models
+    tags.models
         .into_iter()
         .filter(|m| !is_embedding_like_model(&m.name))
         .map(|m| {
@@ -1436,14 +1542,21 @@ mod tests {
     #[test]
     fn c_char_ptr_to_string_returns_some_for_valid_ptr() {
         let value = CString::new("gemini").expect("valid c string");
-        assert_eq!(c_char_ptr_to_string(value.as_ptr()), Some("gemini".to_string()));
+        assert_eq!(
+            c_char_ptr_to_string(value.as_ptr()),
+            Some("gemini".to_string())
+        );
     }
 
     #[test]
     fn ffi_token_functions_return_error_for_null_provider_ptr() {
         // If QML sends null pointers, FFI must fail safely without dereferencing them.
         assert_eq!(
-            chat_backend_save_provider_token(std::ptr::null_mut(), std::ptr::null(), std::ptr::null()),
+            chat_backend_save_provider_token(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null()
+            ),
             0
         );
         assert_eq!(

@@ -29,7 +29,9 @@ pub struct RetrievalBudget {
 
 impl ModelProfile {
     pub fn from_capabilities(model_name: String, caps: &ProviderCapabilities) -> Self {
-        let context_length = caps.max_context_tokens.max(2048);
+        let context_length = (caps.context_length as usize)
+            .max(caps.max_context_tokens)
+            .max(2048);
         let class = classify_model(caps.parameter_count);
         Self {
             model_name,

@@ -135,6 +135,13 @@ pub struct ProviderCapabilities {
     pub chat: bool,
     pub tools: bool,
     pub fim: bool,
+    #[serde(default)]
+    pub supports_vision: bool,
+    #[serde(default)]
+    pub supports_thinking: bool,
+    #[serde(default)]
+    pub context_length: u32,
+    #[serde(default)]
     pub vision: bool,
     pub supports_embedding: bool,
     pub max_context_tokens: usize,
@@ -150,10 +157,14 @@ pub struct ProviderCapabilities {
 
 impl ProviderCapabilities {
     pub fn default_with_context(context_tokens: usize) -> Self {
+        let context_length = context_tokens.min(u32::MAX as usize) as u32;
         Self {
             chat: true,
             tools: false,
             fim: false,
+            supports_vision: false,
+            supports_thinking: false,
+            context_length,
             vision: false,
             supports_embedding: false,
             max_context_tokens: context_tokens,
