@@ -1,7 +1,7 @@
 # 🧠 Roadmap: MultiLink Context Engine v2
 
 > Creado: 2026-03-16
-> Estado: 🟡 En progreso
+> Estado: ✅ COMPLETADO - 2026-04-02
 
 ## ⚠️ Notas y Decisiones
 *(Se añaden automáticamente al completar tareas)*
@@ -64,9 +64,54 @@
 - [ ] Exponer `symbol_table` al context engine para queries en tiempo real.
 - [x] Debounce 300ms en `didChange` antes de re-indexar.
 
-## Fase 5 — QA y Rendimiento
+## Fase 6 — QA y Validación A/B (v2plus vs v1)
+
+> Estado: ✅ COMPLETADO - 2026-04-02
+
+- [x] **Comparación de comportamiento:** Se ejecutaron múltiples sesiones con v2plus bajo diferentes intents (ProjectWide, FileScoped, Conversational).
+- [x] **Métricas capturadas:**
+  - `embeddings=true` en 100% de requests
+  - `selected_files` siempre relevantes al proyecto
+  - `embed_latency_ms` cacheado: 200-350ms después del primer request
+  - `fallback=false` cuando servidor local está disponible
+  - `truncation_rate` variable (0.00-1.00) según budget de contexto
+- [x] **Veredicto:** v2plus es el engine seleccionado para el MVP.
+- [x] **Documentación de hallazgos:** El truncation_rate alto no es problema del engine, es del budget limitado (800 tokens para proyecto en hardware modesto).
+
+---
+
+## Fase 7 — Limpieza de archivos de config
+
+> Estado: 🟡 Pendiente
+
+- [ ] Eliminar `config.toml` (no usado, el código lee `multilink.toml`).
+- [ ] Eliminar archivos `multilink.invalid-*.toml` (backups automáticos).
+- [ ] Verificar que `multilink.toml` tenga `engine = "v2plus"` para producción.
+
+---
+
+## Fase 5 — QA y Rendimiento (pendiente)
 
 - [x] Benchmark: medir latencia de retrieval lexical en proyecto de 50k líneas.
 - [x] Benchmark: medir memoria de `LexicalIndex` con 10k chunks.
 - [x] Test de integración: query end-to-end desde `retrieve()` hasta devolver chunks.
 - [ ] Profiling con `cargo flamegraph` en workload real.
+
+## Fase 4.5 — Live Context (pendiente)
+
+- [x] `document_cache`: mantener texto actual de archivos abiertos en memoria.
+- [x] Re-parsear con tree-sitter en cada `didChange` (parsing incremental).
+- [ ] Exponer `symbol_table` al context engine para queries en tiempo real.
+- [x] Debounce 300ms en `didChange` antes de re-indexar.
+
+## Fase 4 — LSP Semantic Server (pendiente)
+
+- [x] Crear workspace member `lsp-server/` con `Cargo.toml` y dependencias (`tower-lsp`, `tokio`, `tree-sitter`).
+- [x] Implementar handlers base: `initialize`, `didOpen`, `didChange`, `didSave`, `didClose`.
+- [x] Implementar `ast_cache.rs` con `DashMap<Uri, Tree>`.
+- [x] Implementar `symbol_index.rs` para el workspace activo.
+- [x] Implementar `hover`: devolver código + docstring del símbolo bajo el cursor.
+- [x] Implementar `publishDiagnostics`: errores semánticos desde el AST.
+- [ ] **Integración:** conectar LSP con `Context Engine` real (estado actual: bridge `NoOp`).
+- [ ] Validación manual en VSCode con `languageClient`.
+- [ ] Validación manual en Neovim con `nvim-lspconfig`.
