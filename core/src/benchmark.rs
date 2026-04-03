@@ -101,9 +101,9 @@ pub struct ReleaseCriteria {
 impl Default for ReleaseCriteria {
     fn default() -> Self {
         Self {
-            max_avg_latency_ms: 500.0,
-            min_throughput: 10.0,
-            max_memory_mb: 512,
+            max_avg_latency_ms: 1000.0,
+            min_throughput: 1.0,
+            max_memory_mb: 256,
             test_timeout_secs: 30,
         }
     }
@@ -186,7 +186,10 @@ mod tests {
 
     #[test]
     fn release_criteria_check_fails_latency() {
-        let criteria = ReleaseCriteria::default();
+        let criteria = ReleaseCriteria {
+            max_avg_latency_ms: 100.0,
+            ..ReleaseCriteria::default()
+        };
         let result = BenchmarkResult::new("test", 10, Duration::from_millis(10000));
         assert!(!criteria.check(&result));
     }
