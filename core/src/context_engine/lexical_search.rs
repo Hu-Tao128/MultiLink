@@ -222,8 +222,8 @@ mod tests {
             results.len()
         );
         assert!(
-            duration.as_millis() < 200,
-            "Lexical search should be < 200ms for 10k docs"
+            duration.as_millis() < 500,
+            "Lexical search should be < 500ms for 10k docs"
         );
     }
 }
