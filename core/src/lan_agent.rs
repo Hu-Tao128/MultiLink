@@ -397,11 +397,7 @@ fn is_ip_allowed(allowed_ips: &[IpAddr], allow_remote: bool, client_ip: &IpAddr)
 
 /// Expuesto para integration tests — permite verificar la lógica de allowlist
 /// sin necesitar una conexión TCP real desde IPs remotas.
-pub fn ip_allowed_for_test(
-    allowed_ips: &[IpAddr],
-    allow_remote: bool,
-    client_ip: &IpAddr,
-) -> bool {
+pub fn ip_allowed_for_test(allowed_ips: &[IpAddr], allow_remote: bool, client_ip: &IpAddr) -> bool {
     is_ip_allowed(allowed_ips, allow_remote, client_ip)
 }
 

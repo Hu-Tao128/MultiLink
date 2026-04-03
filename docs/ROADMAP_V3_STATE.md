@@ -1,8 +1,8 @@
 # Roadmap V3 State
 
-Last updated: 2026-03-18
+Last updated: 2026-04-02
 
-CURRENT_PHASE = stabilization
+CURRENT_PHASE = release
 NEXT_PHASE = release
 
 ## Canonical Status
@@ -18,12 +18,12 @@ This file is the single source of truth for roadmap status.
 | Phase 3 Model-aware budgeting | complete |
 | Phase 4 Intent-aware budgeting | complete |
 | Phase 5 Hardware-aware caps | complete |
-| Phase 6 Context Engine v2/v2plus | in_progress |
+| Phase 6 Context Engine v2/v2plus | complete |
 | Phase 7 Network security enforcement | complete |
 | Phase 8 Multi-server router hardening | complete |
 | Phase 8.5 LAN Agent + MCP adapter | complete |
 | Phase 9 Orchestrator + Skills | complete |
-| Phase 10 Benchmark/release gate | in_progress |
+| Phase 10 Benchmark/release gate | complete |
 | LSP Phase 6 (language extensibility) | in_progress |
 | LSP Phase 7 (manual QA/perf) | in_progress |
 

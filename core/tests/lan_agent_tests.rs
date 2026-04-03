@@ -338,9 +338,7 @@ async fn lan_allow_remote_does_not_bypass_allowlist() {
 
     // IP en lista con allow_remote=true → permitida
     assert!(multilink_core::lan_agent::ip_allowed_for_test(
-        &list,
-        true,
-        &allowed
+        &list, true, &allowed
     ));
     // IP fuera de lista con allow_remote=true → denegada
     assert!(!multilink_core::lan_agent::ip_allowed_for_test(

@@ -96,8 +96,12 @@ fn unique_nonempty_servers(candidates: &[String]) -> Vec<String> {
 
 async fn model_exists_on_server(base_url: &str, model: &str, config: &RetrievalConfig) -> bool {
     let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_millis(config.embed_connect_timeout_ms.min(2_000)))
-        .timeout(Duration::from_millis(config.embed_request_timeout_ms.min(2_000)))
+        .connect_timeout(Duration::from_millis(
+            config.embed_connect_timeout_ms.min(2_000),
+        ))
+        .timeout(Duration::from_millis(
+            config.embed_request_timeout_ms.min(2_000),
+        ))
         .build();
     let Ok(client) = client else {
         return false;
@@ -123,9 +127,9 @@ async fn server_has_embedding_capability(base_url: &str, config: &RetrievalConfi
     probe_cfg.embed_request_timeout_ms = probe_cfg.embed_request_timeout_ms.min(2_000);
 
     match fetch_ollama_model_details(base_url, &probe_cfg).await {
-        Ok(details) => details
-            .iter()
-            .any(|(name, info)| info.supports_embedding || name.to_ascii_lowercase().contains("embed")),
+        Ok(details) => details.iter().any(|(name, info)| {
+            info.supports_embedding || name.to_ascii_lowercase().contains("embed")
+        }),
         Err(_) => false,
     }
 }
@@ -228,9 +232,12 @@ pub async fn build_relevant_project_context(
     }
 
     if !embedding_used {
-        if let Some((context, selected_files, used_tokens)) =
-            build_context_from_preferred_files(&chunks, &preferred_fallback, token_budget, model_hint)
-        {
+        if let Some((context, selected_files, used_tokens)) = build_context_from_preferred_files(
+            &chunks,
+            &preferred_fallback,
+            token_budget,
+            model_hint,
+        ) {
             return RetrievalResult {
                 context,
                 selected_files,
@@ -388,9 +395,9 @@ fn detect_project_type(chunks: &[ProjectChunk]) -> ProjectDetection {
     let has_src_java = chunks
         .iter()
         .any(|c| c.path.starts_with("src/") && c.path.ends_with(".java"));
-    let has_root_html = chunks
-        .iter()
-        .any(|c| c.path.matches('/').count() == 0 && c.path.to_ascii_lowercase().ends_with(".html"));
+    let has_root_html = chunks.iter().any(|c| {
+        c.path.matches('/').count() == 0 && c.path.to_ascii_lowercase().ends_with(".html")
+    });
     let has_csproj = chunks
         .iter()
         .any(|c| c.path.to_ascii_lowercase().ends_with(".csproj"));
@@ -511,9 +518,10 @@ fn context_files_for_type(project_type: ProjectType, chunks: &[ProjectChunk]) ->
         ),
         ProjectType::Java => {
             let mut out = vec_of_existing(chunks, &["pom.xml", "build.gradle"]);
-            if let Some(app) = chunks.iter().find(|c| {
-                c.path.starts_with("src/main/") && c.path.ends_with("Application.java")
-            }) {
+            if let Some(app) = chunks
+                .iter()
+                .find(|c| c.path.starts_with("src/main/") && c.path.ends_with("Application.java"))
+            {
                 out.push(app.path.clone());
             }
             out
@@ -523,7 +531,8 @@ fn context_files_for_type(project_type: ProjectType, chunks: &[ProjectChunk]) ->
             let mut out = vec_of_existing(chunks, &["index.html"]);
             if let Some(css) = chunks.iter().find(|c| {
                 let p = c.path.to_ascii_lowercase();
-                p.matches('/').count() == 0 && (p == "styles.css" || p == "main.css" || p.ends_with(".css"))
+                p.matches('/').count() == 0
+                    && (p == "styles.css" || p == "main.css" || p.ends_with(".css"))
             }) {
                 out.push(css.path.clone());
             }
@@ -570,7 +579,10 @@ fn context_files_for_type(project_type: ProjectType, chunks: &[ProjectChunk]) ->
 fn vec_of_existing(chunks: &[ProjectChunk], candidates: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
     for candidate in candidates {
-        if let Some(found) = chunks.iter().find(|c| c.path.eq_ignore_ascii_case(candidate)) {
+        if let Some(found) = chunks
+            .iter()
+            .find(|c| c.path.eq_ignore_ascii_case(candidate))
+        {
             out.push(found.path.clone());
         }
     }
