@@ -98,7 +98,7 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             echo "path=${{ steps.strings.outputs.build-output-dir }}/Release/multilink.exe" >> $GITHUB_OUTPUT
           elif [ "${{ runner.os }}" = "macOS" ]; then
-            echo "path=${{ steps.strings.outputs.build-output-dir }}/multilink_gui" >> $GITHUB_OUTPUT
+            echo "path=${{ steps.strings.outputs.build-output-dir }}/multilink" >> $GITHUB_OUTPUT
           else
             echo "path=${{ steps.strings.outputs.build-output-dir }}/multilink" >> $GITHUB_OUTPUT
           fi

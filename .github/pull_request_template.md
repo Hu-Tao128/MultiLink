@@ -25,7 +25,7 @@
 - [ ] `cd core && cargo test`
 - [ ] `cd gui/rust/chat_controller && cargo test`
 - [ ] `cmake -S gui -B build/gui && cmake --build build/gui`
-- [ ] Manual smoke run (if UI-affecting): `QT_QPA_PLATFORM=offscreen ./build/gui/multilink_gui`
+- [ ] Manual smoke run (if UI-affecting): `QT_QPA_PLATFORM=offscreen ./build/gui/multilink`
 
 ## Screenshots / demo (if UI changes)
 

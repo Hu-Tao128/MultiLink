@@ -291,9 +291,16 @@ fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
             }
         } else {
             let symbol_lower = chunk.symbol.to_lowercase();
+            let file_name_only = file_name.split('.').next().unwrap_or(&file_name);
+            let mut terms_matched_in_filename = 0;
+
             for term in &terms {
                 if path_l.contains(term) {
-                    score += 6.0;
+                    score += 8.0; // Increased from 6.0
+                }
+                if file_name_only.contains(term) {
+                    score += 12.0; // Extra boost for filename match
+                    terms_matched_in_filename += 1;
                 }
                 if lang_l.contains(term) {
                     score += 2.0;
@@ -305,11 +312,19 @@ fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
                     score += 3.0;
                 }
             }
+
+            // Massive boost if most query terms appear in the filename (e.g., "chat view" -> ChatView.qml)
+            if terms_matched_in_filename >= 2 || (terms.len() == 1 && terms_matched_in_filename == 1)
+            {
+                score += 50.0;
+            }
         }
 
         for hint in &path_hints {
-            if path_l.starts_with(hint) || path_l.contains(&format!("/{hint}")) {
-                score += 12.0;
+            if path_l == *hint {
+                score += 100.0; // Exact full path match
+            } else if path_l.starts_with(hint) || path_l.contains(&format!("/{hint}")) {
+                score += 25.0; // Increased from 12.0
             }
         }
 

@@ -73,9 +73,38 @@ Page {
     }
 
     function parseMessageSegments(text) {
-        const source = String(text || "")
+        const source = normalizeStreamingMarkup(String(text || ""))
         const segments = []
-        let remaining = source
+
+        const thinkPattern = /<think>([\s\S]*?)<\/think>/g
+        let thinkLastIndex = 0
+        let thinkMatch
+
+        while ((thinkMatch = thinkPattern.exec(source)) !== null) {
+            if (thinkMatch.index > thinkLastIndex) {
+                const textBeforeThink = source.slice(thinkLastIndex, thinkMatch.index)
+                segments.push(...parseCodeAndInlineSegments(textBeforeThink))
+            }
+            segments.push({
+                kind: "thinking",
+                value: String(thinkMatch[1] || "").trim()
+            })
+            thinkLastIndex = thinkPattern.lastIndex
+        }
+
+        if (thinkLastIndex < source.length) {
+            segments.push(...parseCodeAndInlineSegments(source.slice(thinkLastIndex)))
+        }
+
+        if (segments.length === 0) {
+            segments.push({ kind: "text", value: source })
+        }
+
+        return segments
+    }
+
+    function parseCodeAndInlineSegments(source) {
+        const segments = []
 
         const codePattern = /```[\t ]*([^\n`]*)\n([\s\S]*?)```/g
         let lastIndex = 0
@@ -98,11 +127,53 @@ Page {
             segments.push(...parseInlineMarkdown(source.slice(lastIndex)))
         }
 
-        if (segments.length === 0) {
-            segments.push({ kind: "text", value: source })
+        return segments
+    }
+
+    function normalizeStreamingMarkup(source) {
+        let normalized = String(source || "")
+
+        const thinkOpen = (normalized.match(/<think>/g) || []).length
+        const thinkClose = (normalized.match(/<\/think>/g) || []).length
+        if (thinkOpen > thinkClose) {
+            normalized += "</think>"
         }
 
-        return segments
+        const codeFenceCount = (normalized.match(/```/g) || []).length
+        if (codeFenceCount % 2 === 1) {
+            normalized += "\n```"
+        }
+
+        const doubleStarCount = (normalized.match(/\*\*/g) || []).length
+        if (doubleStarCount % 2 === 1) {
+            normalized += "**"
+        }
+
+        let withoutTripleStars = normalized.replace(/\*\*\*/g, "")
+        withoutTripleStars = withoutTripleStars.replace(/\*\*/g, "")
+        const singleStarCount = (withoutTripleStars.match(/\*/g) || []).length
+        if (singleStarCount % 2 === 1) {
+            normalized += "*"
+        }
+
+        const doubleUnderscoreCount = (normalized.match(/__/g) || []).length
+        if (doubleUnderscoreCount % 2 === 1) {
+            normalized += "__"
+        }
+
+        const withoutDoubleUnderscore = normalized.replace(/__/g, "")
+        const singleUnderscoreCount = (withoutDoubleUnderscore.match(/_/g) || []).length
+        if (singleUnderscoreCount % 2 === 1) {
+            normalized += "_"
+        }
+
+        const withoutCodeFence = normalized.replace(/```[\s\S]*?```/g, "")
+        const inlineCodeCount = (withoutCodeFence.match(/`/g) || []).length
+        if (inlineCodeCount % 2 === 1) {
+            normalized += "`"
+        }
+
+        return normalized
     }
 
     function parseInlineMarkdown(text) {
@@ -173,6 +244,18 @@ Page {
 
     function scrollToBottom() {
         chatList.positionViewAtEnd()
+    }
+
+    function currentAssistantDraftIndex() {
+        const lastIndex = messageModel.count - 1
+        if (lastIndex < 0) {
+            return -1
+        }
+        const lastMessage = messageModel.get(lastIndex)
+        if (!lastMessage || lastMessage.role !== "assistant") {
+            return -1
+        }
+        return lastIndex
     }
 
     function hydrateCurrentSession() {
@@ -439,24 +522,28 @@ Page {
                                             property bool isInlineRichSegment: segment.kind === "richtext"
                                             property bool isHeading: segment.kind === "heading"
                                             property bool isListItem: segment.kind === "listitem"
-                                            property bool isRichText: isInlineRichSegment || isListItem || isHeading
+                                            property bool isThinking: segment.kind === "thinking"
+                                            property bool isRichText: isInlineRichSegment || isListItem || isHeading || isThinking
                                             property int headingLevel: Number(segment.level || 2)
                                             property int listIndent: Number(segment.indent || 0)
                                             property string listBullet: String(segment.bullet || "-")
-                                            color: isInlineCode ? "#E53935" : (model.role === "user" ? colorTextPrimary : baseColor)
+                                            color: isThinking ? "#455A64" : (isInlineCode ? "#E53935" : (model.role === "user" ? colorTextPrimary : baseColor))
                                             text: isListItem
                                                   ? inlineMarkdownToHtml(Array(listIndent + 1).join("  ") + listBullet + " " + String(segment.value || ""))
+                                                  : (isThinking
+                                                     ? inlineMarkdownToHtml("Pensamiento del modelo:\n" + String(segment.value || ""))
                                                   : (isInlineRichSegment
                                                      ? String(segment.value || "")
                                                      : (isHeading
-                                                        ? inlineMarkdownToHtml(String(segment.value || ""))
-                                                        : String(segment.value || "")))
+                                                         ? inlineMarkdownToHtml(String(segment.value || ""))
+                                                         : String(segment.value || ""))))
                                             wrapMode: TextArea.Wrap
                                             readOnly: true
                                             selectByMouse: true
                                             selectionColor: "#90CAF9"
                                             selectedTextColor: colorTextPrimary
-                                            padding: isInlineCode ? 4 : 0
+                                            padding: isInlineCode ? 4 : (isThinking ? 8 : 0)
+                                            leftPadding: isThinking ? 12 : padding
                                             font.family: isInlineCode ? "Monospace" : "sans-serif"
                                             font.pixelSize: isInlineCode
                                                             ? 12
@@ -464,12 +551,12 @@ Page {
                                                                ? Math.max(16, 24 - (headingLevel * 2))
                                                                : 14)
                                             font.bold: isBold || isHeading
-                                            font.italic: isItalic
+                                            font.italic: isItalic || isThinking
                                             background: Rectangle {
-                                                visible: textBlock.isInlineCode
-                                                color: "#F5F5F5"
+                                                visible: textBlock.isInlineCode || textBlock.isThinking
+                                                color: textBlock.isThinking ? "#ECEFF1" : "#F5F5F5"
                                                 radius: 3
-                                                border.color: "#E0E0E0"
+                                                border.color: textBlock.isThinking ? "#CFD8DC" : "#E0E0E0"
                                             }
                                         }
 
@@ -539,11 +626,15 @@ Page {
                                                 Flickable {
                                                     id: codeFlick
                                                     width: parent.width
-                                                    implicitHeight: Math.min(260, codeText.implicitHeight + 4)
+                                                    implicitHeight: codeText.implicitHeight + 4
                                                     contentWidth: codeText.width
                                                     contentHeight: codeText.implicitHeight
                                                     clip: true
                                                     boundsBehavior: Flickable.StopAtBounds
+                                                    interactive: contentHeight > height || contentWidth > width
+                                                    ScrollBar.vertical: ScrollBar {
+                                                        policy: ScrollBar.AsNeeded
+                                                    }
                                                     ScrollBar.horizontal: ScrollBar {
                                                         policy: ScrollBar.AsNeeded
                                                     }
@@ -707,19 +798,31 @@ Page {
                 return
             }
             pendingAssistantText = ""
-            messageModel.append({ role: "assistant", text: "" })
+            if (currentAssistantDraftIndex() < 0) {
+                messageModel.append({ role: "assistant", text: "" })
+            }
             scrollToBottom()
         }
         function onStreamChunk(sessionId, text) {
             if (sessionId !== currentViewSessionId()) {
                 return
             }
-            pendingAssistantText += text
-            const lastIndex = messageModel.count - 1
-            if (lastIndex >= 0) {
-                messageModel.setProperty(lastIndex, "text", pendingAssistantText)
-                chatList.positionViewAtEnd()
+            let draftIndex = currentAssistantDraftIndex()
+            if (draftIndex < 0) {
+                messageModel.append({ role: "assistant", text: "" })
+                draftIndex = currentAssistantDraftIndex()
+                pendingAssistantText = ""
             }
+            if (draftIndex < 0) {
+                return
+            }
+            if (pendingAssistantText.length === 0) {
+                const currentDraft = messageModel.get(draftIndex)
+                pendingAssistantText = String(currentDraft && currentDraft.text ? currentDraft.text : "")
+            }
+            pendingAssistantText += text
+            messageModel.setProperty(draftIndex, "text", pendingAssistantText)
+            chatList.positionViewAtEnd()
         }
         function onStreamFinished(sessionId) {
             if (sessionId !== currentViewSessionId()) {

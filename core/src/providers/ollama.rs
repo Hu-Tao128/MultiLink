@@ -100,7 +100,7 @@ impl OllamaProvider {
 
     async fn fetch_model_info(&self, model: &str) -> Result<OllamaShowResponse, LLMError> {
         let request = serde_json::json!({
-            "model": model,
+            "name": model,
             "verbose": false
         });
 
@@ -119,9 +119,12 @@ impl OllamaProvider {
             )));
         }
 
-        response
-            .json::<OllamaShowResponse>()
+        let body_bytes = response
+            .bytes()
             .await
+            .map_err(|e| LLMError::Http(e.to_string()))?;
+
+        serde_json::from_slice::<OllamaShowResponse>(&body_bytes)
             .map_err(|e| LLMError::Serialization(e.to_string()))
     }
 
@@ -167,9 +170,21 @@ impl OllamaProvider {
 
         let context_length_u32 = context_length.min(u32::MAX as usize) as u32;
 
-        let parameter_count = model_info.and_then(extract_parameter_count);
-        let quantization_level = model_info.and_then(extract_quantization_level);
+        let mut parameter_count = model_info.and_then(extract_parameter_count);
+        let mut quantization_level = model_info.and_then(extract_quantization_level);
         let embedding_length = model_info.and_then(extract_embedding_length);
+
+        // Enrich from details if model_info is sparse (common with verbose: false)
+        if let Some(details) = &response.details {
+            if parameter_count.is_none() {
+                if let Some(p_size) = &details.parameter_size {
+                    parameter_count = Some((parse_parameter_size(p_size) * 1_000_000_000.0) as u64);
+                }
+            }
+            if quantization_level.is_none() {
+                quantization_level = details.quantization_level.clone();
+            }
+        }
 
         ProviderCapabilities {
             chat: true,
@@ -223,6 +238,15 @@ impl OllamaProvider {
                 cache.clear();
             }
         }
+    }
+
+    pub async fn get_model_info_full(&self, model: &str) -> Result<OllamaShowResponse, LLMError> {
+        let model_name = if model.is_empty() {
+            self.default_model.clone()
+        } else {
+            model.to_string()
+        };
+        self.fetch_model_info(&model_name).await
     }
 
     async fn post_chat_with_retry<T: Serialize>(
@@ -362,6 +386,8 @@ struct OllamaRequest {
 struct OllamaMessage {
     role: String,
     content: String,
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -383,14 +409,43 @@ struct OllamaStreamChunk {
     eval_count: Option<usize>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
+struct OllamaModelDetails {
+    pub parent_model: Option<String>,
+    pub format: Option<String>,
+    pub family: Option<String>,
+    pub families: Option<Vec<String>>,
+    pub parameter_size: Option<String>,
+    pub quantization_level: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 struct OllamaShowResponse {
     #[serde(default)]
     template: Option<String>,
     #[serde(default)]
     capabilities: Option<Vec<String>>,
     #[serde(default)]
+    details: Option<OllamaModelDetails>,
+    #[serde(default)]
     model_info: Option<HashMap<String, serde_json::Value>>,
+}
+
+fn parse_parameter_size(size_str: &str) -> f32 {
+    let lower = size_str.to_ascii_lowercase();
+    let num_part = lower
+        .chars()
+        .take_while(|c| c.is_numeric() || *c == '.')
+        .collect::<String>();
+    let val = num_part.parse::<f32>().unwrap_or(0.0);
+
+    if lower.contains('b') {
+        val
+    } else if lower.contains('m') {
+        val / 1000.0
+    } else {
+        val
+    }
 }
 
 #[async_trait]
@@ -432,6 +487,7 @@ impl LLMProvider for OllamaProvider {
                 .map(|m| OllamaMessage {
                     role: m.role,
                     content: m.content,
+                    thinking: None,
                 })
                 .collect()
         } else {
@@ -440,11 +496,13 @@ impl LLMProvider for OllamaProvider {
                 msgs.push(OllamaMessage {
                     role: "system".to_string(),
                     content: sys.clone(),
+                    thinking: None,
                 });
             }
             msgs.push(OllamaMessage {
                 role: "user".to_string(),
                 content: prompt,
+                thinking: None,
             });
             msgs
         };
@@ -515,6 +573,7 @@ impl LLMProvider for OllamaProvider {
             .map(|m| OllamaMessage {
                 role: m.role,
                 content: m.content,
+                thinking: None,
             })
             .collect();
 
@@ -563,6 +622,7 @@ impl LLMProvider for OllamaProvider {
                     tokio::pin!(byte_stream);
                     let mut pending = Vec::<u8>::new();
                     let mut completed_sent = false;
+                    let mut thinking_open = false;
                     let mut last_data_time = Instant::now();
                     let stream_timeout_secs = stream_timeout_secs;
                     let stream_retries = stream_retries;
@@ -601,9 +661,29 @@ impl LLMProvider for OllamaProvider {
                                             match parsed {
                                                 Ok(chunk) => {
                                                     if let Some(message) = chunk.message {
-                                                        let _ = tx.send(Ok(TokenEvent::Token(message.content))).await;
+                                                        if let Some(thinking) = message.thinking {
+                                                            if !thinking.is_empty() {
+                                                                if !thinking_open {
+                                                                    thinking_open = true;
+                                                                    let _ = tx.send(Ok(TokenEvent::Token("<think>".to_string()))).await;
+                                                                }
+                                                                let _ = tx.send(Ok(TokenEvent::Token(thinking))).await;
+                                                            }
+                                                        }
+
+                                                        if !message.content.is_empty() {
+                                                            if thinking_open {
+                                                                thinking_open = false;
+                                                                let _ = tx.send(Ok(TokenEvent::Token("</think>".to_string()))).await;
+                                                            }
+                                                            let _ = tx.send(Ok(TokenEvent::Token(message.content))).await;
+                                                        }
                                                     }
                                                     if chunk.done && !completed_sent {
+                                                        if thinking_open {
+                                                            thinking_open = false;
+                                                            let _ = tx.send(Ok(TokenEvent::Token("</think>".to_string()))).await;
+                                                        }
                                                         completed_sent = true;
                                                         let prompt_tokens = chunk.prompt_eval_count.unwrap_or(0);
                                                         let completion_tokens = chunk.eval_count.unwrap_or(0);
@@ -662,9 +742,29 @@ impl LLMProvider for OllamaProvider {
                                                 {
                                                     Ok(chunk) => {
                                                         if let Some(message) = chunk.message {
-                                                            let _ = tx.send(Ok(TokenEvent::Token(message.content))).await;
+                                                            if let Some(thinking) = message.thinking {
+                                                                if !thinking.is_empty() {
+                                                                    if !thinking_open {
+                                                                        thinking_open = true;
+                                                                        let _ = tx.send(Ok(TokenEvent::Token("<think>".to_string()))).await;
+                                                                    }
+                                                                    let _ = tx.send(Ok(TokenEvent::Token(thinking))).await;
+                                                                }
+                                                            }
+
+                                                            if !message.content.is_empty() {
+                                                                if thinking_open {
+                                                                    thinking_open = false;
+                                                                    let _ = tx.send(Ok(TokenEvent::Token("</think>".to_string()))).await;
+                                                                }
+                                                                let _ = tx.send(Ok(TokenEvent::Token(message.content))).await;
+                                                            }
                                                         }
                                                         if chunk.done && !completed_sent {
+                                                            if thinking_open {
+                                                                thinking_open = false;
+                                                                let _ = tx.send(Ok(TokenEvent::Token("</think>".to_string()))).await;
+                                                            }
                                                             let prompt_tokens = chunk.prompt_eval_count.unwrap_or(0);
                                                             let completion_tokens = chunk.eval_count.unwrap_or(0);
                                                             if prompt_tokens > 0 || completion_tokens > 0 {

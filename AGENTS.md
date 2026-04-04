@@ -101,17 +101,17 @@ ctest --test-dir build/gui -C Release
 ### Run app
 
 ```bash
-./build/gui/multilink_gui
+./build/gui/multilink
 ```
 
 Debug context behavior:
 ```bash
-MULTILINK_DEBUG_CONTEXT=1 ./build/gui/multilink_gui
+MULTILINK_DEBUG_CONTEXT=1 ./build/gui/multilink
 ```
 
 Smoke test (headless):
 ```bash
-QT_QPA_PLATFORM=offscreen timeout 8s ./build/gui/multilink_gui
+QT_QPA_PLATFORM=offscreen timeout 8s ./build/gui/multilink
 ```
 
 ## Lint/Format Commands
@@ -191,7 +191,7 @@ For core behavior changes, run:
 
 For GUI bridge changes, also smoke-run app:
 ```bash
-QT_QPA_PLATFORM=offscreen timeout 8s ./build/gui/multilink_gui
+QT_QPA_PLATFORM=offscreen timeout 8s ./build/gui/multilink
 ```
 
 For config/routing changes, manually verify:

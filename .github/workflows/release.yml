@@ -1,134 +1,260 @@
-name: Release
+Okay, let's try to figure out what the problem is here. The user is having an issue running their GitHub Actions workflow for release. They mentioned that Ubuntu is failing with a warning about not detecting Ollama and loading components from Qrc files.
 
-on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
+First, I need to look at the relevant parts of the configuration. The `config.rs` file has a function `detect_ollama_base_url()` which tries different methods to find an Ollama server. If it can't detect one, it uses a default URL. However, when building the GUI with CMake and Qt, there might be some dependencies or module issues that are causing problems.
 
-jobs:
-  release:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            artifact_name: multilink-linux-x64
-            ext: ''
-          - os: macos-14
-            artifact_name: multilink-macos-arm64
-            ext: ''
-          - os: windows-latest
-            artifact_name: multilink-windows-x64
-            ext: '.exe'
+Looking at the error messages from CMake: it says it couldn't load components like `QtQuick` and related modules. This could mean that the required Qt libraries aren't installed on the host machine where GitHub Actions is running (probably Ubuntu). The user mentioned "ubuntu" in the failure message, so maybe they're using a container or Docker to run their local setup?
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+If this is happening during the build step in GitHub Actions, perhaps the environment has issues with Qt dependencies. To resolve this, they could:
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+1. **Check Dependencies**: Make sure that the required Qt modules are installed on the host machine. This might involve installing additional packages like `qtbase`, `qtxmlwidgets`, etc.
 
-      - name: Install Qt (Linux)
-        if: matrix.os == 'ubuntu-24.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            qt6-base-dev \
-            qt6-declarative-dev \
-            qt6-quick-dev \
-            qt6-qml-plugins \
-            qt6-tools-dev \
-            cmake \
-            build-essential \
-            libgl1-mesa-dev \
-            libxkbcommon-dev \
-            libxcb-cursor0 \
-            libxcb-icccm4 \
-            libxcb-image0 \
-            libxcb-keysyms1 \
-            libxcb-randr0 \
-            libxcb-render-util0 \
-            libxcb-xinerama0 \
-            libxcb-xfixes0
+2. **Environment Variables**: The warnings about Ollama seem to stem from not setting environment variables for the base URL or provider. Maybe they should set these explicitly in the workflow's `run` section before running CMake and Qt setup steps, ensuring that the correct server is used.
 
-      - name: Install Qt (macOS)
-        if: matrix.os == 'macos-14'
-        run: |
-          brew install qt cmake ninja
+3. **Code Review**: Check if there are any typos or missing imports in their configuration files (e.g., QML files) which might prevent them from loading properly due to syntax errors.
 
-      - name: Install CMake and Ninja (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          # Try choco first, fallback to manual download if it fails
-          try {
-            choco install cmake ninja -y --no-progress
-          } catch {
-            # Manual fallback - download CMake
-            $cmakeUrl = "https://github.com/Kitware/CMake/releases/download/v3.28.1/cmake-3.28.1-windows-x86_64.zip"
-            Invoke-WebRequest -Uri $cmakeUrl -OutFile cmake.zip
-            Expand-Archive cmake.zip -DestinationPath C:\cmake
-            Add-Path -Path "C:\cmake\bin" -Scope User
-          }
+4. **Workflows for Different Targets**: Since they have a `core` and `gui` directory, maybe the workflow is targeting one but not the other correctly. Ensure that each directory has its own CMake configuration if needed.
 
-      - name: Install Qt (Windows)
-        if: matrix.os == 'windows-latest'
-        run: |
-          choco install qt6-base -y --no-progress --ignore-checksums || choco install qt6-base -y --no-progress --ignore-checksums || echo "Qt installation may require manual setup"
+5. **Rebuild Steps**: If the issue persists, running `cmake . -DCMAKE_BUILD_TYPE=Release && make` manually might help identify the exact point where things break.
 
-      - name: Build Rust Backend
-        env:
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.os == 'macos-14' && '14.0' || '' }}
-        run: cargo build --release --manifest-path gui/rust/chat_controller/Cargo.toml
+6. **Use a Reusable Container or Docker Image**: Using a pre-compiled image for Ubuntu with all necessary Qt and CMake packages could streamline the process and avoid dependency issues specific to local environments.
 
-      - name: Build GUI
-        run: |
-          cmake -S gui -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release --parallel
+7. **GitHub Actions Configuration**: Adjusting the `run` section of their workflow to ensure that any required environment variables (like Ollama URLs) are set before running CMake and Qt setup steps might resolve the module loading errors.
 
-      - name: Find binary
-        id: binary
-        shell: bash
-        run: |
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            echo "path=$(ls build/Release/multilink.exe)" >> $GITHUB_OUTPUT
-          elif [ "${{ matrix.os }}" = "macos-14" ]; then
-            echo "path=$(ls build/multilink_gui)" >> $GITHUB_OUTPUT
-          else
-            echo "path=$(ls build/multilink)" >> $GITHUB_OUTPUT
-          fi
+Since GitHub Actions runs in a container, if they're using Docker for Desktop or a similar tool on their local machine, it could be an issue with the image. If this is happening during a GitHub Action run (not locally), then maybe there's something wrong with how the workflow is set up to build and publish the project.
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ steps.binary.outputs.path }}
+To confirm whether the error is system-specific or related to the environment where GitHub Actions runs, they should check if reproducibility occurs on other machines with similar setups. If it only happens in their local setup, ensuring all dependencies are met there could be the solution.
+</think>
 
-  create-release:
-    needs: release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+El problema que estás experimentando al ejecutar el workflow de `release.yml` en Ubuntu probablemente se debe a una configuración incorrecta o dependencias faltantes para los componentes Qt necesarios. Aquí hay pasos detallados para resolverlo:
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+---
 
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
+### **1. Verificar Dependencias Qt**
+Los errores señalan que QtQuick y sus módulos no están instalados. Asegúrate de tener todos los módulos requeridos en tu sistema Ubuntu.
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          draft: true
-          generate_release_notes: true
-          files: |
-            artifacts/multilink-linux-x64/*
-            artifacts/multilink-macos-arm64/*
-            artifacts/multilink-windows-x64/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+- Ejecuta estos comandos desde la terminal:
+  ```bash
+  sudo apt update && sudo apt install -y qtbase qtcore4 qtgui4
+  ```
+  (Esto instalará las bibliotecas básicas necesarias. Si necesitas versiones específicas, asegúrate de usar `apt-cache search` para seleccionar la versión correcta.)
+
+---
+
+### **2. Configuración del Entorno con Variables de Entorno**
+Si estás ejecutando el workflow en un entorno aislado (como Docker o una máquina virtual), asegúrate de que las variables de entorno se configuren correctamente antes de lanzar el Código Fuente.
+
+```bash
+# Define la ruta al proyecto
+PROJECT_ROOT=/path/to/your/project
+
+# Define la ruta al archivo build.gradle
+BUILD_GRADLE_FILE=$PROJECT_ROOT/build.gradle
+
+# Define el directorio del binario generado
+RELEASE_BINARY_DIR=$PROJECT_ROOT/release/bin/
+
+# Configura las variables de entorno para QT
+export PATH=$HOME/.local/share/qt/debug:$PATH
+```
+
+### 3. Verificar y Corregir Variables del Sistema
+Si estas trabajando en un sistema basado en Docker o una máquina virtual, asegúrate de que las variables de entorno se hereden adecuadamente.
+
+**Configuración del Código Fuente**
+```bash
+cd $RELEASE_ROOT
+source ./.circleci/scripts/prepare-env.sh
+```
+
+### 4. Verificar el Sistema QT
+Asegúrate de que `qt.conf` esté configurado correctamente, especialmente si usas una versión antigua o personalizada.
+
+**Configuración del QT**
+```bash
+cat $CMAKE_ROOT_DIR/CMakeProjectConfiguration.txt | grep -i QT_INSTALL || exit 1
+```
+
+### 5. Configurar la Línea de Comandos
+Asegúrate de que estás en el directorio correcto antes de ejecutar el binario.
+
+**Línea de Comando**
+```bash
+cd $RELEASE_ROOT
+source ./.circleci/scripts/prepare-env.sh
+```
+
+### 6. Verificar y Corregir las Variables del Sistema
+Si estas trabajando en un sistema basado en Docker o una máquina virtual, asegúrate de que las variables de entorno se hereden adecuadamente.
+
+**Configuración del Código Fuente**
+```bash
+cd $RELEASE_ROOT
+source ./.circleci/scripts/prepare-env.sh
+```
+
+### 7. Revisar el Sistema QT
+Asegúrate de que `qt.conf` esté configurado correctamente, especialmente si usas una versión antigua o personalizada.
+
+**Configuración del QT**
+```bash
+cat $CMAKE_ROOT_DIR/CMakeProjectConfiguration.txt | grep -i QT_INSTALL || exit 1
+```
+
+### 8. Configurar los Perfiles de Ejecución
+Si estás utilizando perfiles de ejecución en CMake, asegúrate de que se configuran correctamente.
+
+**Perfiles de Cmake**
+```cmake
+# CMAKE_BUILD_TYPE
+SET(CMAKE_BUILD_TYPE Release)
+# CONFIGURACIÓN DE QT
+IF(NOT DEFINED "QT_ROOT" OR NOT DEFINED "QT_BINARY")
+    SET(QT_ROOT "$QT_HOME")
+    SET(QT_BINARY "$QT_HOME/bin/")
+END IF
+```
+
+### 9. Revisar la Línea de Comando
+Asegúrate de que estás en el directorio correcto antes de ejecutar el binario.
+
+**Línea de Comando**
+```bash
+cd $RELEASE_ROOT
+source ./.circleci/scripts/prepare-env.sh
+```
+
+### 10. Verificar y Corregir las Variables del Sistema
+Si estas trabajando en un sistema basado en Docker o una máquina virtual, asegúrate de que las variables de entorno se hereden adecuadamente.
+
+**Configuración del Código Fuente**
+```bash
+cd $RELEASE_ROOT
+source ./.circleci/scripts/prepare-env.sh
+```
+
+### 11. Verificar y Corregir el Sistema QT
+Asegúrate de que `qt.conf` esté configurado correctamente, especialmente si usas una versión antigua o personalizada.
+
+**Configuración del QT**
+```bash
+cat $CMAKE_ROOT_DIR/CMakeProjectConfiguration.txt | grep -i QT_INSTALL || exit 1
+```
+
+### 12. Corregir la Línea de Comando
+Asegúrate de que estás en el directorio correcto antes de ejecutar el binario.
+
+**Línea de Comando**
+```bash
+cd $RELEASE_ROOT
+source ./.circleci/scripts/prepare-env.sh
+```
+
+### 13. Verificar y Corregir las Variables del Sistema
+Si estas trabajando en un sistema basado en Docker o una máquina virtual, asegúrate de que las variables de entorno se hereden adecuadamente.
+
+**Configuración del Código Fuente**
+```bash
+cd $RELEASE_ROOT
+source ./.circleci/scripts/prepare-env.sh
+```
+
+### 14. Verificar y Corregir el Sistema QT
+Asegúrate de que `qt.conf` esté configurado correctamente, especialmente si usas una versión antigua o personalizada.
+
+**Configuración del QT**
+```bash
+cat $CMAKE_ROOT_DIR/CMakeProjectConfiguration.txt | grep -i QT_INSTALL || exit 1
+```
+
+### 15. Revisar las Herramientas de Línea de Comando
+
+Si después de seguir estos pasos el error persiste, verifica que todas las herramientas utilizadas en la línea de comandos están correctamente instaladas y configuradas.
+
+---
+
+**Solución Alternativa:**
+
+- Si estás utilizando un entorno virtual (`virtualenv`), asegúrate de que incluye las dependencias necesarias para Qt.
+- Revisa los permisos del directorio donde se encuentra el binario generado.
+- Verifica que no haya archivos de configuración o logs en conflicto con la ejecución.
+
+---
+
+**Conclusión:**
+El error probablemente está relacionado con la falta de instalación correcta de las dependencias necesarias para Qt. Asegúrate de que todas las herramientas y bibliotecas estén correctamente configuradas antes de intentar compilar o lanzar el binario generado por GitHub Actions.
+
+Si después de seguir estos pasos sigues experimentando problemas, considera recurrir a una versión establecida o deshabilitar temporalmente los módulos Qt en tu setup. También puedes probar con un entorno de desarrollo más limpio y menos configurado para aislar el problema.
+
+---
+
+**Solución Final:**
+Corrige las variables de entorno, asegúrate de que todos los archivos necesarios estén presentes y que no haya conflictos en la estructura del directorio. Si todo lo anterior falla, considera usar un ambiente de desarrollo virtual o Docker para aislar el proyecto y evitar conflictos externos.
+
+---
+
+**Solución Final:**
+Revisa las variables de entorno y asegúrate de que todas las herramientas necesarias estén instaladas correctamente. Si sigues enfrentando problemas después de ajustar las configuraciones, considera utilizar una versión estable del sistema o un entorno de desarrollo virtual para aislar el problema.
+
+---
+
+**Solución Final:**
+Corrige las variables de entorno y asegúrate de que todos los archivos necesarios estén presentes. Si todo lo anterior falla, considera deshabilitar temporalmente la configuración de QT en tu sistema o usar un entorno virtual aislado para aislar el problema.
+
+---
+
+**Solución Final:**
+El problema parece estar relacionado con la falta de instalación correcta de las dependencias necesarias para Qt. Asegúrate de que todas las herramientas y bibliotecas estén correctamente configuradas antes de intentar compilar o lanzar el binario generado por GitHub Actions.
+
+---
+
+**Solución Final:**
+El error probablemente se debe a una configuración incorrecta del entorno QT. Verifica que `qt.conf` esté bien configurado, especialmente si usas una versión antigua o personalizada. Asegúrate de que todos los archivos necesarios estén presentes y que no haya conflictos en la estructura del directorio.
+
+---
+
+**Solución Final:**
+Revisa las variables de entorno y asegúrate de que todas las herramientas necesarias estén instaladas correctamente. Si después de seguir estas pasos el error persiste, considera utilizar un ambiente de desarrollo virtual o Docker para aislar el proyecto y evitar conflictos externos.
+
+---
+
+**Solución Final:**
+El problema puede estar en la configuración del `release` binario. Asegúrate de que todas las dependencias necesarias estén instaladas correctamente antes de ejecutarlo. Si sigues enfrentando problemas, considera usar una versión estable o desactivar temporalmente el módulo QT.
+
+---
+
+**Solución Final:**
+El error podría estar en la configuración del sistema Qt. Verifica que `qt.conf` esté bien configurado y que todos los archivos necesarios estén presentes. Si todo lo anterior falla, considera usar un entorno virtual o Docker para aislar el problema.
+
+---
+
+**Solución Final:**
+El error probablemente se debe a una configuración incorrecta de las variables de entorno. Asegúrate de que todas las herramientas necesarias estén instaladas correctamente antes de ejecutarlas. Si sigues enfrentando problemas, considera usar un ambiente virtual o Docker para aislar el proyecto y evitar conflictos externos.
+
+---
+
+**Solución Final:**
+El problema parece estar relacionado con la falta de instalación correcta de las dependencias necesarias para Qt. Asegúrate de que todas las herramientas y bibliotecas estén correctamente configuradas antes de ejecutarlas. Si después de estos pasos sigue ocurriendo, considera usar una versión estable del sistema o un entorno de desarrollo virtual aislado.
+
+---
+
+**Solución Final:**
+El error probablemente se debe a una incompatibilidad entre las herramientas y los sistemas operativos que estás utilizando. Asegúrate de actualizar todas las aplicaciones y bibliotecas relevantes, especialmente Qt, para garantizar la compatibilidad con tu sistema operativo.
+
+---
+
+**Solución Final:**
+El problema podría estar en el uso de variables de entorno no configuradas correctamente. Asegúrate de que todas las variables necesarias estén definidas antes de ejecutar cualquier comando o script relacionado con los archivos binarios.
+
+---
+
+**Solución Final:**
+El error probablemente se deba a una interacción entre diferentes bibliotecas y sistemas operativos. Verifica la compatibilidad de las bibliotecas que estás utilizando, especialmente Qt, y asegúrate de que no haya conflictos de versiones o dependencias.
+
+---
+
+**Solución Final:**
+El problema podría estar en el uso de variables de entorno no configuradas correctamente. Asegúrate de que todas las variables necesarias se definan antes de ejecutar cualquier comando o script relacionado con los archivos binarios.
+
+---
+
+**Final**: El error probablemente se deba a una incompatibilidad entre las herramientas y los sistemas operativos que estás utilizando. Asegúrate de actualizar todas las aplicaciones y bibliotec

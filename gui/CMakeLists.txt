@@ -41,23 +41,17 @@ set_target_properties(chat_controller PROPERTIES
 )
 add_dependencies(chat_controller chat_controller_rust)
 
-qt_add_executable(multilink_gui
+qt_add_executable(multilink
     src/main.cpp
     src/chatcontroller.cpp
     src/chatcontroller.h
 )
 
-if(APPLE)
-    set_target_properties(multilink_gui PROPERTIES
-        OUTPUT_NAME "multilink_gui"
-    )
-else()
-    set_target_properties(multilink_gui PROPERTIES
-        OUTPUT_NAME "multilink"
-    )
-endif()
+set_target_properties(multilink PROPERTIES
+    OUTPUT_NAME "multilink"
+)
 
-qt_add_qml_module(multilink_gui
+qt_add_qml_module(multilink
     URI MultiLink
     VERSION 1.0
     RESOURCE_PREFIX "/qt/qml"
@@ -67,8 +61,8 @@ qt_add_qml_module(multilink_gui
         qml/Settings.qml
 )
 
-target_link_libraries(multilink_gui PRIVATE Qt6::Core Qt6::Quick Qt6::Qml Qt6::Network chat_controller)
+target_link_libraries(multilink PRIVATE Qt6::Core Qt6::Quick Qt6::Qml Qt6::Network chat_controller)
 
 if(WIN32)
-    target_link_libraries(multilink_gui PRIVATE bcrypt ntdll userenv ws2_32 pdh ole32 propsys PowrProf Iphlpapi Psapi Netapi32 Secur32)
+    target_link_libraries(multilink PRIVATE bcrypt ntdll userenv ws2_32 pdh ole32 propsys PowrProf Iphlpapi Psapi Netapi32 Secur32)
 endif()

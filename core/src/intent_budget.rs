@@ -31,10 +31,30 @@ pub fn detect_query_intent(prompt: &str) -> QueryIntent {
     }
 
     let file_markers = [
-        "archivo", "file", ".py", ".rs", ".ts", ".tsx", ".js", ".dart",
+        "archivo", "file", "analiza", "revisa", "review", "improve", "mejorar", ".py", ".rs",
+        ".ts", ".tsx", ".js", ".dart", ".md", ".json", ".yml", ".yaml", ".toml",
     ];
     if file_markers.iter().any(|m| p.contains(m)) {
         return QueryIntent::FileScoped;
+    }
+
+    for token in prompt.split_whitespace() {
+        let t = token
+            .trim_matches(|c: char| {
+                c == '`'
+                    || c == '"'
+                    || c == '\''
+                    || c == ','
+                    || c == ';'
+                    || c == ':'
+                    || c == '('
+                    || c == ')'
+            })
+            .trim_start_matches("./")
+            .trim_start_matches('/');
+        if t.contains('/') && t.contains('.') && !t.contains("..") {
+            return QueryIntent::FileScoped;
+        }
     }
 
     let symbol_markers = [

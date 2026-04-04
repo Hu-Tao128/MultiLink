@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${REPO_DIR}/build/gui"
-APP_BIN="${BUILD_DIR}/multilink_gui"
+APP_BIN="${BUILD_DIR}/multilink"
 
 if [[ ! -x "${APP_BIN}" ]]; then
   echo "[install] GUI binary not found, building release target..."

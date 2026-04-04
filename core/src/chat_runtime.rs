@@ -658,7 +658,15 @@ impl ChatRuntime {
         let mut model_profile: Option<ModelProfile> = None;
         let mut model_capabilities: Option<ProviderCapabilities> = None;
         if let Some(model_name) = model.as_ref() {
-            if let Ok(caps) = self.router.get_model_info(provider, model_name).await {
+            // Increase timeout to 30s as some models (like gemma4) have massive metadata bodies
+            // that can take a few seconds to download and parse.
+            const MODEL_INFO_TIMEOUT_SECS: u64 = 30;
+            if let Ok(Ok(caps)) = tokio::time::timeout(
+                Duration::from_secs(MODEL_INFO_TIMEOUT_SECS),
+                self.router.get_model_info(provider, model_name),
+            )
+            .await
+            {
                 model_capabilities = Some(caps.clone());
                 let profile = ModelProfile::from_capabilities(model_name.clone(), &caps);
                 let budget = profile.retrieval_budget();
@@ -689,6 +697,12 @@ impl ChatRuntime {
                         .max(caps.max_context_tokens.min(u32::MAX as usize) as u32)
                 );
                 model_profile = Some(profile);
+            } else if context_debug_enabled(&self.runtime_config) {
+                eprintln!(
+                    "[model] model info timeout/error for '{}' (>{}s), continuing with defaults",
+                    model_name,
+                    MODEL_INFO_TIMEOUT_SECS
+                );
             }
         }
 
@@ -719,6 +733,9 @@ impl ChatRuntime {
             .min(intent_budget.top_k_cap)
             .max(2);
 
+        let include_project_context_for_request =
+            !matches!(intent, crate::intent_budget::QueryIntent::Conversational);
+
         if context_debug_enabled(&self.runtime_config) {
             eprintln!(
                 "[context] session={} intent={:?} hw_caps(ctx={},project={},top_k={}) effective(ctx={},project={},top_k={})",
@@ -731,17 +748,77 @@ impl ChatRuntime {
                 effective_runtime.max_project_context_tokens,
                 effective_runtime.context_project_top_k,
             );
+            eprintln!(
+                "[context] session={} build_messages_start include_project_context={}",
+                session_id,
+                include_project_context_for_request
+            );
         }
 
-        let messages = self
-            .build_messages(
+        let messages = match tokio::time::timeout(
+            Duration::from_secs(30),
+            self.build_messages(
                 session_id,
                 prompt.clone(),
-                true,
+                include_project_context_for_request,
                 &effective_runtime,
                 model_profile.as_ref(),
-            )
-            .await?;
+            ),
+        )
+        .await
+        {
+            Ok(Ok(msgs)) => msgs,
+            Ok(Err(err)) => return Err(err),
+            Err(_) => {
+                let mut lexical_runtime = effective_runtime.clone();
+                lexical_runtime.context_embeddings_enabled = false;
+                if context_debug_enabled(&self.runtime_config) {
+                    eprintln!(
+                        "[context] session={} build_messages timeout (>30s), retrying with project context (embeddings disabled)",
+                        session_id
+                    );
+                }
+
+                match tokio::time::timeout(
+                    Duration::from_secs(20),
+                    self.build_messages(
+                        session_id,
+                        prompt.clone(),
+                        include_project_context_for_request,
+                        &lexical_runtime,
+                        model_profile.as_ref(),
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(msgs)) => msgs,
+                    Ok(Err(err)) => return Err(err),
+                    Err(_) => {
+                        if context_debug_enabled(&self.runtime_config) {
+                            eprintln!(
+                                "[context] session={} build_messages fallback timeout (>20s), retrying without project context",
+                                session_id
+                            );
+                        }
+                        self.build_messages(
+                            session_id,
+                            prompt.clone(),
+                            false,
+                            &lexical_runtime,
+                            model_profile.as_ref(),
+                        )
+                        .await?
+                    }
+                }
+            }
+        };
+        if context_debug_enabled(&self.runtime_config) {
+            eprintln!(
+                "[context] session={} build_messages_done message_count={}",
+                session_id,
+                messages.len()
+            );
+        }
         let context_tokens: usize = messages.iter().map(|m| estimate_tokens(&m.content)).sum();
         if context_debug_enabled(&self.runtime_config) {
             let context_tokens: usize = messages.iter().map(|m| estimate_tokens(&m.content)).sum();
@@ -1361,7 +1438,8 @@ impl ChatRuntime {
         let base_index = session.summarized_messages.min(session.messages.len());
         let prompt_tokens = estimate_tokens_for_model(&current_prompt, model_hint);
         let mut resolved_embed_base_url = effective_runtime.embed_base_url.clone();
-        let mut embeddings_enabled_for_request = effective_runtime.context_embeddings_enabled;
+        let mut embeddings_enabled_for_request =
+            effective_runtime.context_embeddings_enabled && include_project_context;
 
         if embeddings_enabled_for_request {
             if let Some(cached_embed_url) = self
@@ -1469,10 +1547,13 @@ impl ChatRuntime {
         }
 
         if let Some(system_context_path) = &self.system_context_dir {
-            match build_system_context(system_context_path.as_path(), effective_runtime.clone())
-                .await
+            match tokio::time::timeout(
+                Duration::from_secs(20),
+                build_system_context(system_context_path.as_path(), effective_runtime.clone()),
+            )
+            .await
             {
-                Ok(context) => {
+                Ok(Ok(context)) => {
                     if context_debug_enabled(&self.runtime_config) {
                         eprintln!(
                             "[context] session={} system_context_dir={} files_context_tokens={}",
@@ -1487,11 +1568,19 @@ impl ChatRuntime {
                     system_content.push_str(&context);
                     system_content.push('\n');
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     eprintln!(
                         "[context error] session={} failed to build system context: {:?}",
                         session_id, e
                     );
+                }
+                Err(_) => {
+                    if context_debug_enabled(&self.runtime_config) {
+                        eprintln!(
+                            "[context] session={} system context timeout (>20s), skipping",
+                            session_id
+                        );
+                    }
                 }
             }
         }
@@ -1502,6 +1591,16 @@ impl ChatRuntime {
                 .as_ref()
                 .filter(|v| !v.trim().is_empty())
             {
+                let mut augmented_project_context = project_context.to_string();
+                if let Some(system_root) = &self.system_context_dir {
+                    append_explicit_prompt_files_to_context(
+                        &mut augmented_project_context,
+                        system_root,
+                        &current_prompt,
+                        effective_runtime.max_project_file_bytes,
+                    );
+                }
+
                 let summary_tokens = session
                     .summary
                     .as_ref()
@@ -1527,7 +1626,8 @@ impl ChatRuntime {
                 );
                 if context_budget > 0 {
                     let start = Instant::now();
-                    let retrieval: RetrievalResult =
+                    let retrieval_future = async {
+                            let retrieval: RetrievalResult =
                         if matches!(effective_runtime.context_engine.as_str(), "v2" | "v2plus") {
                             let index_dir = dirs::data_local_dir()
                                 .unwrap_or_else(|| PathBuf::from(".multilink"))
@@ -1559,7 +1659,7 @@ impl ChatRuntime {
                                 let engine = ContextEngineV2Plus::new(index_dir);
                                 engine
                                     .retrieve(
-                                        project_context,
+                                        &augmented_project_context,
                                         &current_prompt,
                                         context_budget,
                                         model_hint,
@@ -1570,7 +1670,7 @@ impl ChatRuntime {
                                 let engine = ContextEngineV2::new(index_dir);
                                 engine
                                     .retrieve(
-                                        project_context,
+                                        &augmented_project_context,
                                         &current_prompt,
                                         context_budget,
                                         model_hint,
@@ -1580,7 +1680,7 @@ impl ChatRuntime {
                             }
                         } else {
                             let v1_result = build_relevant_project_context(
-                                project_context,
+                                &augmented_project_context,
                                 &current_prompt,
                                 context_budget,
                                 model_hint,
@@ -1616,6 +1716,34 @@ impl ChatRuntime {
                                 budget_used: v1_result.used_tokens,
                             }
                         };
+                        retrieval
+                    };
+
+                    let retrieval = match tokio::time::timeout(Duration::from_secs(25), retrieval_future).await {
+                        Ok(value) => value,
+                        Err(_) => {
+                            if context_debug_enabled(&self.runtime_config) {
+                                eprintln!(
+                                    "[context] session={} project retrieval timeout (>25s), skipping project context",
+                                    session_id
+                                );
+                            }
+                            RetrievalResult {
+                                context: String::new(),
+                                selected_files: Vec::new(),
+                                used_tokens: 0,
+                                top_k: effective_runtime.context_project_top_k,
+                                embedding_used: false,
+                                embedding_reason: "timeout".to_string(),
+                                embedding_latency_ms: 0,
+                                embedding_attempts: 0,
+                                embed_base_url: String::new(),
+                                embed_model: String::new(),
+                                is_truncated: false,
+                                budget_used: 0,
+                            }
+                        }
+                    };
 
                     let context_latency_ms = start.elapsed().as_millis() as u64;
 
@@ -1852,6 +1980,74 @@ fn likely_context_overflow(message: &str) -> bool {
         || lower.contains("maximum context")
         || lower.contains("prompt is too long")
         || lower.contains("token limit")
+}
+
+fn extract_prompt_file_hints(prompt: &str) -> Vec<String> {
+    let mut hints = Vec::new();
+    for token in prompt.split_whitespace() {
+        let cleaned = token
+            .trim_matches(|c: char| {
+                c == '`'
+                    || c == '"'
+                    || c == '\''
+                    || c == ','
+                    || c == ';'
+                    || c == ':'
+                    || c == '('
+                    || c == ')'
+            })
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .to_string();
+
+        if cleaned.is_empty() || cleaned.contains("..") {
+            continue;
+        }
+        if cleaned.contains('/') && cleaned.contains('.') {
+            hints.push(cleaned);
+        }
+    }
+    hints.sort();
+    hints.dedup();
+    hints
+}
+
+fn append_explicit_prompt_files_to_context(
+    context: &mut String,
+    project_root: &Path,
+    prompt: &str,
+    max_file_bytes: usize,
+) {
+    let hints = extract_prompt_file_hints(prompt);
+    for rel in hints {
+        if context.contains(&format!("File: {}", rel)) {
+            continue;
+        }
+
+        let rel_path = Path::new(&rel);
+        if rel_path.components().any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))) {
+            continue;
+        }
+
+        let full = project_root.join(rel_path);
+        let Ok(meta) = stdfs::metadata(&full) else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() as usize > max_file_bytes {
+            continue;
+        }
+
+        let Ok(bytes) = stdfs::read(&full) else {
+            continue;
+        };
+        let Ok(content) = String::from_utf8(bytes) else {
+            continue;
+        };
+
+        let fence = code_fence_for_path(rel_path);
+        context.push_str("\n\n[Explicit file requested by user]\n");
+        context.push_str(&format!("File: {}\n```{}\n{}\n```\n", rel, fence, content));
+    }
 }
 
 fn is_thinking_model(
@@ -2706,14 +2902,17 @@ fn is_contradictory_bullet(
 
 fn detect_natural_write_target(prompt: &str) -> Option<String> {
     let lower = prompt.to_ascii_lowercase();
-    let mentions_create = lower.contains("crea")
-        || lower.contains("crear")
-        || lower.contains("genera")
-        || lower.contains("genera un")
-        || lower.contains("generate")
-        || lower.contains("create")
-        || lower.contains("write ");
-    if !mentions_create {
+    let explicit_write_phrase = lower.contains("/write-file")
+        || lower.contains("crear archivo")
+        || lower.contains("crea archivo")
+        || lower.contains("genera archivo")
+        || lower.contains("create file")
+        || lower.contains("generate file")
+        || lower.contains("write file")
+        || lower.contains("save file")
+        || lower.contains("escribe archivo");
+
+    if !explicit_write_phrase {
         return None;
     }
 
@@ -2747,8 +2946,25 @@ fn detect_natural_write_target(prompt: &str) -> Option<String> {
     None
 }
 
+fn strip_thinking_tags(text: &str) -> String {
+    let mut out = text.to_string();
+    // Recursively strip <think>...</think> blocks
+    while let Some(start) = out.find("<think>") {
+        if let Some(end_offset) = out[start..].find("</think>") {
+            let end = start + end_offset + 8; // length of </think> is 8
+            out.replace_range(start..end, "");
+        } else {
+            // Unclosed tag, strip until end of string
+            out.replace_range(start.., "");
+            break;
+        }
+    }
+    out.trim().to_string()
+}
+
 fn strip_single_fence(text: &str) -> Option<String> {
-    let trimmed = text.trim();
+    let stripped_thinking = strip_thinking_tags(text);
+    let trimmed = stripped_thinking.trim();
     if !trimmed.starts_with("```") {
         return None;
     }
@@ -2762,7 +2978,7 @@ fn extract_file_payload_from_assistant(text: &str) -> String {
     if let Some(stripped) = strip_single_fence(text) {
         return stripped;
     }
-    text.trim().to_string()
+    strip_thinking_tags(text)
 }
 
 fn extract_nonempty_file_payload_from_assistant(text: &str) -> Option<String> {

@@ -775,9 +775,16 @@ fn lexical_scores(prompt: &str, chunks: &[ProjectChunk]) -> Vec<(usize, f32)> {
             }
             score += (1.0 / ((idx + 1) as f32)).max(0.01);
         } else {
+            let file_name_only = file_name.split('.').next().unwrap_or(&file_name);
+            let mut terms_matched_in_filename = 0;
+
             for term in &terms {
                 if path_l.contains(term) {
-                    score += 6.0;
+                    score += 8.0;
+                }
+                if file_name_only.contains(term) {
+                    score += 12.0;
+                    terms_matched_in_filename += 1;
                 }
                 if lang_l.contains(term) {
                     score += 2.0;
@@ -786,6 +793,12 @@ fn lexical_scores(prompt: &str, chunks: &[ProjectChunk]) -> Vec<(usize, f32)> {
                     score += 1.0;
                 }
             }
+
+            if terms_matched_in_filename >= 2 || (terms.len() == 1 && terms_matched_in_filename == 1)
+            {
+                score += 50.0;
+            }
+
             if path_l.ends_with("readme.md")
                 || path_l.ends_with("main.rs")
                 || path_l.ends_with("main.py")
@@ -801,8 +814,10 @@ fn lexical_scores(prompt: &str, chunks: &[ProjectChunk]) -> Vec<(usize, f32)> {
         }
 
         for hint in &path_hints {
-            if path_l.starts_with(hint) || path_l.contains(&format!("/{hint}")) {
-                score += 12.0;
+            if path_l == *hint {
+                score += 100.0;
+            } else if path_l.starts_with(hint) || path_l.contains(&format!("/{hint}")) {
+                score += 25.0;
             }
         }
 
