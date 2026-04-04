@@ -158,13 +158,20 @@ impl OllamaProvider {
 
         let supports_embedding = capabilities_raw.contains(&"embedding".to_string());
 
+        let model_name_l = model_name.to_ascii_lowercase();
+        let family = details
+            .and_then(|d| d.family.as_ref())
+            .map(|f| f.to_lowercase())
+            .unwrap_or_default();
+
         let mut supports_vision = capabilities_raw.contains(&"vision".to_string());
         let mut supports_audio = capabilities_raw.contains(&"audio".to_string());
 
+        // Source 2: Structured metadata from model_info keys
         if let Some(info) = model_info {
             for key in info.keys() {
                 let k = key.to_ascii_lowercase();
-                if k.contains("vision") || k.contains("mm.") {
+                if k.contains("vision") || k.contains("mm.") || k.contains("image") {
                     supports_vision = true;
                 }
                 if k.contains("audio") || k.contains("voice") {
@@ -173,14 +180,17 @@ impl OllamaProvider {
             }
         }
 
-        let model_name_l = model_name.to_ascii_lowercase();
-        let family = details
-            .and_then(|d| d.family.as_ref())
-            .map(|f| f.to_lowercase())
-            .unwrap_or_default();
-
-        if family.contains("gemma") {
-            supports_vision = true;
+        // Source 3: Weak heuristic fallback (suggestions, not deterministic)
+        if !supports_vision {
+            if let Some(d) = details {
+                if let Some(f) = &d.family {
+                    let family_l = f.to_lowercase();
+                    // Only assume vision if family AND name suggest it
+                    if family_l.contains("gemma") && model_name_l.contains("vision") {
+                        supports_vision = true;
+                    }
+                }
+            }
         }
 
         let is_thinking = capabilities_raw.contains(&"thinking".to_string())
