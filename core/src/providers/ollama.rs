@@ -100,8 +100,7 @@ impl OllamaProvider {
 
     async fn fetch_model_info(&self, model: &str) -> Result<OllamaShowResponse, LLMError> {
         let request = serde_json::json!({
-            "name": model,
-            "verbose": false
+            "name": model
         });
 
         let response = self
@@ -149,6 +148,7 @@ impl OllamaProvider {
         let capabilities_raw = response.capabilities.as_deref().unwrap_or(&[]);
         let template = response.template.as_deref().unwrap_or("");
         let model_info = response.model_info.as_ref();
+        let details = response.details.as_ref();
 
         let has_tools_in_capabilities = capabilities_raw.contains(&"tools".to_string());
         let supports_tools = has_tools_in_capabilities || template.contains(".Tools");
@@ -163,35 +163,42 @@ impl OllamaProvider {
                 .is_some_and(|m| m.keys().any(|k| k.contains("vision") || k.contains("mm.")));
 
         let model_name_l = model_name.to_ascii_lowercase();
-        let supports_thinking = capabilities_raw.contains(&"thinking".to_string())
+        let family = details
+            .and_then(|d| d.family.as_ref())
+            .map(|f| f.to_lowercase())
+            .unwrap_or_default();
+
+        let is_thinking = capabilities_raw.contains(&"thinking".to_string())
+            || family.contains("thinking")
+            || family.contains("r1")
+            || family.contains("qwq")
             || model_name_l.contains("thinking")
             || model_name_l.contains("r1")
             || model_name_l.contains("qwq");
 
-        let context_length_u32 = context_length.min(u32::MAX as usize) as u32;
-
         let mut parameter_count = model_info.and_then(extract_parameter_count);
         let mut quantization_level = model_info.and_then(extract_quantization_level);
-        let embedding_length = model_info.and_then(extract_embedding_length);
 
-        // Enrich from details if model_info is sparse (common with verbose: false)
-        if let Some(details) = &response.details {
+        if let Some(d) = details {
             if parameter_count.is_none() {
-                if let Some(p_size) = &details.parameter_size {
+                if let Some(p_size) = &d.parameter_size {
                     parameter_count = Some((parse_parameter_size(p_size) * 1_000_000_000.0) as u64);
                 }
             }
             if quantization_level.is_none() {
-                quantization_level = details.quantization_level.clone();
+                quantization_level = d.quantization_level.clone();
             }
         }
+
+        let context_length_u32 = context_length.min(u32::MAX as usize) as u32;
+        let embedding_length = model_info.and_then(extract_embedding_length);
 
         ProviderCapabilities {
             chat: true,
             tools: supports_tools,
             fim: supports_fim,
             supports_vision,
-            supports_thinking,
+            supports_thinking: is_thinking,
             context_length: context_length_u32,
             vision: supports_vision,
             supports_embedding,
