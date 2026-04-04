@@ -179,6 +179,10 @@ impl OllamaProvider {
             .map(|f| f.to_lowercase())
             .unwrap_or_default();
 
+        if family.contains("gemma") {
+            supports_vision = true;
+        }
+
         let is_thinking = capabilities_raw.contains(&"thinking".to_string())
             || family.contains("thinking")
             || family.contains("r1")

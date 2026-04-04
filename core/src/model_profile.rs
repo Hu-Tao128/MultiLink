@@ -72,7 +72,7 @@ impl ModelProfile {
 
     pub fn retrieval_budget(&self) -> RetrievalBudget {
         let factor = self.quantization_factor();
-        let base_safe_pct = 70.0 * factor;
+        let base_safe_pct = (70.0 * factor).clamp(50.0, 85.0);
         let safe_budget = (self.context_length as f32 * base_safe_pct / 100.0) as usize;
 
         let mut conversation_budget = safe_budget.saturating_mul(40) / 100;
