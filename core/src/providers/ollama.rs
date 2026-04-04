@@ -158,9 +158,20 @@ impl OllamaProvider {
 
         let supports_embedding = capabilities_raw.contains(&"embedding".to_string());
 
-        let supports_vision = capabilities_raw.contains(&"vision".to_string())
-            || model_info
-                .is_some_and(|m| m.keys().any(|k| k.contains("vision") || k.contains("mm.")));
+        let mut supports_vision = capabilities_raw.contains(&"vision".to_string());
+        let mut supports_audio = capabilities_raw.contains(&"audio".to_string());
+
+        if let Some(info) = model_info {
+            for key in info.keys() {
+                let k = key.to_ascii_lowercase();
+                if k.contains("vision") || k.contains("mm.") {
+                    supports_vision = true;
+                }
+                if k.contains("audio") || k.contains("voice") {
+                    supports_audio = true;
+                }
+            }
+        }
 
         let model_name_l = model_name.to_ascii_lowercase();
         let family = details
@@ -193,6 +204,11 @@ impl OllamaProvider {
         let context_length_u32 = context_length.min(u32::MAX as usize) as u32;
         let embedding_length = model_info.and_then(extract_embedding_length);
 
+        let mut final_tags = capabilities_raw.to_vec();
+        if supports_audio && !final_tags.contains(&"audio".to_string()) {
+            final_tags.push("audio".to_string());
+        }
+
         ProviderCapabilities {
             chat: true,
             tools: supports_tools,
@@ -206,7 +222,7 @@ impl OllamaProvider {
             parameter_count,
             quantization_level,
             embedding_length,
-            capability_tags: capabilities_raw.to_vec(),
+            capability_tags: final_tags,
         }
     }
 

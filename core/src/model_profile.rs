@@ -43,8 +43,38 @@ impl ModelProfile {
         }
     }
 
+    pub fn quantization_factor(&self) -> f32 {
+        let q = self
+            .quantization_level
+            .as_deref()
+            .unwrap_or("F16")
+            .to_ascii_uppercase();
+        if q.contains("Q2") || q.contains("2BIT") {
+            0.6
+        } else if q.contains("Q3") || q.contains("3BIT") {
+            0.7
+        } else if q.contains("Q4") || q.contains("4BIT") {
+            0.85
+        } else if q.contains("Q5") || q.contains("5BIT") {
+            0.9
+        } else if q.contains("Q6") || q.contains("6BIT") {
+            0.95
+        } else if q.contains("Q8") || q.contains("8BIT") {
+            1.0
+        } else if q.contains("F16") || q.contains("BF16") {
+            1.1
+        } else if q.contains("F32") {
+            1.2
+        } else {
+            1.0
+        }
+    }
+
     pub fn retrieval_budget(&self) -> RetrievalBudget {
-        let safe_budget = self.context_length.saturating_mul(70) / 100;
+        let factor = self.quantization_factor();
+        let base_safe_pct = 70.0 * factor;
+        let safe_budget = (self.context_length as f32 * base_safe_pct / 100.0) as usize;
+
         let mut conversation_budget = safe_budget.saturating_mul(40) / 100;
         let mut project_budget = safe_budget.saturating_mul(40) / 100;
         let generation_margin = safe_budget.saturating_sub(conversation_budget + project_budget);
