@@ -13,6 +13,7 @@ pub mod mcp_adapter;
 pub mod model_manager;
 pub mod model_profile;
 pub mod observability;
+pub mod orchestrator;
 pub mod providers;
 pub mod router;
 pub mod session;
