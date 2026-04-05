@@ -150,7 +150,7 @@ enum ProjectType {
     Go,
     Web,
     CSharp,
-    PHP,
+    Php,
     Unknown,
 }
 
@@ -164,7 +164,7 @@ impl ProjectType {
             ProjectType::Go => "go",
             ProjectType::Web => "web",
             ProjectType::CSharp => "csharp",
-            ProjectType::PHP => "php",
+            ProjectType::Php => "php",
             ProjectType::Unknown => "unknown",
         }
     }
@@ -481,7 +481,7 @@ fn detect_project_type(chunks: &[ProjectChunk]) -> ProjectDetection {
     }
     if has_root("composer.json") || has_root("index.php") {
         return ProjectDetection {
-            project_type: ProjectType::PHP,
+            project_type: ProjectType::Php,
             detected_from: if has_root("composer.json") {
                 "composer.json".to_string()
             } else {
@@ -556,7 +556,7 @@ fn context_files_for_type(project_type: ProjectType, chunks: &[ProjectChunk]) ->
             out.extend(vec_of_existing(chunks, &["Program.cs"]));
             out
         }
-        ProjectType::PHP => {
+        ProjectType::Php => {
             let mut out = vec_of_existing(chunks, &["composer.json", "index.php"]);
             out.dedup();
             out
@@ -1246,7 +1246,7 @@ mod tests {
     #[test]
     fn detect_project_type_php() {
         let d = detect_project_type(&[mk("composer.json"), mk("index.php")]);
-        assert_eq!(d.project_type, ProjectType::PHP);
+        assert_eq!(d.project_type, ProjectType::Php);
     }
 
     #[test]

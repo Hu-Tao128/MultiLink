@@ -194,6 +194,7 @@ pub struct RuntimeConfig {
     pub network_allowed_ips: Vec<String>,
     pub stream_first_token_timeout_secs: u64,
     pub thinking_model_timeout_multiplier: u64,
+    pub orchestrator_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,6 +333,7 @@ impl Default for RuntimeConfig {
             network_allowed_ips: Vec::new(),
             stream_first_token_timeout_secs: 60,
             thinking_model_timeout_multiplier: 5,
+            orchestrator_enabled: false,
         }
     }
 }

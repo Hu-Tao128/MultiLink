@@ -442,7 +442,7 @@ fn detect_stack_files(root: &Path, info: &mut ProjectInfo) {
         ("build.gradle", "Kotlin"),
         ("CMakeLists.txt", "C++"),
         ("pubspec.yaml", "Flutter"),
-        ("composer.json", "PHP"),
+        ("composer.json", "Php"),
     ];
 
     for (file, lang) in &stack_indicators {

@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use directories::ProjectDirs;
-use futures_util::StreamExt;
+use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -15,7 +15,7 @@ use walkdir::WalkDir;
 
 use crate::config::{ModelTier, RuntimeConfig};
 use crate::context_engine::{
-    ContextEngine, ContextEngineV2, ContextEngineV2Plus, ContextEngineVersion,
+    ContextEngine, ContextEngineV1, ContextEngineV2, ContextEngineV2Plus, ContextEngineVersion,
     ContextRetrievalConfig, RetrievalResult,
 };
 use crate::context_retrieval::{
@@ -31,6 +31,11 @@ use crate::providers::{PromptOptions, ProviderCapabilities, ProviderId};
 use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
 use crate::skills::{Skill, SkillLoader, SkillOrchestrator};
+use crate::orchestrator::executor::Executor;
+use crate::orchestrator::planner::MinimalPlanner;
+use crate::providers::LLMError;
+use crate::providers::TokenEvent;
+use crate::providers::TokenStream;
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -838,6 +843,31 @@ impl ChatRuntime {
             ..PromptOptions::default()
         };
 
+        let mut orchestrator_stream: Option<TokenStream> = None;
+
+        if self.runtime_config.orchestrator_enabled {
+            let skill_orchestrator = Arc::new(SkillOrchestrator::new(Vec::new()));
+            let executor = Executor::new(
+                self.router.clone(),
+                skill_orchestrator,
+                Arc::new(ContextEngineV1) as Arc<dyn ContextEngine>,
+            );
+            let plan = MinimalPlanner::plan(&prompt);
+            match executor.execute(plan).await {
+                Ok(text) => {
+                    if context_debug_enabled(&self.runtime_config) {
+                        eprintln!("[orchestrator] session={} executed plan successfully ({} chars)", session_id, text.len());
+                    }
+                    let token_event: TokenEvent = TokenEvent::Token(text);
+                    let stream_item: Result<TokenEvent, LLMError> = Ok(token_event);
+                    orchestrator_stream = Some(Box::pin(stream::once(std::future::ready(stream_item))));
+                }
+                Err(err) => {
+                    eprintln!("[orchestrator] session={} execution failed, falling back to dispatcher: {}", session_id, err);
+                }
+            }
+        }
+
         let stream_permit = self
             .stream_slots
             .clone()
@@ -847,15 +877,24 @@ impl ChatRuntime {
                 ChatRuntimeError::Provider("stream concurrency limiter unavailable".to_string())
             })?;
 
-        let stream_result = self
-            .execution_dispatcher
-            .dispatch(ExecutionDispatchRequest {
-                provider,
-                prompt: prompt.clone(),
-                options: options.clone(),
-                allow_remote_fallback,
+        let stream_result: Result<crate::execution::ExecutionDispatchResult, LLMError> = if let Some(stream) = orchestrator_stream {
+            Ok(crate::execution::ExecutionDispatchResult {
+                stream,
+                server_used: "orchestrator".to_string(),
+                fallback_used: false,
+                retries: 0,
+                latency_ms: 0,
             })
-            .await;
+        } else {
+            self.execution_dispatcher
+                .dispatch(ExecutionDispatchRequest {
+                    provider,
+                    prompt: prompt.clone(),
+                    options: options.clone(),
+                    allow_remote_fallback,
+                })
+                .await
+        };
 
         let mut fallback_retry_used = false;
         let (stream, dispatcher_fallback_used, dispatcher_retries, dispatcher_server_used) =

@@ -448,16 +448,19 @@ struct OllamaStreamChunk {
 
 #[derive(Deserialize, Debug, Clone)]
 struct OllamaModelDetails {
+    #[allow(dead_code)]
     pub parent_model: Option<String>,
+    #[allow(dead_code)]
     pub format: Option<String>,
     pub family: Option<String>,
+    #[allow(dead_code)]
     pub families: Option<Vec<String>>,
     pub parameter_size: Option<String>,
     pub quantization_level: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
-struct OllamaShowResponse {
+pub struct OllamaShowResponse {
     #[serde(default)]
     template: Option<String>,
     #[serde(default)]
@@ -799,7 +802,11 @@ impl LLMProvider for OllamaProvider {
                                                         }
                                                         if chunk.done && !completed_sent {
                                                             if thinking_open {
-                                                                thinking_open = false;
+                                                                let _ = thinking_open;
+                                                                #[allow(unused_assignments)]
+                                                                {
+                                                                    thinking_open = false;
+                                                                }
                                                                 let _ = tx.send(Ok(TokenEvent::Token("</think>".to_string()))).await;
                                                             }
                                                             let prompt_tokens = chunk.prompt_eval_count.unwrap_or(0);

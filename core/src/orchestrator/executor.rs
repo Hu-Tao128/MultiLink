@@ -22,6 +22,12 @@ impl ExecutionContext {
     }
 }
 
+impl Default for ExecutionContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct Executor {
     router: Arc<ProviderRouter>,
     skill_orchestrator: Arc<SkillOrchestrator>,
