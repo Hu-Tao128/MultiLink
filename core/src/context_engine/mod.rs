@@ -2,12 +2,13 @@ pub mod bm25;
 pub mod chunker;
 pub mod compress;
 pub mod embeddings;
-pub mod hybrid_retrieval;
+pub mod embedding_index;
 pub mod index;
 pub mod lexical_search;
 pub mod parser;
 pub mod project_context;
 pub mod retrieval;
+pub mod scoring;
 pub mod tokenizer;
 
 use std::path::PathBuf;

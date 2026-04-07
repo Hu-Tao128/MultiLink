@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::context_engine::chunker::SemanticChunk;
+use crate::context_engine::lexical_search::LexicalIndex;
 
 #[derive(Debug, Clone)]
 pub struct RankedChunk {
@@ -9,6 +11,8 @@ pub struct RankedChunk {
     pub score: f32,
     pub lexical_score: f32,
     pub embedding_score: f32,
+    pub bm25_score: f32,
+    pub heuristic_score: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +29,43 @@ pub struct RetrievalResult {
     pub embed_model: String,
     pub is_truncated: bool,
     pub budget_used: usize,
+}
+
+#[derive(Clone)]
+pub struct SearchEngine {
+    index: Arc<LexicalIndex>,
+    content_hash: u64,
+}
+
+impl SearchEngine {
+    pub fn build(chunks: &[SemanticChunk]) -> Self {
+        let mut index = LexicalIndex::new();
+        for (i, chunk) in chunks.iter().enumerate() {
+            index.add_document(format!("chunk_{i}"), chunk.content.clone());
+        }
+        Self {
+            index: Arc::new(index),
+            content_hash: compute_chunk_hash(chunks),
+        }
+    }
+
+    pub fn search(&self, query: &str, top_k: usize) -> Vec<(String, f32)> {
+        self.index.search(query, top_k)
+    }
+
+    pub fn is_valid(&self, chunks: &[SemanticChunk]) -> bool {
+        self.content_hash == compute_chunk_hash(chunks)
+    }
+}
+
+fn compute_chunk_hash(chunks: &[SemanticChunk]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for chunk in chunks {
+        chunk.file.hash(&mut hasher);
+        chunk.content.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -97,7 +138,9 @@ pub async fn hybrid_retrieval(
         .enumerate()
         .filter(|(_, chunk)| matches_filters(chunk, filters.as_ref()))
         .map(|(idx, chunk)| {
-            let lex = lexical.get(idx).copied().unwrap_or(0.0);
+            let lex = lexical.combined.get(idx).copied().unwrap_or(0.0);
+            let b25 = lexical.bm25.get(idx).copied().unwrap_or(0.0);
+            let heur = lexical.heuristic.get(idx).copied().unwrap_or(0.0);
             let emb = embed_result
                 .scores
                 .get(&chunk.chunk_hash)
@@ -113,6 +156,8 @@ pub async fn hybrid_retrieval(
                 score: final_score,
                 lexical_score: lex,
                 embedding_score: emb,
+                bm25_score: b25,
+                heuristic_score: heur,
             }
         })
         .collect();
@@ -122,7 +167,9 @@ pub async fn hybrid_retrieval(
             .iter()
             .enumerate()
             .map(|(idx, chunk)| {
-                let lex = lexical.get(idx).copied().unwrap_or(0.0);
+                let lex = lexical.combined.get(idx).copied().unwrap_or(0.0);
+                let b25 = lexical.bm25.get(idx).copied().unwrap_or(0.0);
+                let heur = lexical.heuristic.get(idx).copied().unwrap_or(0.0);
                 let emb = embed_result
                     .scores
                     .get(&chunk.chunk_hash)
@@ -138,6 +185,8 @@ pub async fn hybrid_retrieval(
                     score: final_score,
                     lexical_score: lex,
                     embedding_score: emb,
+                    bm25_score: b25,
+                    heuristic_score: heur,
                 }
             })
             .collect();
@@ -188,10 +237,76 @@ pub async fn hybrid_retrieval(
     }
 }
 
-fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
+#[derive(Debug, Clone)]
+pub struct LexicalScores {
+    pub combined: Vec<f32>,
+    pub bm25: Vec<f32>,
+    pub heuristic: Vec<f32>,
+}
+
+fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> LexicalScores {
     let terms = query_terms(prompt);
     let path_hints = path_hints(prompt);
     let is_project_overview_prompt = looks_like_project_overview_prompt(prompt);
+    let is_code_query = detect_code_query(prompt);
+
+    let heuristic_scores = compute_heuristic_scores(chunks, &terms, &path_hints, is_project_overview_prompt);
+    let bm25_scores = compute_bm25_scores(prompt, chunks);
+
+    let (bm25_weight, heuristic_weight) = if is_code_query { (0.4, 0.6) } else { (0.5, 0.5) };
+
+    let normalized_bm25 = normalize_scores(&bm25_scores);
+    let normalized_heuristic = normalize_scores(&heuristic_scores);
+
+    let mut combined = Vec::with_capacity(chunks.len());
+    for i in 0..chunks.len() {
+        let b = normalized_bm25.get(i).copied().unwrap_or(0.0);
+        let h = normalized_heuristic.get(i).copied().unwrap_or(0.0);
+        combined.push(b * bm25_weight + h * heuristic_weight);
+    }
+
+    let max_score = combined.iter().copied().fold(0.0f32, f32::max);
+    if max_score == 0.0 && !terms.is_empty() {
+        let fuzzy_terms: Vec<String> = terms.iter()
+            .filter(|t| t.len() >= 3)
+            .cloned()
+            .collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let content_l = chunk.content.to_lowercase();
+            let path_l = chunk.file.to_lowercase();
+            for term in &fuzzy_terms {
+                if content_l.contains(&term.to_lowercase()) || path_l.contains(&term.to_lowercase()) {
+                    combined[i] += 1.0;
+                }
+            }
+        }
+    }
+
+    LexicalScores {
+        combined,
+        bm25: bm25_scores,
+        heuristic: heuristic_scores,
+    }
+}
+
+fn detect_code_query(query: &str) -> bool {
+    query.contains('/') || query.contains('_') || query.chars().any(|c| c.is_uppercase())
+}
+
+fn normalize_scores(scores: &[f32]) -> Vec<f32> {
+    let max = scores.iter().copied().fold(0.0f32, f32::max);
+    if max == 0.0 {
+        return scores.to_vec();
+    }
+    scores.iter().map(|s| s / max).collect()
+}
+
+fn compute_heuristic_scores(
+    chunks: &[SemanticChunk],
+    terms: &[String],
+    path_hints: &[String],
+    is_project_overview_prompt: bool,
+) -> Vec<f32> {
     let mut scores = Vec::with_capacity(chunks.len());
 
     for chunk in chunks {
@@ -214,26 +329,8 @@ fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
             .to_ascii_lowercase();
         let is_code_ext = matches!(
             ext.as_str(),
-            "rs" | "py"
-                | "js"
-                | "jsx"
-                | "ts"
-                | "tsx"
-                | "dart"
-                | "java"
-                | "kt"
-                | "kts"
-                | "cpp"
-                | "c"
-                | "cc"
-                | "cxx"
-                | "cs"
-                | "go"
-                | "swift"
-                | "php"
-                | "rb"
-                | "scala"
-                | "zig"
+            "rs" | "py" | "js" | "jsx" | "ts" | "tsx" | "dart" | "java" | "kt" | "kts"
+                | "cpp" | "c" | "cc" | "cxx" | "cs" | "go" | "swift" | "php" | "rb" | "scala" | "zig"
         );
         let is_root_file = depth == 0;
         let in_test_like_tree = path_l.starts_with("tests/")
@@ -294,12 +391,12 @@ fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
             let file_name_only = file_name.split('.').next().unwrap_or(&file_name);
             let mut terms_matched_in_filename = 0;
 
-            for term in &terms {
+            for term in terms {
                 if path_l.contains(term) {
-                    score += 8.0; // Increased from 6.0
+                    score += 8.0;
                 }
                 if file_name_only.contains(term) {
-                    score += 12.0; // Extra boost for filename match
+                    score += 12.0;
                     terms_matched_in_filename += 1;
                 }
                 if lang_l.contains(term) {
@@ -313,22 +410,77 @@ fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
                 }
             }
 
-            // Massive boost if most query terms appear in the filename (e.g., "chat view" -> ChatView.qml)
             if terms_matched_in_filename >= 2 || (terms.len() == 1 && terms_matched_in_filename == 1)
             {
                 score += 50.0;
             }
         }
 
-        for hint in &path_hints {
+        for hint in path_hints {
             if path_l == *hint {
-                score += 100.0; // Exact full path match
+                score += 100.0;
             } else if path_l.starts_with(hint) || path_l.contains(&format!("/{hint}")) {
-                score += 25.0; // Increased from 12.0
+                score += 25.0;
             }
         }
 
         scores.push(score);
+    }
+
+    scores
+}
+
+static LEXICAL_INDEX_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<Option<(u64, Arc<LexicalIndex>)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+fn compute_bm25_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+
+    let current_hash = compute_chunk_hash(chunks);
+
+    let index = {
+        let guard = LEXICAL_INDEX_CACHE.lock().unwrap();
+        if let Some((hash, idx)) = guard.as_ref() {
+            if *hash == current_hash {
+                idx.clone()
+            } else {
+                drop(guard);
+                let mut new_index = LexicalIndex::new();
+                for (i, chunk) in chunks.iter().enumerate() {
+                    new_index.add_document(format!("chunk_{i}"), chunk.content.clone());
+                }
+                let new_arc = Arc::new(new_index);
+                let mut lock = LEXICAL_INDEX_CACHE.lock().unwrap();
+                *lock = Some((current_hash, new_arc.clone()));
+                new_arc
+            }
+        } else {
+            drop(guard);
+            let mut new_index = LexicalIndex::new();
+            for (i, chunk) in chunks.iter().enumerate() {
+                new_index.add_document(format!("chunk_{i}"), chunk.content.clone());
+            }
+            let new_arc = Arc::new(new_index);
+            let mut lock = LEXICAL_INDEX_CACHE.lock().unwrap();
+            *lock = Some((current_hash, new_arc.clone()));
+            new_arc
+        }
+    };
+
+    let results = index.search(prompt, chunks.len());
+
+    let mut scores = vec![0.0f32; chunks.len()];
+    for (id, score) in results {
+        if let Some(idx_str) = id.strip_prefix("chunk_") {
+            if let Ok(idx) = idx_str.parse::<usize>() {
+                if idx < scores.len() {
+                    scores[idx] = score;
+                }
+            }
+        }
     }
 
     scores
@@ -790,7 +942,7 @@ mod tests {
             chunk_hash: "abc".to_string(),
         }];
         let scores = lexical_scores("where is main function", &chunks);
-        assert!(scores[0] > 0.0);
+        assert!(scores.combined[0] > 0.0);
     }
 
     #[test]
@@ -814,6 +966,6 @@ mod tests {
             },
         ];
         let scores = lexical_scores("de que trata este proyecto", &chunks);
-        assert!(scores[1] > scores[0]);
+        assert!(scores.combined[1] > scores.combined[0]);
     }
 }

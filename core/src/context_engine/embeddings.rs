@@ -5,10 +5,19 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::context_engine::chunker::SemanticChunk;
+use crate::context_engine::scoring::cosine_similarity;
+
+const EMBEDDING_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct EmbeddingCacheEntry {
+    vector: Vec<f32>,
+    timestamp_secs: u64,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 struct EmbeddingCacheFile {
-    vectors: HashMap<String, Vec<f32>>,
+    vectors: HashMap<String, EmbeddingCacheEntry>,
 }
 
 pub struct EmbeddingBlendResult {
@@ -119,9 +128,13 @@ pub async fn blend_embedding_scores(
             .await
             {
                 attempts = attempts.saturating_add(1);
+                let ts = get_timestamp_secs();
                 for (idx, vec) in vectors.into_iter().enumerate() {
                     if let Some(hash) = missing_ids.get(offset + idx) {
-                        cache.vectors.insert(hash.clone(), vec);
+                        cache.vectors.insert(hash.clone(), EmbeddingCacheEntry {
+                            vector: vec,
+                            timestamp_secs: ts,
+                        });
                     }
                 }
             } else {
@@ -140,8 +153,8 @@ pub async fn blend_embedding_scores(
 
     let mut scores = HashMap::new();
     for chunk in candidates {
-        if let Some(v) = cache.vectors.get(&chunk.chunk_hash) {
-            scores.insert(chunk.chunk_hash.clone(), cosine_similarity(&query_vec, v));
+        if let Some(entry) = cache.vectors.get(&chunk.chunk_hash) {
+            scores.insert(chunk.chunk_hash.clone(), cosine_similarity(&query_vec, &entry.vector));
         }
     }
 
@@ -165,7 +178,16 @@ fn load_cache(path: &Path) -> EmbeddingCacheFile {
     let Ok(raw) = fs::read(path) else {
         return EmbeddingCacheFile::default();
     };
-    serde_json::from_slice::<EmbeddingCacheFile>(&raw).unwrap_or_default()
+    let mut cache = serde_json::from_slice::<EmbeddingCacheFile>(&raw).unwrap_or_default();
+    
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    
+    cache.vectors.retain(|_key, entry| now.saturating_sub(entry.timestamp_secs) < EMBEDDING_CACHE_TTL_SECS);
+    
+    cache
 }
 
 fn save_cache(path: &Path, cache: &EmbeddingCacheFile) -> Result<(), std::io::Error> {
@@ -174,6 +196,13 @@ fn save_cache(path: &Path, cache: &EmbeddingCacheFile) -> Result<(), std::io::Er
     }
     let bytes = serde_json::to_vec(cache).unwrap_or_default();
     fs::write(path, bytes)
+}
+
+pub(crate) fn get_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[derive(serde::Serialize)]
@@ -332,30 +361,11 @@ async fn embed_inputs(
     None
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.is_empty() || b.is_empty() || a.len() != b.len() {
-        return 0.0;
-    }
-
-    let mut dot = 0f32;
-    let mut na = 0f32;
-    let mut nb = 0f32;
-    for i in 0..a.len() {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    if na <= f32::EPSILON || nb <= f32::EPSILON {
-        return 0.0;
-    }
-    dot / (na.sqrt() * nb.sqrt())
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use super::{load_cache, save_cache, EmbeddingCacheFile};
+    use super::{get_timestamp_secs, load_cache, save_cache, EmbeddingCacheEntry, EmbeddingCacheFile};
 
     #[test]
     fn embedding_cache_roundtrip() {
@@ -363,11 +373,14 @@ mod tests {
         let path = temp.path().join("embeddings.json");
 
         let mut cache = EmbeddingCacheFile::default();
-        cache.vectors.insert("abc".to_string(), vec![0.1, 0.2, 0.3]);
+        cache.vectors.insert("abc".to_string(), EmbeddingCacheEntry {
+            vector: vec![0.1, 0.2, 0.3],
+            timestamp_secs: get_timestamp_secs(),
+        });
         save_cache(&path, &cache).expect("save");
         assert!(fs::metadata(&path).is_ok());
 
         let loaded = load_cache(&path);
-        assert_eq!(loaded.vectors.get("abc").map(|v| v.len()), Some(3));
+        assert_eq!(loaded.vectors.get("abc").map(|v| v.vector.len()), Some(3));
     }
 }
