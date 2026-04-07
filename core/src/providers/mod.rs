@@ -1,4 +1,11 @@
 use std::path::PathBuf;
+
+#[derive(Debug, Clone)]
+pub struct ProviderInfo {
+    pub id: ProviderId,
+    pub capabilities: ProviderCapabilities,
+    pub is_available: bool,
+}
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -54,13 +61,42 @@ pub struct LLMResponse {
     pub usage: Option<TokenUsage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub total_tokens: usize,
     #[serde(default)]
     pub is_estimated: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderCapabilities {
+    pub chat: bool,
+    pub tools: bool,
+    pub fim: bool,
+    #[serde(default)]
+    pub supports_vision: bool,
+    #[serde(default)]
+    pub supports_thinking: bool,
+    #[serde(default)]
+    pub context_length: u32,
+    #[serde(default)]
+    pub vision: bool,
+    pub supports_embedding: bool,
+    pub max_context_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameter_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantization_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_length: Option<usize>,
+    #[serde(default)]
+    pub capability_tags: Vec<String>,
+    #[serde(default)]
+    pub is_local: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_estimate_ms: Option<u32>,
 }
 
 impl TokenUsage {
@@ -127,32 +163,11 @@ pub trait LLMProvider: Send + Sync {
 
     async fn get_model_info(&self, model: &str) -> Result<ProviderCapabilities, LLMError>;
 
-    async fn health_check(&self) -> Result<bool, LLMError>;
-}
+    async fn capabilities(&self) -> Result<ProviderCapabilities, LLMError> {
+        Err(LLMError::NotConfigured)
+    }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ProviderCapabilities {
-    pub chat: bool,
-    pub tools: bool,
-    pub fim: bool,
-    #[serde(default)]
-    pub supports_vision: bool,
-    #[serde(default)]
-    pub supports_thinking: bool,
-    #[serde(default)]
-    pub context_length: u32,
-    #[serde(default)]
-    pub vision: bool,
-    pub supports_embedding: bool,
-    pub max_context_tokens: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parameter_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quantization_level: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embedding_length: Option<usize>,
-    #[serde(default)]
-    pub capability_tags: Vec<String>,
+    async fn health_check(&self) -> Result<bool, LLMError>;
 }
 
 impl ProviderCapabilities {
@@ -172,6 +187,8 @@ impl ProviderCapabilities {
             quantization_level: None,
             embedding_length: None,
             capability_tags: Vec::new(),
+            is_local: false,
+            latency_estimate_ms: None,
         }
     }
 }

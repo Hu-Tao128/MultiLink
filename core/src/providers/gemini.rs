@@ -164,6 +164,26 @@ impl LLMProvider for GeminiProvider {
         Ok(ProviderCapabilities::default_with_context(128_000))
     }
 
+    async fn capabilities(&self) -> Result<ProviderCapabilities, LLMError> {
+        Ok(ProviderCapabilities {
+            chat: true,
+            tools: false,
+            fim: false,
+            supports_vision: true,
+            supports_thinking: false,
+            context_length: 128_000,
+            vision: true,
+            supports_embedding: false,
+            max_context_tokens: 128_000,
+            parameter_count: None,
+            quantization_level: None,
+            embedding_length: None,
+            capability_tags: vec!["vision".to_string()],
+            is_local: false,
+            latency_estimate_ms: Some(500),
+        })
+    }
+
     async fn health_check(&self) -> Result<bool, LLMError> {
         if self.access_token.is_none() {
             return Ok(false);

@@ -7,7 +7,7 @@ use tokio::time::sleep;
 
 use crate::providers::{
     LLMError, LLMProvider, LLMResponse, PromptOptions, ProviderCapabilities, ProviderId,
-    TokenStream,
+    ProviderInfo, TokenStream,
 };
 
 const DEFAULT_MAX_RETRIES: u32 = 3;
@@ -228,6 +228,26 @@ impl ProviderRouter {
             })
             .copied()
             .collect()
+    }
+
+    pub async fn get_available_providers(&self) -> Vec<ProviderInfo> {
+        let mut providers = Vec::new();
+        for id in &self.order {
+            if let Some(provider) = self.providers.get(id) {
+                let is_available = provider.is_available();
+                let capabilities = if is_available {
+                    provider.capabilities().await.unwrap_or_default()
+                } else {
+                    ProviderCapabilities::default()
+                };
+                providers.push(ProviderInfo {
+                    id: *id,
+                    capabilities,
+                    is_available,
+                });
+            }
+        }
+        providers
     }
 
     pub fn provider_status(&self) -> Vec<(ProviderId, ProviderAvailability)> {

@@ -237,6 +237,8 @@ impl OllamaProvider {
             quantization_level,
             embedding_length,
             capability_tags: final_tags,
+            is_local: true,
+            latency_estimate_ms: Some(100),
         }
     }
 
@@ -849,6 +851,10 @@ impl LLMProvider for OllamaProvider {
             model.to_string()
         };
         self.get_cached_or_fetch(&model_name).await
+    }
+
+    async fn capabilities(&self) -> Result<ProviderCapabilities, LLMError> {
+        self.get_cached_or_fetch(&self.default_model).await
     }
 
     async fn health_check(&self) -> Result<bool, LLMError> {

@@ -172,7 +172,13 @@ impl LLMProvider for CodexProvider {
             quantization_level: None,
             embedding_length: None,
             capability_tags: Vec::new(),
+            is_local: false,
+            latency_estimate_ms: Some(300),
         })
+    }
+
+    async fn capabilities(&self) -> Result<ProviderCapabilities, LLMError> {
+        self.get_model_info("").await
     }
 
     async fn health_check(&self) -> Result<bool, LLMError> {
