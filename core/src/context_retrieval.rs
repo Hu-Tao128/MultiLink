@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const CLUSTER_EMBED_SERVER_TIMEOUT_SECS: u64 = 2;
+const CLUSTER_EMBED_SERVER_TIMEOUT_SECS: u64 = 8;
 
 #[derive(Debug, Clone)]
 pub struct RetrievalConfig {

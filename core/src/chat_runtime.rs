@@ -1490,22 +1490,19 @@ impl ChatRuntime {
             {
                 resolved_embed_base_url = cached_embed_url;
             } else {
-                let mut cluster_servers: Vec<String> = effective_runtime
+                let local_embed_url = effective_runtime.context_ollama_base_url.clone();
+                let remotes: Vec<String> = effective_runtime
                     .execution_servers
                     .iter()
                     .filter(|s| s.enabled)
                     .map(|s| s.base_url.clone())
+                    .filter(|url| {
+                        url.trim_end_matches('/') != local_embed_url.trim_end_matches('/')
+                    })
                     .collect();
-                if cluster_servers.is_empty() {
-                    cluster_servers.push(effective_runtime.embed_base_url.clone());
-                } else if !cluster_servers.iter().any(|url| {
-                    url.trim_end_matches('/')
-                        == effective_runtime
-                            .context_ollama_base_url
-                            .trim_end_matches('/')
-                }) {
-                    cluster_servers.push(effective_runtime.context_ollama_base_url.clone());
-                }
+
+                let mut cluster_servers: Vec<String> = vec![local_embed_url.clone()];
+                cluster_servers.extend(remotes);
 
                 let probe_config = RetrievalConfig {
                     embeddings_enabled: effective_runtime.context_embeddings_enabled,
