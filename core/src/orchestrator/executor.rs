@@ -2,11 +2,11 @@ use std::sync::Arc;
 use crate::context_engine::parser::chunk_extractor::CodeChunk;
 use crate::orchestrator::planner::{Action, Plan};
 use crate::router::ProviderRouter;
-use crate::providers::{ProviderId, ProviderCapabilities, PromptOptions};
+use crate::providers::{ProviderId, PromptOptions};
 use crate::skills::SkillOrchestrator;
 use crate::context_engine::ContextEngine;
 use crate::orchestrator::tools;
-use crate::orchestrator::provider_selector::{ProviderSelector, RequiredCapabilities};
+use crate::orchestrator::provider_selector::ProviderSelector;
 
 pub struct ExecutionContext {
     pub context: Option<Vec<CodeChunk>>,
@@ -72,34 +72,8 @@ impl Executor {
                         exec_context.intermediate_results.push("No matching skill found".to_string());
                     }
                 }
-                Action::GenerateResponse => {
-                    // Provider selection
-                    let required = RequiredCapabilities {
-                        vision: false,
-                        audio: false,
-                        thinking: false,
-                        tools: false,
-                        fim: false,
-                        min_context_length: 4096,
-                    };
-
-                    // In a real implementation, we would get this from the router/registry.
-                    // For now, we simulate the available providers with their capabilities.
-                    let available_providers = vec![
-                        (
-                            ProviderId::Ollama, 
-                            ProviderCapabilities::default_with_context(4096), 
-                            true, 
-                            1
-                        ),
-                        (
-                            ProviderId::Gemini, 
-                            ProviderCapabilities::default_with_context(128000), 
-                            true, 
-                            2
-                        ),
-                    ];
-
+                Action::GenerateResponse { capabilities: required } => {
+                    let available_providers = self.router.get_available_providers().await;
                     let selected_provider = ProviderSelector::select(&required, &available_providers)
                         .unwrap_or(ProviderId::Ollama);
 
