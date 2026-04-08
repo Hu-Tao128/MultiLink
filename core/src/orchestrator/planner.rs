@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::orchestrator::provider_selector::RequiredCapabilities;
+use crate::tools::ToolInput;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Action {
     RetrieveContext,
     ExecuteSkill,
     GenerateResponse { capabilities: RequiredCapabilities },
+    ToolCall { name: String, input: ToolInput },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -31,6 +31,7 @@ use crate::providers::{PromptOptions, ProviderCapabilities, ProviderId};
 use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
 use crate::skills::{Skill, SkillLoader, SkillOrchestrator};
+use crate::tools::{create_default_registry, ToolExecutor};
 use crate::orchestrator::executor::Executor;
 use crate::orchestrator::planner::MinimalPlanner;
 use crate::providers::LLMError;
@@ -73,6 +74,7 @@ pub struct ChatRuntime {
     persist_interval: Duration,
     runtime_config: RuntimeConfig,
     system_context_dir: Option<PathBuf>,
+    tool_executor: Arc<ToolExecutor>,
 }
 
 impl ChatRuntime {
@@ -97,6 +99,24 @@ impl ChatRuntime {
         runtime_config: RuntimeConfig,
         system_context_dir: Option<PathBuf>,
     ) -> Self {
+        Self::new_with_config_and_root(
+            router,
+            storage_dir,
+            persist_interval,
+            runtime_config,
+            system_context_dir,
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        )
+    }
+
+    pub fn new_with_config_and_root(
+        router: Arc<ProviderRouter>,
+        storage_dir: PathBuf,
+        persist_interval: Duration,
+        runtime_config: RuntimeConfig,
+        system_context_dir: Option<PathBuf>,
+        project_root: PathBuf,
+    ) -> Self {
         let hardware_caps = cached_hardware_caps();
         let mut runtime_config = runtime_config;
         runtime_config.max_parallel_streams = runtime_config
@@ -116,6 +136,9 @@ impl ChatRuntime {
             .min(hardware_caps.max_project_top_k)
             .max(2);
 
+        let tool_registry = create_default_registry(project_root);
+        let tool_executor = Arc::new(ToolExecutor::new(Arc::new(tool_registry)));
+
         Self {
             router: router.clone(),
             execution_dispatcher: Arc::new(ExecutionDispatcher::new(
@@ -131,6 +154,7 @@ impl ChatRuntime {
             persist_interval,
             runtime_config,
             system_context_dir,
+            tool_executor,
         }
     }
 
@@ -851,6 +875,7 @@ impl ChatRuntime {
                 self.router.clone(),
                 skill_orchestrator,
                 Arc::new(ContextEngineV1) as Arc<dyn ContextEngine>,
+                self.tool_executor.clone(),
             );
             let plan = MinimalPlanner::plan(&prompt);
             match executor.execute(plan).await {

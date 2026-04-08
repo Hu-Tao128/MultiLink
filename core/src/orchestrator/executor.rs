@@ -5,8 +5,9 @@ use crate::router::ProviderRouter;
 use crate::providers::{ProviderId, PromptOptions};
 use crate::skills::SkillOrchestrator;
 use crate::context_engine::ContextEngine;
-use crate::orchestrator::tools;
+use crate::orchestrator::old_tools;
 use crate::orchestrator::provider_selector::ProviderSelector;
+use crate::tools::ToolExecutor;
 
 pub struct ExecutionContext {
     pub context: Option<Vec<CodeChunk>>,
@@ -32,6 +33,7 @@ pub struct Executor {
     router: Arc<ProviderRouter>,
     skill_orchestrator: Arc<SkillOrchestrator>,
     context_engine: Arc<dyn ContextEngine>,
+    tool_executor: Arc<ToolExecutor>,
 }
 
 impl Executor {
@@ -39,11 +41,13 @@ impl Executor {
         router: Arc<ProviderRouter>,
         skill_orchestrator: Arc<SkillOrchestrator>,
         context_engine: Arc<dyn ContextEngine>,
+        tool_executor: Arc<ToolExecutor>,
     ) -> Self {
         Self {
             router,
             skill_orchestrator,
             context_engine,
+            tool_executor,
         }
     }
 
@@ -54,7 +58,7 @@ impl Executor {
         for step in plan.steps {
             match step.action {
                 Action::RetrieveContext => {
-                    let result = tools::retrieve_context(
+                    let result = old_tools::retrieve_context(
                         &self.context_engine,
                         &plan.goal,
                         &plan.goal,
@@ -65,7 +69,7 @@ impl Executor {
                     last_output = result.context;
                 }
                 Action::ExecuteSkill => {
-                    if let Some(skill) = tools::execute_skill(&self.skill_orchestrator, &plan.goal).await? {
+                    if let Some(skill) = old_tools::execute_skill(&self.skill_orchestrator, &plan.goal).await? {
                         exec_context.intermediate_results.push(format!("Executed skill: {}", skill.manifest.name));
                         last_output = format!("Skill {} analysis results placeholder", skill.manifest.name);
                     } else {
@@ -89,6 +93,12 @@ impl Executor {
                     
                     last_output = response.text;
                 }
+                Action::ToolCall { name, input } => {
+                    let result = self.tool_executor.execute(&name, input).await;
+                    let json_output = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+                    exec_context.intermediate_results.push(format!("Tool {} result: {}", name, json_output));
+                    last_output = json_output;
+                }
             }
         }
 
@@ -99,10 +109,12 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use crate::router::ProviderRouter;
     use crate::skills::SkillOrchestrator;
     use crate::context_engine::ContextEngineV1;
     use crate::orchestrator::planner::MinimalPlanner;
+    use crate::tools::{ToolExecutor, ToolRegistry};
 
     #[tokio::test]
     async fn test_executor_basic() {
@@ -110,10 +122,12 @@ mod tests {
         let skill_orchestrator = Arc::new(SkillOrchestrator::new(Vec::new()));
         let context_engine = Arc::new(ContextEngineV1);
         
-        let executor = Executor::new(router, skill_orchestrator, context_engine);
+        let registry = Arc::new(ToolRegistry::new(PathBuf::from(".")));
+        let tool_executor = Arc::new(ToolExecutor::new(registry));
+        
+        let executor = Executor::new(router, skill_orchestrator, context_engine, tool_executor);
         let plan = MinimalPlanner::plan("test goal");
         
-        // This will fail because router has no providers registered, but it verifies the logic flow
         let result = executor.execute(plan).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("LLM error"));
