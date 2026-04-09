@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -21,6 +23,7 @@ pub struct OllamaProvider {
     base_url: String,
     default_model: String,
     model_cache: Arc<RwLock<HashMap<String, CachedModelInfo>>>,
+    warmup_models: Arc<RwLock<HashMap<String, bool>>>,
 }
 
 #[derive(Clone)]
@@ -59,6 +62,10 @@ impl OllamaProvider {
         Self::env_u64("MULTILINK_OLLAMA_STREAM_RETRIES", 4, 0, 10) as usize
     }
 
+    fn model_load_timeout_secs() -> u64 {
+        Self::env_u64("MULTILINK_OLLAMA_MODEL_LOAD_TIMEOUT_SECS", 120, 30, 600)
+    }
+
     pub fn new(base_url: String, default_model: String) -> Self {
         let connect_timeout_secs = Self::connect_timeout_secs();
         let http_timeout_secs = Self::http_timeout_secs();
@@ -78,6 +85,79 @@ impl OllamaProvider {
             base_url,
             default_model,
             model_cache: Arc::new(RwLock::new(HashMap::new())),
+            warmup_models: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub async fn warmup_model(&self, model: &str) -> Result<(), LLMError> {
+        {
+            let warmed = self.warmup_models.read().await;
+            if warmed.get(model) == Some(&true) {
+                return Ok(());
+            }
+        }
+
+        let warmup_prompt = "Hi";
+        let body = OllamaRequest {
+            model: model.to_string(),
+            stream: false,
+            messages: vec![OllamaMessage {
+                role: "user".to_string(),
+                content: warmup_prompt.to_string(),
+                thinking: None,
+            }],
+            options: Some(OllamaOptions {
+                num_ctx: Some(128),
+                temperature: Some(0.0),
+            }),
+        };
+
+        let timeout = Duration::from_secs(Self::model_load_timeout_secs());
+        
+        let result = tokio::time::timeout(
+            timeout,
+            self.client
+                .post(format!("{}/api/chat", self.base_url))
+                .json(&body)
+                .send()
+        ).await;
+
+        match result {
+            Ok(Ok(response)) if response.status().is_success() => {
+                let mut warmed = self.warmup_models.write().await;
+                warmed.insert(model.to_string(), true);
+                Ok(())
+            }
+            Ok(Ok(response)) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+                let mut warmed = self.warmup_models.write().await;
+                warmed.insert(model.to_string(), true);
+                Ok(())
+            }
+            Ok(Ok(response)) => {
+                let status = response.status();
+                if status.as_u16() == 404 || status.as_u16() == 504 {
+                    let mut warmed = self.warmup_models.write().await;
+                    warmed.insert(model.to_string(), true);
+                    return Ok(());
+                }
+                Err(LLMError::Http(format!("warmup failed: {}", status)))
+            }
+            Ok(Err(e)) => {
+                if e.to_string().contains("timeout") {
+                    eprintln!("[ollama] model {} is loading into memory (timeout during warmup)", model);
+                    let mut warmed = self.warmup_models.write().await;
+                    warmed.insert(model.to_string(), true);
+                    Ok(())
+                } else {
+                    Err(LLMError::Http(format!("warmup failed: {}", e)))
+                }
+            }
+            Err(_) => {
+                eprintln!("[ollama] model {} is loading into memory (warmup timed out)", model);
+                let mut warmed = self.warmup_models.write().await;
+                warmed.insert(model.to_string(), true);
+                Ok(())
+            }
         }
     }
 
@@ -315,6 +395,13 @@ impl OllamaProvider {
                     };
 
                     if !is_transient_status(status) || attempt + 1 == Self::RETRY_ATTEMPTS {
+                        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                            if attempt == 0 {
+                                sleep(Duration::from_secs(3)).await;
+                                last_error = Some(LLMError::Http(format!("model may be loading: {}", detail)));
+                                continue;
+                            }
+                        }
                         return Err(LLMError::Http(detail));
                     }
 
