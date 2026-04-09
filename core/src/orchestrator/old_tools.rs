@@ -1,8 +1,8 @@
-use std::sync::Arc;
 use crate::context_engine::{ContextEngine, ContextRetrievalConfig, RetrievalResult};
+use crate::providers::{LLMResponse, PromptOptions, ProviderId};
 use crate::router::ProviderRouter;
-use crate::providers::{ProviderId, PromptOptions, LLMResponse};
-use crate::skills::{SkillOrchestrator, Skill};
+use crate::skills::{Skill, SkillOrchestrator};
+use std::sync::Arc;
 
 pub async fn retrieve_context(
     engine: &Arc<dyn ContextEngine>,
@@ -11,7 +11,9 @@ pub async fn retrieve_context(
     token_budget: usize,
 ) -> Result<RetrievalResult, String> {
     let config = ContextRetrievalConfig::default();
-    Ok(engine.retrieve(project_context, query, token_budget, None, &config).await)
+    Ok(engine
+        .retrieve(project_context, query, token_budget, None, &config)
+        .await)
 }
 
 pub async fn execute_skill(
@@ -27,5 +29,8 @@ pub async fn call_llm(
     prompt: String,
 ) -> Result<LLMResponse, String> {
     let options = PromptOptions::default();
-    router.send(provider, prompt, options).await.map_err(|e| e.to_string())
+    router
+        .send(provider, prompt, options)
+        .await
+        .map_err(|e| e.to_string())
 }
