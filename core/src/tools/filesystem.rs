@@ -1,8 +1,8 @@
-use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 
-use crate::tools::{ToolInput, ToolResult, Tool};
+use crate::tools::{Tool, ToolInput, ToolResult};
 
 pub fn normalize_path(base: &Path, relative: &str) -> Result<PathBuf, String> {
     let relative_path = Path::new(relative);
@@ -29,8 +29,12 @@ pub struct FsLs;
 
 #[async_trait]
 impl Tool for FsLs {
-    fn name(&self) -> &'static str { "fs_ls" }
-    fn description(&self) -> &'static str { "List files and directories in a path" }
+    fn name(&self) -> &'static str {
+        "fs_ls"
+    }
+    fn description(&self) -> &'static str {
+        "List files and directories in a path"
+    }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -76,7 +80,10 @@ impl Tool for FsLs {
                     match (a_is_dir, b_is_dir) {
                         (true, false) => std::cmp::Ordering::Less,
                         (false, true) => std::cmp::Ordering::Greater,
-                        _ => a.get("name").and_then(|n| n.as_str()).cmp(&b.get("name").and_then(|n| n.as_str())),
+                        _ => a
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .cmp(&b.get("name").and_then(|n| n.as_str())),
                     }
                 });
 
@@ -94,8 +101,12 @@ pub struct FsCat;
 
 #[async_trait]
 impl Tool for FsCat {
-    fn name(&self) -> &'static str { "fs_cat" }
-    fn description(&self) -> &'static str { "Read file contents" }
+    fn name(&self) -> &'static str {
+        "fs_cat"
+    }
+    fn description(&self) -> &'static str {
+        "Read file contents"
+    }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -140,8 +151,12 @@ pub struct FsGrep;
 
 #[async_trait]
 impl Tool for FsGrep {
-    fn name(&self) -> &'static str { "fs_grep" }
-    fn description(&self) -> &'static str { "Search for pattern in files (pure Rust, no shell)" }
+    fn name(&self) -> &'static str {
+        "fs_grep"
+    }
+    fn description(&self) -> &'static str {
+        "Search for pattern in files (pure Rust, no shell)"
+    }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -168,7 +183,8 @@ impl Tool for FsGrep {
             None => project_root.to_path_buf(),
         };
 
-        let limit = input.args
+        let limit = input
+            .args
             .as_ref()
             .and_then(|args| args.get("limit"))
             .and_then(|v| v.as_u64())
@@ -203,7 +219,19 @@ impl Tool for FsGrep {
             for entry in entries {
                 let path = entry.path();
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if !matches!(ext, "rs" | "toml" | "json" | "md" | "yaml" | "yml" | "txt" | "sh" | "py" | "js" | "ts") {
+                if !matches!(
+                    ext,
+                    "rs" | "toml"
+                        | "json"
+                        | "md"
+                        | "yaml"
+                        | "yml"
+                        | "txt"
+                        | "sh"
+                        | "py"
+                        | "js"
+                        | "ts"
+                ) {
                     continue;
                 }
 

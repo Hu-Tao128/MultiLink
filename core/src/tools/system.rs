@@ -2,37 +2,46 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::process::Command;
 
-use crate::tools::{ToolInput, ToolResult, Tool};
+use crate::tools::{Tool, ToolInput, ToolResult};
 
 pub struct SystemVersion;
 
 impl SystemVersion {
     fn get_version(&self, binary: &str, args: &[&str]) -> Option<Value> {
-        let output = Command::new(binary)
-            .args(args)
-            .output()
-            .ok()?;
+        let output = Command::new(binary).args(args).output().ok()?;
 
         if output.status.success() {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if version.is_empty() {
-                return Some(json!(String::from_utf8_lossy(&output.stderr).trim().to_string()));
+                return Some(json!(String::from_utf8_lossy(&output.stderr)
+                    .trim()
+                    .to_string()));
             }
-            Some(json!(version.lines().next().unwrap_or(&version).to_string()))
+            Some(json!(version
+                .lines()
+                .next()
+                .unwrap_or(&version)
+                .to_string()))
         } else {
             None
         }
     }
 
     fn find_binary(&self, name: &str) -> Option<String> {
-        which::which(name).ok().map(|p| p.to_string_lossy().to_string())
+        which::which(name)
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
     }
 }
 
 #[async_trait]
 impl Tool for SystemVersion {
-    fn name(&self) -> &'static str { "system_version" }
-    fn description(&self) -> &'static str { "Detect versions of Node.js, Java, Python, Rust, Cargo, Git" }
+    fn name(&self) -> &'static str {
+        "system_version"
+    }
+    fn description(&self) -> &'static str {
+        "Detect versions of Node.js, Java, Python, Rust, Cargo, Git"
+    }
 
     fn input_schema(&self) -> Value {
         json!({
@@ -58,14 +67,16 @@ impl Tool for SystemVersion {
                     .filter_map(|v| v.as_str().map(String::from))
                     .collect()
             })
-            .unwrap_or_else(|| vec![
-                "node".to_string(),
-                "java".to_string(),
-                "python".to_string(),
-                "rust".to_string(),
-                "cargo".to_string(),
-                "git".to_string(),
-            ]);
+            .unwrap_or_else(|| {
+                vec![
+                    "node".to_string(),
+                    "java".to_string(),
+                    "python".to_string(),
+                    "rust".to_string(),
+                    "cargo".to_string(),
+                    "git".to_string(),
+                ]
+            });
 
         let mut results = Vec::new();
 
@@ -104,7 +115,9 @@ mod tests {
     #[tokio::test]
     async fn test_system_version() {
         let tool = SystemVersion;
-        let result = tool.execute(ToolInput::default(), &std::path::PathBuf::from("/")).await;
+        let result = tool
+            .execute(ToolInput::default(), &std::path::PathBuf::from("/"))
+            .await;
         assert!(result.success);
     }
 }

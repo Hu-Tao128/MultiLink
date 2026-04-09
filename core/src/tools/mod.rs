@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub mod filesystem;
-pub mod system;
 pub mod hybrid;
+pub mod system;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ToolInput {
@@ -116,10 +116,17 @@ impl ToolExecutor {
 }
 
 pub fn create_default_registry(project_root: PathBuf) -> ToolRegistry {
-    create_default_registry_with_engine(project_root, Arc::new(crate::context_engine::ContextEngineV1) as Arc<dyn crate::context_engine::ContextEngine>)
+    create_default_registry_with_engine(
+        project_root,
+        Arc::new(crate::context_engine::ContextEngineV1)
+            as Arc<dyn crate::context_engine::ContextEngine>,
+    )
 }
 
-pub fn create_default_registry_with_engine(project_root: PathBuf, context_engine: Arc<dyn crate::context_engine::ContextEngine>) -> ToolRegistry {
+pub fn create_default_registry_with_engine(
+    project_root: PathBuf,
+    context_engine: Arc<dyn crate::context_engine::ContextEngine>,
+) -> ToolRegistry {
     let mut registry = ToolRegistry::new(project_root);
     registry.register(Arc::new(hybrid::SearchCode::new(context_engine.clone())));
     registry.register(Arc::new(hybrid::OpenFile));

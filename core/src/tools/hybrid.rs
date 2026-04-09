@@ -3,8 +3,8 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::context_engine::ContextEngine;
 use super::{Tool, ToolInput, ToolResult};
+use crate::context_engine::ContextEngine;
 
 pub struct SearchCode {
     context_engine: Arc<dyn ContextEngine>,
@@ -38,12 +38,18 @@ impl Tool for SearchCode {
     }
 
     async fn execute(&self, input: ToolInput, project_root: &Path) -> ToolResult {
-        let query = match input.args.as_ref().and_then(|a| a.get("query")).and_then(|v| v.as_str()) {
+        let query = match input
+            .args
+            .as_ref()
+            .and_then(|a| a.get("query"))
+            .and_then(|v| v.as_str())
+        {
             Some(q) => q,
             None => return ToolResult::err("query is required"),
         };
 
-        let top_k = input.args
+        let top_k = input
+            .args
             .as_ref()
             .and_then(|a| a.get("top_k"))
             .and_then(|v| v.as_u64())
@@ -51,22 +57,31 @@ impl Tool for SearchCode {
             .unwrap_or(5);
 
         let config = crate::context_engine::ContextRetrievalConfig::default();
-        
-        let result = self.context_engine
-            .retrieve(project_root.to_string_lossy().as_ref(), query, top_k * 500, None, &config)
+
+        let result = self
+            .context_engine
+            .retrieve(
+                project_root.to_string_lossy().as_ref(),
+                query,
+                top_k * 500,
+                None,
+                &config,
+            )
             .await;
 
-        let results: Vec<Value> = result.selected_files
+        let results: Vec<Value> = result
+            .selected_files
             .iter()
             .enumerate()
             .map(|(i, path)| {
-                let snippet = result.context
+                let snippet = result
+                    .context
                     .lines()
                     .skip(i * 10)
                     .take(5)
                     .collect::<Vec<_>>()
                     .join("\n");
-                
+
                 json!({
                     "path": path,
                     "score": 1.0 - (i as f32 * 0.1),
@@ -106,10 +121,14 @@ impl Tool for OpenFile {
     }
 
     async fn execute(&self, input: ToolInput, project_root: &Path) -> ToolResult {
-        let path = input.path.clone()
-            .or_else(|| {
-                input.args.as_ref().and_then(|a| a.get("path")).and_then(|v| v.as_str()).map(String::from)
-            });
+        let path = input.path.clone().or_else(|| {
+            input
+                .args
+                .as_ref()
+                .and_then(|a| a.get("path"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        });
 
         let path = match path {
             Some(p) => p,
@@ -122,7 +141,7 @@ impl Tool for OpenFile {
         }
 
         let full_path = project_root.join(&path);
-        
+
         match tokio::fs::read_to_string(&full_path).await {
             Ok(content) => {
                 let preview: String = content.lines().take(50).collect::<Vec<_>>().join("\n");
@@ -170,12 +189,18 @@ impl Tool for SearchAndOpen {
     }
 
     async fn execute(&self, input: ToolInput, project_root: &Path) -> ToolResult {
-        let query = match input.args.as_ref().and_then(|a| a.get("query")).and_then(|v| v.as_str()) {
+        let query = match input
+            .args
+            .as_ref()
+            .and_then(|a| a.get("query"))
+            .and_then(|v| v.as_str())
+        {
             Some(q) => q,
             None => return ToolResult::err("query is required"),
         };
 
-        let top_k = input.args
+        let top_k = input
+            .args
             .as_ref()
             .and_then(|a| a.get("top_k"))
             .and_then(|v| v.as_u64())
@@ -183,13 +208,20 @@ impl Tool for SearchAndOpen {
             .unwrap_or(3);
 
         let config = crate::context_engine::ContextRetrievalConfig::default();
-        
-        let result = self.context_engine
-            .retrieve(project_root.to_string_lossy().as_ref(), query, top_k * 500, None, &config)
+
+        let result = self
+            .context_engine
+            .retrieve(
+                project_root.to_string_lossy().as_ref(),
+                query,
+                top_k * 500,
+                None,
+                &config,
+            )
             .await;
 
         let mut files = Vec::new();
-        
+
         for path in result.selected_files.iter().take(top_k) {
             let full_path = project_root.join(path);
             let content_preview = match tokio::fs::read_to_string(&full_path).await {
@@ -197,7 +229,8 @@ impl Tool for SearchAndOpen {
                 Err(_) => String::new(),
             };
 
-            let snippet = result.context
+            let snippet = result
+                .context
                 .lines()
                 .filter(|l| l.contains(path))
                 .take(3)
@@ -223,11 +256,11 @@ fn normalize_path(path: &str, project_root: &Path) -> Option<PathBuf> {
     if path.contains("..") || path.starts_with('/') || path.starts_with('\\') {
         return None;
     }
-    
+
     let full = project_root.join(path);
     let canonical_root = project_root.canonicalize().ok()?;
     let canonical_full = full.canonicalize().ok()?;
-    
+
     if canonical_full.starts_with(&canonical_root) {
         Some(full)
     } else {
@@ -249,7 +282,8 @@ mod tests {
 
     #[test]
     fn test_search_code_schema() {
-        let tool = SearchCode::new(Arc::new(crate::context_engine::ContextEngineV1) as Arc<dyn crate::context_engine::ContextEngine>);
+        let tool = SearchCode::new(Arc::new(crate::context_engine::ContextEngineV1)
+            as Arc<dyn crate::context_engine::ContextEngine>);
         let schema = tool.input_schema();
         assert_eq!(schema["properties"]["query"]["type"], "string");
         assert_eq!(schema["properties"]["top_k"]["type"], "number");
