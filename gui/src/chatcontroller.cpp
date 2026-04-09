@@ -30,6 +30,7 @@ void chat_backend_stop_generation(void *backend);
 char *chat_backend_new_session(void *backend);
 void chat_backend_select_session(void *backend, const char *session_id);
 void chat_backend_select_model(void *backend, const char *model);
+void chat_backend_select_model_with_server(void *backend, const char *model, const char *server_url);
 void chat_backend_set_session_project_root(void *backend, const char *session_id, const char *project_root);
 void chat_backend_request_sessions(void *backend);
 void chat_backend_request_models(void *backend);
@@ -336,12 +337,21 @@ void ChatController::selectSessionAtIndex(int index) {
     selectSession(sessionId);
 }
 
-void ChatController::selectModel(const QString &name) {
+void ChatController::selectModel(const QString &name, const QString &serverUrl) {
     if (!m_backend) {
         return;
     }
     const QByteArray encoded = name.toUtf8();
-    chat_backend_select_model(m_backend, encoded.constData());
+    const QByteArray encodedServer = serverUrl.toUtf8();
+    if (serverUrl.trimmed().isEmpty()) {
+        chat_backend_select_model(m_backend, encoded.constData());
+    } else {
+        chat_backend_select_model_with_server(
+            m_backend,
+            encoded.constData(),
+            encodedServer.constData()
+        );
+    }
     refreshSnapshot();
 }
 

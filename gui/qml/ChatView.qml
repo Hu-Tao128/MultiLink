@@ -737,7 +737,7 @@ Page {
                         return
                     }
                     const selected = controller.availableModelsDetailed[currentIndex]
-                    controller.selectModel(selected.name)
+                    controller.selectModel(selected.name, selected.serverUrl || "")
                 }
             }
 

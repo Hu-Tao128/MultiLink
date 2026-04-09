@@ -41,6 +41,7 @@ pub struct BackendCallbacks {
 struct UiState {
     active_provider: String,
     active_model: String,
+    active_model_server_url: Option<String>,
     provider_scope: String,
     provider_health: String,
     is_loading: bool,
@@ -52,6 +53,7 @@ impl Default for UiState {
         Self {
             active_provider: "Ollama".to_string(),
             active_model: "".to_string(),
+            active_model_server_url: None,
             provider_scope: "LOCAL".to_string(),
             provider_health: "unavailable".to_string(),
             is_loading: false,
@@ -179,25 +181,35 @@ pub extern "C" fn chat_backend_create(
     );
 
     let _ = runtime.block_on(chat_runtime.start());
-    let active_session_id = runtime.block_on(async {
+    let (active_session_id, created_initial_session) = runtime.block_on(async {
         if let Some(existing_active) = chat_runtime.active_session().await {
-            return existing_active;
+            return (existing_active, false);
         }
 
         let sessions = chat_runtime.list_sessions().await;
         if let Some(first) = sessions.first() {
-            return first.id.clone();
+            return (first.id.clone(), false);
         }
 
-        chat_runtime
-            .create_session(
-                ProviderId::Ollama,
-                Some(selected_server.default_model.clone()),
-            )
-            .await
+        (
+            chat_runtime
+                .create_session(
+                    ProviderId::Ollama,
+                    Some(selected_server.default_model.clone()),
+                )
+                .await,
+            true,
+        )
     });
+    if created_initial_session {
+        let _ = runtime.block_on(chat_runtime.update_session_model_route(
+            &active_session_id,
+            Some(selected_server.default_model.clone()),
+            Some(selected_server.base_url.clone()),
+        ));
+    }
 
-    let active_model = runtime.block_on(async {
+    let (active_model, active_model_server_url) = runtime.block_on(async {
         let sessions = chat_runtime.list_sessions().await;
         if let Some(session) = sessions.iter().find(|s| s.id == active_session_id) {
             let model = session
@@ -207,17 +219,25 @@ pub extern "C" fn chat_backend_create(
             if is_embedding_like_model(&model) {
                 let fallback = selected_server.default_model.clone();
                 let _ = chat_runtime
-                    .update_session_model(&active_session_id, Some(fallback.clone()))
+                    .update_session_model_route(
+                        &active_session_id,
+                        Some(fallback.clone()),
+                        Some(selected_server.base_url.clone()),
+                    )
                     .await;
-                return fallback;
+                return (fallback, Some(selected_server.base_url.clone()));
             }
-            return model;
+            return (model, session.model_server_url.clone());
         }
-        selected_server.default_model.clone()
+        (
+            selected_server.default_model.clone(),
+            Some(selected_server.base_url.clone()),
+        )
     });
 
     let ui = UiState {
         active_model,
+        active_model_server_url,
         startup_notice,
         ..UiState::default()
     };
@@ -455,22 +475,28 @@ pub unsafe extern "C" fn chat_backend_new_session(handle: *mut BackendHandle) ->
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return std::ptr::null_mut();
     };
-    let model = backend
+    let (model, model_server_url) = backend
         .ui_state
         .lock()
-        .map(|s| s.active_model.clone())
-        .unwrap_or_else(|_| "".to_string());
+        .map(|s| (s.active_model.clone(), s.active_model_server_url.clone()))
+        .unwrap_or_else(|_| ("".to_string(), None));
     let selected_model = if model.trim().is_empty() {
         Some("llama3.2".to_string())
     } else {
         Some(model)
     };
 
-    let id = backend.runtime.block_on(
-        backend
+    let id = backend.runtime.block_on(async {
+        let id = backend
             .chat_runtime
-            .create_session(ProviderId::Ollama, selected_model),
-    );
+            .create_session(ProviderId::Ollama, selected_model.clone())
+            .await;
+        let _ = backend
+            .chat_runtime
+            .update_session_model_route(&id, selected_model, model_server_url)
+            .await;
+        id
+    });
 
     if let Ok(mut active) = backend.active_session_id.lock() {
         *active = id.clone();
@@ -531,7 +557,11 @@ pub unsafe extern "C" fn chat_backend_select_session(
                 if let Some(model) = session.model.as_ref() {
                     if is_embedding_like_model(model) {
                         let _ = chat_runtime
-                            .update_session_model(&id, Some(fallback_model.clone()))
+                            .update_session_model_route(
+                                &id,
+                                Some(fallback_model.clone()),
+                                session.model_server_url.clone(),
+                            )
                             .await;
                         selected_model_for_ui = fallback_model.clone();
                     }
@@ -539,6 +569,7 @@ pub unsafe extern "C" fn chat_backend_select_session(
 
                 if let Ok(mut ui) = ui_state.lock() {
                     ui.active_model = selected_model_for_ui;
+                    ui.active_model_server_url = session.model_server_url.clone();
                 }
             }
             if let Ok(mut active) = active_session_id.lock() {
@@ -553,6 +584,15 @@ pub unsafe extern "C" fn chat_backend_select_model(
     handle: *mut BackendHandle,
     model: *const c_char,
 ) {
+    unsafe { chat_backend_select_model_with_server(handle, model, std::ptr::null()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_select_model_with_server(
+    handle: *mut BackendHandle,
+    model: *const c_char,
+    server_url: *const c_char,
+) {
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return;
     };
@@ -562,6 +602,14 @@ pub unsafe extern "C" fn chat_backend_select_model(
     if is_embedding_like_model(&value) {
         return;
     }
+    let selected_server_url = c_char_ptr_to_string(server_url).and_then(|raw| {
+        let normalized = normalize_base_url(&raw);
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        }
+    });
     let active_session = backend
         .active_session_id
         .lock()
@@ -571,14 +619,20 @@ pub unsafe extern "C" fn chat_backend_select_model(
     let runtime = backend.runtime.handle().clone();
     let chat_runtime = backend.chat_runtime.clone();
     let value_for_task = value.clone();
+    let selected_server_for_task = selected_server_url.clone();
     runtime.spawn(async move {
         let _ = chat_runtime
-            .update_session_model(&active_session, Some(value_for_task))
+            .update_session_model_route(
+                &active_session,
+                Some(value_for_task),
+                selected_server_for_task,
+            )
             .await;
     });
 
     if let Ok(mut ui) = backend.ui_state.lock() {
         ui.active_model = value;
+        ui.active_model_server_url = selected_server_url;
     }
 }
 

@@ -39,7 +39,7 @@ public:
     Q_INVOKABLE void newSession();
     Q_INVOKABLE void selectSession(const QString &id);
     Q_INVOKABLE void selectSessionAtIndex(int index);
-    Q_INVOKABLE void selectModel(const QString &name);
+    Q_INVOKABLE void selectModel(const QString &name, const QString &serverUrl = QString());
     Q_INVOKABLE void requestSessions();
     Q_INVOKABLE void requestModels();
     Q_INVOKABLE void requestMessages(const QString &sessionId);
