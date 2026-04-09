@@ -45,6 +45,8 @@ pub struct ChatSession {
     pub provider: ProviderId,
     pub model: Option<String>,
     #[serde(default)]
+    pub model_server_url: Option<String>,
+    #[serde(default)]
     pub project_root: Option<String>,
     #[serde(default)]
     pub project_context: Option<String>,
@@ -62,6 +64,7 @@ impl ChatSession {
             id: next_session_id(),
             provider,
             model,
+            model_server_url: None,
             project_root: None,
             project_context: None,
             summary: None,

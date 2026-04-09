@@ -30,6 +30,8 @@ pub enum ProviderId {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptOptions {
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_server_url: Option<String>,
     pub temperature: Option<f32>,
     pub system_prompt: Option<String>,
     pub num_ctx: Option<usize>,
@@ -43,6 +45,7 @@ impl Default for PromptOptions {
     fn default() -> Self {
         Self {
             model: None,
+            model_server_url: None,
             temperature: Some(0.7),
             system_prompt: None,
             num_ctx: None,
@@ -168,7 +171,7 @@ pub trait LLMProvider: Send + Sync {
     }
 
     async fn health_check(&self) -> Result<bool, LLMError>;
-    
+
     async fn warmup_model(&self, _model: &str) -> Result<(), LLMError> {
         Ok(())
     }

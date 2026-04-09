@@ -27,16 +27,16 @@ use crate::intent_budget::{budget_for_intent, detect_query_intent, task_weight_f
 use crate::lan_agent::LanAgentServer;
 use crate::model_profile::{ModelClass, ModelProfile};
 use crate::observability::{ContextRetrievalMetrics, ExecutionMetrics};
-use crate::providers::{PromptOptions, ProviderCapabilities, ProviderId};
-use crate::router::ProviderRouter;
-use crate::session::{ChatMessage, ChatSession, SessionState};
-use crate::skills::{Skill, SkillLoader, SkillOrchestrator};
-use crate::tools::{create_default_registry_with_engine, ToolExecutor};
 use crate::orchestrator::executor::Executor;
 use crate::orchestrator::planner::MinimalPlanner;
 use crate::providers::LLMError;
 use crate::providers::TokenEvent;
 use crate::providers::TokenStream;
+use crate::providers::{PromptOptions, ProviderCapabilities, ProviderId};
+use crate::router::ProviderRouter;
+use crate::session::{ChatMessage, ChatSession, SessionState};
+use crate::skills::{Skill, SkillLoader, SkillOrchestrator};
+use crate::tools::{create_default_registry_with_engine, ToolExecutor};
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -282,12 +282,24 @@ impl ChatRuntime {
         &self,
         session_id: &str,
     ) -> Option<(String, ProviderCapabilities)> {
-        let (provider, model_name) = {
+        let (provider, model_name, model_server_url) = {
             let guard = self.sessions.read().await;
             let session = guard.get(session_id)?;
             let model_name = session.model.clone()?;
-            (session.provider, model_name)
+            (
+                session.provider,
+                model_name,
+                session.model_server_url.clone(),
+            )
         };
+
+        if provider == ProviderId::Ollama {
+            if let Some(server_url) = model_server_url {
+                self.router
+                    .register_model_server(model_name.clone(), server_url)
+                    .await;
+            }
+        }
 
         match self.router.get_model_info(provider, &model_name).await {
             Ok(capabilities) => Some((model_name, capabilities)),
@@ -370,14 +382,33 @@ impl ChatRuntime {
         session_id: &str,
         model: Option<String>,
     ) -> Result<(), ChatRuntimeError> {
+        self.update_session_model_route(session_id, model, None)
+            .await
+    }
+
+    pub async fn update_session_model_route(
+        &self,
+        session_id: &str,
+        model: Option<String>,
+        model_server_url: Option<String>,
+    ) -> Result<(), ChatRuntimeError> {
         let snapshot = {
             let mut guard = self.sessions.write().await;
             let session = guard
                 .get_mut(session_id)
                 .ok_or(ChatRuntimeError::SessionNotFound)?;
             session.model = model;
+            session.model_server_url = model_server_url;
             session.clone()
         };
+
+        if snapshot.provider == ProviderId::Ollama {
+            if let (Some(model), Some(server_url)) =
+                (snapshot.model.clone(), snapshot.model_server_url.clone())
+            {
+                self.router.register_model_server(model, server_url).await;
+            }
+        }
 
         persist_session(&self.storage_dir, &snapshot).await
     }
@@ -650,7 +681,7 @@ impl ChatRuntime {
             return Ok(ChatResponse { events: event_rx });
         }
 
-        let (provider, model, session_project_root) = {
+        let (provider, model, model_server_url, session_project_root) = {
             let mut guard = self.sessions.write().await;
             let session = guard
                 .get_mut(session_id)
@@ -659,11 +690,12 @@ impl ChatRuntime {
             session.set_state(SessionState::Sending);
             let provider = session.provider;
             let model = session.model.clone();
+            let model_server_url = session.model_server_url.clone();
             let project_root = session.project_root.clone();
             let snapshot = session.clone();
             drop(guard);
             persist_session(&self.storage_dir, &snapshot).await?;
-            (provider, model, project_root)
+            (provider, model, model_server_url, project_root)
         };
         let natural_write_target = detect_natural_write_target(&prompt);
 
@@ -691,11 +723,14 @@ impl ChatRuntime {
         let mut model_capabilities: Option<ProviderCapabilities> = None;
         if let Some(model_name) = model.as_ref() {
             const MODEL_INFO_TIMEOUT_SECS: u64 = 30;
-            
+
             // Warmup model first to trigger loading (especially for large models like gemma4)
             // This sends a minimal request to trigger Ollama to load the model into memory
-            let _ = self.router.warmup_model(ProviderId::Ollama, model_name).await;
-            
+            let _ = self
+                .router
+                .warmup_model(ProviderId::Ollama, model_name)
+                .await;
+
             if let Ok(Ok(caps)) = tokio::time::timeout(
                 Duration::from_secs(MODEL_INFO_TIMEOUT_SECS),
                 self.router.get_model_info(provider, model_name),
@@ -735,8 +770,7 @@ impl ChatRuntime {
             } else if context_debug_enabled(&self.runtime_config) {
                 eprintln!(
                     "[model] model info timeout/error for '{}' (>{}s), continuing with defaults",
-                    model_name,
-                    MODEL_INFO_TIMEOUT_SECS
+                    model_name, MODEL_INFO_TIMEOUT_SECS
                 );
             }
         }
@@ -785,8 +819,7 @@ impl ChatRuntime {
             );
             eprintln!(
                 "[context] session={} build_messages_start include_project_context={}",
-                session_id,
-                include_project_context_for_request
+                session_id, include_project_context_for_request
             );
         }
 
@@ -868,6 +901,7 @@ impl ChatRuntime {
 
         let options = PromptOptions {
             model,
+            model_server_url,
             messages: Some(messages),
             system_context_dir: self.system_context_dir.clone(),
             ..PromptOptions::default()
@@ -887,11 +921,16 @@ impl ChatRuntime {
             match executor.execute_multi_step(plan).await {
                 Ok(text) => {
                     if context_debug_enabled(&self.runtime_config) {
-                        eprintln!("[orchestrator] session={} executed plan successfully ({} chars)", session_id, text.len());
+                        eprintln!(
+                            "[orchestrator] session={} executed plan successfully ({} chars)",
+                            session_id,
+                            text.len()
+                        );
                     }
                     let token_event: TokenEvent = TokenEvent::Token(text);
                     let stream_item: Result<TokenEvent, LLMError> = Ok(token_event);
-                    orchestrator_stream = Some(Box::pin(stream::once(std::future::ready(stream_item))));
+                    orchestrator_stream =
+                        Some(Box::pin(stream::once(std::future::ready(stream_item))));
                 }
                 Err(err) => {
                     eprintln!("[orchestrator] session={} execution failed, falling back to dispatcher: {}", session_id, err);
@@ -908,24 +947,25 @@ impl ChatRuntime {
                 ChatRuntimeError::Provider("stream concurrency limiter unavailable".to_string())
             })?;
 
-        let stream_result: Result<crate::execution::ExecutionDispatchResult, LLMError> = if let Some(stream) = orchestrator_stream {
-            Ok(crate::execution::ExecutionDispatchResult {
-                stream,
-                server_used: "orchestrator".to_string(),
-                fallback_used: false,
-                retries: 0,
-                latency_ms: 0,
-            })
-        } else {
-            self.execution_dispatcher
-                .dispatch(ExecutionDispatchRequest {
-                    provider,
-                    prompt: prompt.clone(),
-                    options: options.clone(),
-                    allow_remote_fallback,
+        let stream_result: Result<crate::execution::ExecutionDispatchResult, LLMError> =
+            if let Some(stream) = orchestrator_stream {
+                Ok(crate::execution::ExecutionDispatchResult {
+                    stream,
+                    server_used: "orchestrator".to_string(),
+                    fallback_used: false,
+                    retries: 0,
+                    latency_ms: 0,
                 })
-                .await
-        };
+            } else {
+                self.execution_dispatcher
+                    .dispatch(ExecutionDispatchRequest {
+                        provider,
+                        prompt: prompt.clone(),
+                        options: options.clone(),
+                        allow_remote_fallback,
+                    })
+                    .await
+            };
 
         let mut fallback_retry_used = false;
         let (stream, dispatcher_fallback_used, dispatcher_retries, dispatcher_server_used) =
@@ -1694,64 +1734,14 @@ impl ChatRuntime {
                 if context_budget > 0 {
                     let start = Instant::now();
                     let retrieval_future = async {
-                            let retrieval: RetrievalResult =
-                        if matches!(effective_runtime.context_engine.as_str(), "v2" | "v2plus") {
-                            let index_dir = dirs::data_local_dir()
-                                .unwrap_or_else(|| PathBuf::from(".multilink"))
-                                .join("multilink")
-                                .join("index");
-                            let config = ContextRetrievalConfig {
-                                embeddings_enabled: embeddings_enabled_for_request,
-                                embed_model: effective_runtime.context_embed_model.clone(),
-                                embed_base_url: resolved_embed_base_url.clone(),
-                                ollama_base_url: effective_runtime.context_ollama_base_url.clone(),
-                                embed_connect_timeout_ms: effective_runtime
-                                    .embed_connect_timeout_ms,
-                                embed_request_timeout_ms: effective_runtime
-                                    .embed_request_timeout_ms,
-                                embed_max_retries: effective_runtime.embed_max_retries,
-                                embed_batch_size: effective_runtime.embed_batch_size,
-                                top_k: effective_runtime.context_project_top_k,
-                                index_refresh_on_query: effective_runtime
-                                    .context_index_refresh_on_query,
-                                retrieval_enable_filters: effective_runtime
-                                    .context_retrieval_enable_filters,
-                                version: if effective_runtime.context_engine == "v2plus" {
-                                    ContextEngineVersion::V2Plus
-                                } else {
-                                    ContextEngineVersion::V2
-                                },
-                            };
-                            if effective_runtime.context_engine == "v2plus" {
-                                let engine = ContextEngineV2Plus::new(index_dir);
-                                engine
-                                    .retrieve(
-                                        &augmented_project_context,
-                                        &current_prompt,
-                                        context_budget,
-                                        model_hint,
-                                        &config,
-                                    )
-                                    .await
-                            } else {
-                                let engine = ContextEngineV2::new(index_dir);
-                                engine
-                                    .retrieve(
-                                        &augmented_project_context,
-                                        &current_prompt,
-                                        context_budget,
-                                        model_hint,
-                                        &config,
-                                    )
-                                    .await
-                            }
-                        } else {
-                            let v1_result = build_relevant_project_context(
-                                &augmented_project_context,
-                                &current_prompt,
-                                context_budget,
-                                model_hint,
-                                RetrievalConfig {
+                        let retrieval: RetrievalResult =
+                            if matches!(effective_runtime.context_engine.as_str(), "v2" | "v2plus")
+                            {
+                                let index_dir = dirs::data_local_dir()
+                                    .unwrap_or_else(|| PathBuf::from(".multilink"))
+                                    .join("multilink")
+                                    .join("index");
+                                let config = ContextRetrievalConfig {
                                     embeddings_enabled: embeddings_enabled_for_request,
                                     embed_model: effective_runtime.context_embed_model.clone(),
                                     embed_base_url: resolved_embed_base_url.clone(),
@@ -1765,28 +1755,86 @@ impl ChatRuntime {
                                     embed_max_retries: effective_runtime.embed_max_retries,
                                     embed_batch_size: effective_runtime.embed_batch_size,
                                     top_k: effective_runtime.context_project_top_k,
-                                },
-                            )
-                            .await;
-                            RetrievalResult {
-                                context: v1_result.context,
-                                selected_files: v1_result.selected_files,
-                                used_tokens: v1_result.used_tokens,
-                                top_k: v1_result.top_k,
-                                embedding_used: v1_result.embedding_used,
-                                embedding_reason: v1_result.embedding_diag.reason,
-                                embedding_latency_ms: v1_result.embedding_diag.latency_ms,
-                                embedding_attempts: v1_result.embedding_diag.attempts,
-                                embed_base_url: v1_result.embedding_diag.base_url,
-                                embed_model: v1_result.embedding_diag.model,
-                                is_truncated: false,
-                                budget_used: v1_result.used_tokens,
-                            }
-                        };
+                                    index_refresh_on_query: effective_runtime
+                                        .context_index_refresh_on_query,
+                                    retrieval_enable_filters: effective_runtime
+                                        .context_retrieval_enable_filters,
+                                    version: if effective_runtime.context_engine == "v2plus" {
+                                        ContextEngineVersion::V2Plus
+                                    } else {
+                                        ContextEngineVersion::V2
+                                    },
+                                };
+                                if effective_runtime.context_engine == "v2plus" {
+                                    let engine = ContextEngineV2Plus::new(index_dir);
+                                    engine
+                                        .retrieve(
+                                            &augmented_project_context,
+                                            &current_prompt,
+                                            context_budget,
+                                            model_hint,
+                                            &config,
+                                        )
+                                        .await
+                                } else {
+                                    let engine = ContextEngineV2::new(index_dir);
+                                    engine
+                                        .retrieve(
+                                            &augmented_project_context,
+                                            &current_prompt,
+                                            context_budget,
+                                            model_hint,
+                                            &config,
+                                        )
+                                        .await
+                                }
+                            } else {
+                                let v1_result = build_relevant_project_context(
+                                    &augmented_project_context,
+                                    &current_prompt,
+                                    context_budget,
+                                    model_hint,
+                                    RetrievalConfig {
+                                        embeddings_enabled: embeddings_enabled_for_request,
+                                        embed_model: effective_runtime.context_embed_model.clone(),
+                                        embed_base_url: resolved_embed_base_url.clone(),
+                                        ollama_base_url: effective_runtime
+                                            .context_ollama_base_url
+                                            .clone(),
+                                        embed_connect_timeout_ms: effective_runtime
+                                            .embed_connect_timeout_ms,
+                                        embed_request_timeout_ms: effective_runtime
+                                            .embed_request_timeout_ms,
+                                        embed_max_retries: effective_runtime.embed_max_retries,
+                                        embed_batch_size: effective_runtime.embed_batch_size,
+                                        top_k: effective_runtime.context_project_top_k,
+                                    },
+                                )
+                                .await;
+                                RetrievalResult {
+                                    context: v1_result.context,
+                                    selected_files: v1_result.selected_files,
+                                    used_tokens: v1_result.used_tokens,
+                                    top_k: v1_result.top_k,
+                                    embedding_used: v1_result.embedding_used,
+                                    embedding_reason: v1_result.embedding_diag.reason,
+                                    embedding_latency_ms: v1_result.embedding_diag.latency_ms,
+                                    embedding_attempts: v1_result.embedding_diag.attempts,
+                                    embed_base_url: v1_result.embedding_diag.base_url,
+                                    embed_model: v1_result.embedding_diag.model,
+                                    is_truncated: false,
+                                    budget_used: v1_result.used_tokens,
+                                }
+                            };
                         retrieval
                     };
 
-                    let retrieval = match tokio::time::timeout(Duration::from_secs(25), retrieval_future).await {
+                    let retrieval = match tokio::time::timeout(
+                        Duration::from_secs(25),
+                        retrieval_future,
+                    )
+                    .await
+                    {
                         Ok(value) => value,
                         Err(_) => {
                             if context_debug_enabled(&self.runtime_config) {
@@ -2092,7 +2140,12 @@ fn append_explicit_prompt_files_to_context(
         }
 
         let rel_path = Path::new(&rel);
-        if rel_path.components().any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))) {
+        if rel_path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
             continue;
         }
 

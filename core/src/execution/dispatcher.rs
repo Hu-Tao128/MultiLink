@@ -65,6 +65,15 @@ impl ExecutionDispatcher {
         request: ExecutionDispatchRequest,
     ) -> Result<ExecutionDispatchResult, LLMError> {
         let started = Instant::now();
+        let requested_model = request.options.model.clone();
+        let resolved_server_url = match (
+            request.options.model_server_url.clone(),
+            requested_model.as_deref(),
+        ) {
+            (Some(url), _) if !url.trim().is_empty() => Some(normalize_base_url(&url)),
+            (None, Some(model)) => self.router.resolve_model_server(model).await,
+            _ => None,
+        };
 
         let primary_key = "primary-router".to_string();
         let primary_sem = self.semaphore_for(&primary_key, 1).await;
@@ -109,6 +118,12 @@ impl ExecutionDispatcher {
                 let mut last_err = primary_err;
                 for server in self.servers.iter().filter(|s| s.enabled) {
                     let key = format!("{}@{}", server.name, server.base_url);
+                    let normalized_server_url = normalize_base_url(&server.base_url);
+                    if let Some(expected_url) = resolved_server_url.as_deref() {
+                        if normalized_server_url != expected_url {
+                            continue;
+                        }
+                    }
                     if !self.server_available_for_attempt(&key).await {
                         continue;
                     }
@@ -124,8 +139,10 @@ impl ExecutionDispatcher {
                     };
 
                     let provider = OllamaProvider::new(
-                        normalize_base_url(&server.base_url),
-                        server.default_model.clone(),
+                        normalized_server_url,
+                        requested_model
+                            .clone()
+                            .unwrap_or_else(|| server.default_model.clone()),
                     );
 
                     let attempt_started = Instant::now();

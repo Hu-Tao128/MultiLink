@@ -63,6 +63,7 @@ impl Default for CircuitBreakerConfig {
 pub struct ProviderRouter {
     providers: HashMap<ProviderId, Arc<dyn LLMProvider>>,
     order: Vec<ProviderId>,
+    model_server_map: Arc<RwLock<HashMap<String, String>>>,
     health_states: Arc<RwLock<HashMap<ProviderId, ProviderHealthState>>>,
     circuit_breaker_config: CircuitBreakerConfig,
     health_check_interval: Duration,
@@ -80,6 +81,7 @@ impl ProviderRouter {
         Self {
             providers: HashMap::new(),
             order: vec![ProviderId::Ollama, ProviderId::Gemini, ProviderId::Codex],
+            model_server_map: Arc::new(RwLock::new(HashMap::new())),
             health_states: Arc::new(RwLock::new(HashMap::new())),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             health_check_interval: Duration::from_secs(30),
@@ -91,6 +93,7 @@ impl ProviderRouter {
         Self {
             providers: HashMap::new(),
             order: vec![ProviderId::Ollama, ProviderId::Gemini, ProviderId::Codex],
+            model_server_map: Arc::new(RwLock::new(HashMap::new())),
             health_states: Arc::new(RwLock::new(HashMap::new())),
             circuit_breaker_config: config,
             health_check_interval: Duration::from_secs(30),
@@ -112,6 +115,45 @@ impl ProviderRouter {
         self.providers.get(&id)
     }
 
+    pub async fn register_model_server(
+        &self,
+        model: impl Into<String>,
+        base_url: impl Into<String>,
+    ) {
+        let model = model.into();
+        let base_url = normalize_base_url(&base_url.into());
+        if model.trim().is_empty() || base_url.is_empty() {
+            return;
+        }
+        self.model_server_map.write().await.insert(model, base_url);
+    }
+
+    pub async fn resolve_model_server(&self, model: &str) -> Option<String> {
+        self.model_server_map.read().await.get(model).cloned()
+    }
+
+    async fn resolved_ollama_provider(
+        &self,
+        model: &str,
+        explicit_base_url: Option<&str>,
+    ) -> Option<Arc<dyn LLMProvider>> {
+        let resolved_base_url = explicit_base_url
+            .map(normalize_base_url)
+            .filter(|value| !value.is_empty());
+        let resolved_base_url = match resolved_base_url {
+            Some(base_url) => Some(base_url),
+            None => self.resolve_model_server(model).await,
+        };
+
+        match resolved_base_url {
+            Some(base_url) => Some(Arc::new(crate::providers::ollama::OllamaProvider::new(
+                base_url,
+                model.to_string(),
+            ))),
+            None => self.providers.get(&ProviderId::Ollama).cloned(),
+        }
+    }
+
     pub async fn init_health_states(&self) {
         let mut states = self.health_states.write().await;
         for id in &self.order {
@@ -120,17 +162,65 @@ impl ProviderRouter {
     }
 
     pub async fn warmup_model(&self, provider_id: ProviderId, model: &str) {
+        if provider_id == ProviderId::Ollama {
+            if let Some(provider) = self.resolved_ollama_provider(model, None).await {
+                eprintln!(
+                    "[warmup] attempting to warmup model '{}' on provider {:?}",
+                    model, provider_id
+                );
+                let warmup_options = PromptOptions {
+                    model: Some(model.to_string()),
+                    model_server_url: self.resolve_model_server(model).await,
+                    ..Default::default()
+                };
+
+                let warmup_result = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    provider.send("Hi".to_string(), warmup_options),
+                )
+                .await;
+
+                match warmup_result {
+                    Ok(Ok(_)) => eprintln!("[warmup] successfully warmed up model '{}'", model),
+                    Ok(Err(e)) => eprintln!("[warmup] warmup failed for model '{}': {}", model, e),
+                    Err(_) => eprintln!(
+                        "[warmup] warmup timed out for model '{}' (model may still be loading)",
+                        model
+                    ),
+                }
+                return;
+            }
+        }
+
         if let Some(provider) = self.providers.get(&provider_id) {
+            eprintln!(
+                "[warmup] attempting to warmup model '{}' on provider {:?}",
+                model, provider_id
+            );
             // Try warmup using a simple minimal prompt to trigger model loading
             // This works for any provider type without needing downcasting
             let warmup_options = PromptOptions {
                 model: Some(model.to_string()),
                 ..Default::default()
             };
-            
-            // Send a minimal request - if model isn't loaded, this triggers loading
-            // We don't care about the result, just triggering the load
-            let _ = provider.send("Hi".to_string(), warmup_options).await;
+
+            // Use a longer timeout for warmup (30s) as large models take time to load
+            let warmup_result = tokio::time::timeout(
+                Duration::from_secs(30),
+                provider.send("Hi".to_string(), warmup_options),
+            )
+            .await;
+
+            match warmup_result {
+                Ok(Ok(_)) => eprintln!("[warmup] successfully warmed up model '{}'", model),
+                Ok(Err(e)) => eprintln!("[warmup] warmup failed for model '{}': {}", model, e),
+                Err(_) => eprintln!(
+                    "[warmup] warmup timed out for model '{}' (model may still be loading)",
+                    model
+                ),
+            }
+        } else {
+            eprintln!("[warmup] no provider found for {:?}", provider_id);
         }
     }
 
@@ -295,6 +385,17 @@ impl ProviderRouter {
         prompt: String,
         options: PromptOptions,
     ) -> Result<LLMResponse, LLMError> {
+        if preferred == ProviderId::Ollama {
+            if let Some(model) = options.model.as_deref() {
+                if let Some(provider) = self
+                    .resolved_ollama_provider(model, options.model_server_url.as_deref())
+                    .await
+                {
+                    return provider.send(prompt, options).await;
+                }
+            }
+        }
+
         if let Some(provider) = self.providers.get(&preferred) {
             if provider.is_available() && self.check_circuit_breaker(preferred).await {
                 match provider.send(prompt.clone(), options.clone()).await {
@@ -375,6 +476,17 @@ impl ProviderRouter {
         prompt: String,
         options: PromptOptions,
     ) -> Result<TokenStream, LLMError> {
+        if preferred == ProviderId::Ollama {
+            if let Some(model) = options.model.as_deref() {
+                if let Some(provider) = self
+                    .resolved_ollama_provider(model, options.model_server_url.as_deref())
+                    .await
+                {
+                    return provider.stream_send(prompt, options).await;
+                }
+            }
+        }
+
         if let Some(provider) = self.providers.get(&preferred) {
             if provider.is_available() && self.check_circuit_breaker(preferred).await {
                 return provider.stream_send(prompt.clone(), options.clone()).await;
@@ -401,6 +513,12 @@ impl ProviderRouter {
         preferred: ProviderId,
         model: &str,
     ) -> Result<ProviderCapabilities, LLMError> {
+        if preferred == ProviderId::Ollama {
+            if let Some(provider) = self.resolved_ollama_provider(model, None).await {
+                return provider.get_model_info(model).await;
+            }
+        }
+
         if let Some(provider) = self.providers.get(&preferred) {
             if provider.is_available() {
                 return provider.get_model_info(model).await;
@@ -432,4 +550,15 @@ fn is_retryable_error(error: &LLMError) -> bool {
 fn calculate_backoff(attempt: u32, initial_ms: u64, max_ms: u64) -> u64 {
     let backoff = initial_ms * 2u64.pow(attempt.saturating_sub(1));
     backoff.min(max_ms)
+}
+
+fn normalize_base_url(input: &str) -> String {
+    let trimmed = input.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+    format!("http://{}", trimmed)
 }
