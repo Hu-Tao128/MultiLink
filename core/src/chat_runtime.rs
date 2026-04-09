@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use directories::ProjectDirs;
-use futures_util::stream::{self, StreamExt};
+use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -28,10 +28,11 @@ use crate::lan_agent::LanAgentServer;
 use crate::model_profile::{ModelClass, ModelProfile};
 use crate::observability::{ContextRetrievalMetrics, ExecutionMetrics};
 use crate::orchestrator::executor::Executor;
-use crate::orchestrator::planner::MinimalPlanner;
+use crate::orchestrator::planner::{
+    classify_intent as classify_orchestrator_intent, MinimalPlanner,
+    QueryIntent as OrchestratorQueryIntent,
+};
 use crate::providers::LLMError;
-use crate::providers::TokenEvent;
-use crate::providers::TokenStream;
 use crate::providers::{PromptOptions, ProviderCapabilities, ProviderId};
 use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
@@ -698,8 +699,51 @@ impl ChatRuntime {
             (provider, model, model_server_url, project_root)
         };
         let natural_write_target = detect_natural_write_target(&prompt);
+        let planner_intent = classify_orchestrator_intent(&prompt);
+        let skill_orchestrator = Arc::new(SkillOrchestrator::new(Vec::new()));
+        let executor = Executor::new(
+            self.router.clone(),
+            skill_orchestrator,
+            Arc::new(ContextEngineV1) as Arc<dyn ContextEngine>,
+            self.tool_executor.clone(),
+        );
+        let plan = MinimalPlanner::plan_multi_step(&prompt);
+        eprintln!("[planner] plan_created steps={}", plan.steps.len());
+        let planner_output = match executor.execute_multi_step(plan).await {
+            Ok(output) => {
+                eprintln!("[planner] execution_complete");
+                Some(output)
+            }
+            Err(err) => {
+                eprintln!("[planner] execution_complete error={}", err);
+                None
+            }
+        };
 
-        self.ensure_project_context_cached(session_id).await;
+        let final_prompt = planner_output
+            .as_ref()
+            .filter(|output| !output.trim().is_empty())
+            .map(|output| {
+                format!(
+                    "Solicitud original:\n{}\n\nResultado verificado del planner y las herramientas:\n{}\n\nResponde usando el resultado verificado anterior. Si contiene el contenido solicitado, no digas que no tienes acceso.",
+                    prompt, output
+                )
+            })
+            .unwrap_or_else(|| prompt.clone());
+
+        let include_project_context_for_request = !matches!(
+            planner_intent,
+            OrchestratorQueryIntent::ReadFile
+                | OrchestratorQueryIntent::Search
+                | OrchestratorQueryIntent::SystemInfo
+        ) && !matches!(
+            detect_query_intent(&prompt),
+            crate::intent_budget::QueryIntent::Conversational
+        );
+
+        if include_project_context_for_request {
+            self.ensure_project_context_cached(session_id).await;
+        }
 
         self.maybe_summarize_session(session_id, provider, model.clone())
             .await;
@@ -802,9 +846,6 @@ impl ChatRuntime {
             .min(intent_budget.top_k_cap)
             .max(2);
 
-        let include_project_context_for_request =
-            !matches!(intent, crate::intent_budget::QueryIntent::Conversational);
-
         if context_debug_enabled(&self.runtime_config) {
             eprintln!(
                 "[context] session={} intent={:?} hw_caps(ctx={},project={},top_k={}) effective(ctx={},project={},top_k={})",
@@ -827,7 +868,7 @@ impl ChatRuntime {
             Duration::from_secs(30),
             self.build_messages(
                 session_id,
-                prompt.clone(),
+                final_prompt.clone(),
                 include_project_context_for_request,
                 &effective_runtime,
                 model_profile.as_ref(),
@@ -851,7 +892,7 @@ impl ChatRuntime {
                     Duration::from_secs(20),
                     self.build_messages(
                         session_id,
-                        prompt.clone(),
+                        final_prompt.clone(),
                         include_project_context_for_request,
                         &lexical_runtime,
                         model_profile.as_ref(),
@@ -870,7 +911,7 @@ impl ChatRuntime {
                         }
                         self.build_messages(
                             session_id,
-                            prompt.clone(),
+                            final_prompt.clone(),
                             false,
                             &lexical_runtime,
                             model_profile.as_ref(),
@@ -907,37 +948,6 @@ impl ChatRuntime {
             ..PromptOptions::default()
         };
 
-        let mut orchestrator_stream: Option<TokenStream> = None;
-
-        if self.runtime_config.orchestrator_enabled {
-            let skill_orchestrator = Arc::new(SkillOrchestrator::new(Vec::new()));
-            let executor = Executor::new(
-                self.router.clone(),
-                skill_orchestrator,
-                Arc::new(ContextEngineV1) as Arc<dyn ContextEngine>,
-                self.tool_executor.clone(),
-            );
-            let plan = MinimalPlanner::plan_multi_step(&prompt);
-            match executor.execute_multi_step(plan).await {
-                Ok(text) => {
-                    if context_debug_enabled(&self.runtime_config) {
-                        eprintln!(
-                            "[orchestrator] session={} executed plan successfully ({} chars)",
-                            session_id,
-                            text.len()
-                        );
-                    }
-                    let token_event: TokenEvent = TokenEvent::Token(text);
-                    let stream_item: Result<TokenEvent, LLMError> = Ok(token_event);
-                    orchestrator_stream =
-                        Some(Box::pin(stream::once(std::future::ready(stream_item))));
-                }
-                Err(err) => {
-                    eprintln!("[orchestrator] session={} execution failed, falling back to dispatcher: {}", session_id, err);
-                }
-            }
-        }
-
         let stream_permit = self
             .stream_slots
             .clone()
@@ -947,25 +957,15 @@ impl ChatRuntime {
                 ChatRuntimeError::Provider("stream concurrency limiter unavailable".to_string())
             })?;
 
-        let stream_result: Result<crate::execution::ExecutionDispatchResult, LLMError> =
-            if let Some(stream) = orchestrator_stream {
-                Ok(crate::execution::ExecutionDispatchResult {
-                    stream,
-                    server_used: "orchestrator".to_string(),
-                    fallback_used: false,
-                    retries: 0,
-                    latency_ms: 0,
-                })
-            } else {
-                self.execution_dispatcher
-                    .dispatch(ExecutionDispatchRequest {
-                        provider,
-                        prompt: prompt.clone(),
-                        options: options.clone(),
-                        allow_remote_fallback,
-                    })
-                    .await
-            };
+        let stream_result: Result<crate::execution::ExecutionDispatchResult, LLMError> = self
+            .execution_dispatcher
+            .dispatch(ExecutionDispatchRequest {
+                provider,
+                prompt: final_prompt.clone(),
+                options: options.clone(),
+                allow_remote_fallback,
+            })
+            .await;
 
         let mut fallback_retry_used = false;
         let (stream, dispatcher_fallback_used, dispatcher_retries, dispatcher_server_used) =
@@ -994,7 +994,7 @@ impl ChatRuntime {
                         let fallback_messages = self
                             .build_messages(
                                 session_id,
-                                prompt.clone(),
+                                final_prompt.clone(),
                                 false,
                                 &effective_runtime,
                                 model_profile.as_ref(),
@@ -1010,7 +1010,7 @@ impl ChatRuntime {
                             .execution_dispatcher
                             .dispatch(ExecutionDispatchRequest {
                                 provider,
-                                prompt: prompt.clone(),
+                                prompt: final_prompt.clone(),
                                 options: fallback_options,
                                 allow_remote_fallback,
                             })
@@ -1078,7 +1078,7 @@ impl ChatRuntime {
         let retries: usize = dispatcher_retries + usize::from(fallback_retry_used);
         let execution_dispatcher = self.execution_dispatcher.clone();
         let resilience_provider = provider;
-        let resilience_prompt = prompt.clone();
+        let resilience_prompt = final_prompt.clone();
         let resilience_base_options = options.clone();
         let resilience_local_model = effective_runtime
             .execution_servers
