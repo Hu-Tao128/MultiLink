@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use crate::context_engine::parser::chunk_extractor::CodeChunk;
-use crate::orchestrator::planner::{Action, MultiStepPlan, Plan, Step, StepResult};
+use crate::orchestrator::planner::{Action, MultiStepPlan, Plan, Step};
 use crate::router::ProviderRouter;
 use crate::providers::{ProviderId, PromptOptions};
 use crate::skills::SkillOrchestrator;
@@ -108,55 +108,117 @@ impl Executor {
     pub async fn execute_multi_step(&self, plan: MultiStepPlan) -> Result<String, String> {
         let mut last_output = String::new();
         let mut context = Vec::new();
+        let mut steps = plan.steps;
 
-        for (index, step) in plan.steps.iter().enumerate() {
+        for index in 0..steps.len() {
+            let step = steps.remove(0);
+            
             match step {
                 Step::ToolCall { name, input } => {
-                    let result = self.tool_executor.execute(name, input.clone()).await;
+                    let input_json = serde_json::to_string(&input).unwrap_or_default();
+                    let result = self.tool_executor.execute(&name, input.clone()).await;
                     let json_output = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
                     
-                    context.push(StepResult {
+                    let metadata = Some(crate::orchestrator::planner::StepMetadata::new(
+                        index,
+                        Some(&name),
+                        Some(input_json.clone()),
+                    ));
+                    
+                    context.push(crate::orchestrator::planner::StepResult {
                         step_index: index,
+                        step_id: format!("step_{}", index),
                         output: json_output.clone(),
                         tool_name: Some(name.clone()),
+                        metadata,
                     });
+                    
+                    if name == "search_code" || name == "search_and_open" {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json_output) {
+                            let results_count = parsed.get("results")
+                                .or_else(|| parsed.get("files"))
+                                .and_then(|v| v.as_array())
+                                .map(|a| a.len())
+                                .unwrap_or(0);
+                            
+                            if results_count == 1 && name == "search_code" {
+                                if let Some(first_result) = parsed.get("results")
+                                    .and_then(|v| v.as_array())
+                                    .and_then(|a| a.first())
+                                {
+                                    if let Some(path) = first_result.get("path").and_then(|v| v.as_str()) {
+                                        steps.insert(0, Step::ToolCall {
+                                            name: "open_file".to_string(),
+                                            input: crate::tools::ToolInput {
+                                                path: Some(path.to_string()),
+                                                pattern: None,
+                                                args: None,
+                                            },
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
                     
                     last_output = json_output;
                 }
                 Step::LLMCall { prompt } => {
-                    let available_providers = self.router.get_available_providers().await;
-                    let selected_provider = ProviderSelector::select(
-                        &crate::orchestrator::provider_selector::RequiredCapabilities::new(),
-                        &available_providers
-                    ).unwrap_or(ProviderId::Ollama);
-
-                    let context_summary = context.iter()
-                        .map(|r| format!("Step {}: {}", r.step_index, r.output))
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-
-                    let full_prompt = if context_summary.is_empty() {
-                        prompt.clone()
-                    } else {
-                        format!("{}\n\nPrevious context:\n{}", prompt, context_summary)
-                    };
-
-                    let options = PromptOptions::default();
-                    let response = self.router.send(selected_provider, full_prompt, options).await
-                        .map_err(|e| format!("LLM error: {:?}", e))?;
-
-                    context.push(StepResult {
+                    last_output = self.execute_llm_step(index, &prompt, &context).await?;
+                    
+                    let metadata = Some(crate::orchestrator::planner::StepMetadata::for_llm(index));
+                    context.push(crate::orchestrator::planner::StepResult {
                         step_index: index,
-                        output: response.text.clone(),
+                        step_id: format!("step_{}", index),
+                        output: last_output.clone(),
                         tool_name: None,
+                        metadata,
                     });
-
-                    last_output = response.text;
                 }
             }
         }
 
         Ok(last_output)
+    }
+
+    async fn execute_llm_step(&self, _step_index: usize, prompt: &str, context: &[crate::orchestrator::planner::StepResult]) -> Result<String, String> {
+        let available_providers = self.router.get_available_providers().await;
+        let selected_provider = ProviderSelector::select(
+            &crate::orchestrator::provider_selector::RequiredCapabilities::new(),
+            &available_providers
+        ).unwrap_or(ProviderId::Ollama);
+
+        let structured_context = if !context.is_empty() {
+            let ctx_items: Vec<serde_json::Value> = context.iter().map(|r| {
+                serde_json::json!({
+                    "step_id": r.step_id,
+                    "tool_name": r.tool_name,
+                    "output": r.output
+                })
+            }).collect();
+            serde_json::to_string_pretty(&ctx_items).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let reasoning_instruction = "Use previous tool results to understand what was done and build upon them.";
+        
+        let full_prompt = if structured_context.is_empty() {
+            format!("{}\n\n{}", reasoning_instruction, prompt)
+        } else {
+            format!(
+                "{}\n\nTask: {}\n\nPrevious tool results (structured JSON):\n{}\n\nProvide a response that builds on the tool results.",
+                reasoning_instruction,
+                prompt,
+                structured_context
+            )
+        };
+
+        let options = PromptOptions::default();
+        let response = self.router.send(selected_provider, full_prompt, options).await
+            .map_err(|e| format!("LLM error: {:?}", e))?;
+
+        Ok(response.text)
     }
 }
 

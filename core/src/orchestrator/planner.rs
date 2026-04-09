@@ -122,6 +122,34 @@ pub enum Step {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StepMetadata {
+    pub step_id: String,
+    pub tool_name: Option<String>,
+    pub input: Option<String>,
+    pub timestamp: Option<String>,
+}
+
+impl StepMetadata {
+    pub fn new(step_id: usize, tool_name: Option<&str>, input: Option<String>) -> Self {
+        Self {
+            step_id: format!("step_{}", step_id),
+            tool_name: tool_name.map(String::from),
+            input,
+            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+        }
+    }
+
+    pub fn for_llm(step_id: usize) -> Self {
+        Self {
+            step_id: format!("step_{}", step_id),
+            tool_name: None,
+            input: None,
+            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MultiStepPlan {
     pub steps: Vec<Step>,
     pub goal: String,
@@ -131,8 +159,10 @@ pub struct MultiStepPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StepResult {
     pub step_index: usize,
+    pub step_id: String,
     pub output: String,
     pub tool_name: Option<String>,
+    pub metadata: Option<StepMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
