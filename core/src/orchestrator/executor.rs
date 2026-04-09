@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use crate::context_engine::parser::chunk_extractor::CodeChunk;
-use crate::orchestrator::planner::{Action, Plan};
+use crate::orchestrator::planner::{Action, MultiStepPlan, Plan, Step, StepResult};
 use crate::router::ProviderRouter;
 use crate::providers::{ProviderId, PromptOptions};
 use crate::skills::SkillOrchestrator;
@@ -98,6 +98,60 @@ impl Executor {
                     let json_output = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
                     exec_context.intermediate_results.push(format!("Tool {} result: {}", name, json_output));
                     last_output = json_output;
+                }
+            }
+        }
+
+        Ok(last_output)
+    }
+
+    pub async fn execute_multi_step(&self, plan: MultiStepPlan) -> Result<String, String> {
+        let mut last_output = String::new();
+        let mut context = Vec::new();
+
+        for (index, step) in plan.steps.iter().enumerate() {
+            match step {
+                Step::ToolCall { name, input } => {
+                    let result = self.tool_executor.execute(name, input.clone()).await;
+                    let json_output = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+                    
+                    context.push(StepResult {
+                        step_index: index,
+                        output: json_output.clone(),
+                        tool_name: Some(name.clone()),
+                    });
+                    
+                    last_output = json_output;
+                }
+                Step::LLMCall { prompt } => {
+                    let available_providers = self.router.get_available_providers().await;
+                    let selected_provider = ProviderSelector::select(
+                        &crate::orchestrator::provider_selector::RequiredCapabilities::new(),
+                        &available_providers
+                    ).unwrap_or(ProviderId::Ollama);
+
+                    let context_summary = context.iter()
+                        .map(|r| format!("Step {}: {}", r.step_index, r.output))
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+
+                    let full_prompt = if context_summary.is_empty() {
+                        prompt.clone()
+                    } else {
+                        format!("{}\n\nPrevious context:\n{}", prompt, context_summary)
+                    };
+
+                    let options = PromptOptions::default();
+                    let response = self.router.send(selected_provider, full_prompt, options).await
+                        .map_err(|e| format!("LLM error: {:?}", e))?;
+
+                    context.push(StepResult {
+                        step_index: index,
+                        output: response.text.clone(),
+                        tool_name: None,
+                    });
+
+                    last_output = response.text;
                 }
             }
         }

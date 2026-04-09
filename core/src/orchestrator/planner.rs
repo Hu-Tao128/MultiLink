@@ -50,7 +50,7 @@ fn select_tool_for_intent(intent: &QueryIntent, prompt: &str) -> Option<(String,
     match intent {
         QueryIntent::Search => {
             let query = prompt
-                .split(|c| c == ':' || c == '?' || c == ' ')
+                .split(|c| [':', '?', ' '].contains(&c))
                 .skip_while(|s| s.len() < 4 || !s.chars().any(|c| c.is_alphabetic()))
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -113,6 +113,26 @@ fn select_tool_for_intent(intent: &QueryIntent, prompt: &str) -> Option<(String,
         )),
         QueryIntent::General => None,
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Step {
+    ToolCall { name: String, input: ToolInput },
+    LLMCall { prompt: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MultiStepPlan {
+    pub steps: Vec<Step>,
+    pub goal: String,
+    pub context: Vec<StepResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StepResult {
+    pub step_index: usize,
+    pub output: String,
+    pub tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,6 +203,69 @@ impl MinimalPlanner {
         Plan {
             steps,
             goal: input.to_string(),
+        }
+    }
+
+    pub fn plan_multi_step(input: &str) -> MultiStepPlan {
+        let intent = classify_intent(input);
+        let lower = input.to_lowercase();
+        let mut steps = Vec::new();
+        let context = Vec::new();
+
+        match intent {
+            QueryIntent::Search | QueryIntent::ReadFile => {
+                if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
+                    if tool_name == "search_and_open" || tool_name == "search_code" {
+                        let query = input.to_string();
+                        steps.push(Step::ToolCall {
+                            name: tool_name.clone(),
+                            input: tool_input,
+                        });
+
+                        if lower.contains("analyze")
+                            || lower.contains("find bug")
+                            || lower.contains("review")
+                        {
+                            steps.push(Step::LLMCall {
+                                prompt: format!(
+                                    "Analyze the search results and provide insights about: {}\n\nProvide a detailed analysis.",
+                                    query
+                                ),
+                            });
+                        }
+                    } else {
+                        steps.push(Step::ToolCall {
+                            name: tool_name,
+                            input: tool_input,
+                        });
+                    }
+                }
+            }
+            QueryIntent::SystemInfo => {
+                if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
+                    steps.push(Step::ToolCall {
+                        name: tool_name,
+                        input: tool_input,
+                    });
+                }
+            }
+            QueryIntent::General => {
+                steps.push(Step::LLMCall {
+                    prompt: input.to_string(),
+                });
+            }
+        }
+
+        if steps.is_empty() {
+            steps.push(Step::LLMCall {
+                prompt: input.to_string(),
+            });
+        }
+
+        MultiStepPlan {
+            steps,
+            goal: input.to_string(),
+            context,
         }
     }
 }

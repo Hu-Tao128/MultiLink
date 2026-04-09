@@ -880,8 +880,8 @@ impl ChatRuntime {
                 Arc::new(ContextEngineV1) as Arc<dyn ContextEngine>,
                 self.tool_executor.clone(),
             );
-            let plan = MinimalPlanner::plan(&prompt);
-            match executor.execute(plan).await {
+            let plan = MinimalPlanner::plan_multi_step(&prompt);
+            match executor.execute_multi_step(plan).await {
                 Ok(text) => {
                     if context_debug_enabled(&self.runtime_config) {
                         eprintln!("[orchestrator] session={} executed plan successfully ({} chars)", session_id, text.len());

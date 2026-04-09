@@ -430,6 +430,7 @@ fn compute_heuristic_scores(
     scores
 }
 
+#[allow(clippy::type_complexity)]
 static LEXICAL_INDEX_CACHE: std::sync::LazyLock<
     std::sync::Mutex<Option<(u64, Arc<LexicalIndex>)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
