@@ -47,7 +47,7 @@ impl Tool for SystemVersion {
         })
     }
 
-    async fn execute(&self, input: ToolInput, _: &std::path::PathBuf) -> ToolResult {
+    async fn execute(&self, input: ToolInput, _: &std::path::Path) -> ToolResult {
         let requested_tools: Vec<String> = input
             .args
             .as_ref()

@@ -31,7 +31,7 @@ use crate::providers::{PromptOptions, ProviderCapabilities, ProviderId};
 use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
 use crate::skills::{Skill, SkillLoader, SkillOrchestrator};
-use crate::tools::{create_default_registry, ToolExecutor};
+use crate::tools::{create_default_registry_with_engine, ToolExecutor};
 use crate::orchestrator::executor::Executor;
 use crate::orchestrator::planner::MinimalPlanner;
 use crate::providers::LLMError;
@@ -136,7 +136,10 @@ impl ChatRuntime {
             .min(hardware_caps.max_project_top_k)
             .max(2);
 
-        let tool_registry = create_default_registry(project_root);
+        let tool_registry = create_default_registry_with_engine(
+            project_root,
+            Arc::new(ContextEngineV1) as Arc<dyn ContextEngine>,
+        );
         let tool_executor = Arc::new(ToolExecutor::new(Arc::new(tool_registry)));
 
         Self {

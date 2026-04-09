@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub mod filesystem;
 pub mod system;
+pub mod hybrid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ToolInput {
@@ -44,7 +45,7 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn input_schema(&self) -> serde_json::Value;
-    async fn execute(&self, input: ToolInput, project_root: &PathBuf) -> ToolResult;
+    async fn execute(&self, input: ToolInput, project_root: &Path) -> ToolResult;
 }
 
 pub struct ToolRegistry {
@@ -115,7 +116,14 @@ impl ToolExecutor {
 }
 
 pub fn create_default_registry(project_root: PathBuf) -> ToolRegistry {
+    create_default_registry_with_engine(project_root, Arc::new(crate::context_engine::ContextEngineV1) as Arc<dyn crate::context_engine::ContextEngine>)
+}
+
+pub fn create_default_registry_with_engine(project_root: PathBuf, context_engine: Arc<dyn crate::context_engine::ContextEngine>) -> ToolRegistry {
     let mut registry = ToolRegistry::new(project_root);
+    registry.register(Arc::new(hybrid::SearchCode::new(context_engine.clone())));
+    registry.register(Arc::new(hybrid::OpenFile));
+    registry.register(Arc::new(hybrid::SearchAndOpen::new(context_engine)));
     registry.register(Arc::new(filesystem::FsLs));
     registry.register(Arc::new(filesystem::FsCat));
     registry.register(Arc::new(filesystem::FsGrep));

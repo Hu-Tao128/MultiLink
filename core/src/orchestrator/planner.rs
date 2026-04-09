@@ -1,7 +1,119 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::orchestrator::provider_selector::RequiredCapabilities;
 use crate::tools::ToolInput;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum QueryIntent {
+    Search,
+    ReadFile,
+    SystemInfo,
+    General,
+}
+
+pub fn classify_intent(prompt: &str) -> QueryIntent {
+    let lower = prompt.to_lowercase();
+
+    let search_keywords = [
+        "find",
+        "search",
+        "locate",
+        "where is",
+        "look for",
+        "grep",
+        "search for",
+        "look up",
+        "get info",
+        "show me",
+        "list",
+    ];
+
+    let read_keywords = ["open", "read", "show content", "cat", "display", "view"];
+
+    let system_keywords = ["system", "version", "info", "config", "settings", "status"];
+
+    if search_keywords.iter().any(|k| lower.contains(k)) {
+        QueryIntent::Search
+    } else if read_keywords.iter().any(|k| lower.contains(k)) {
+        QueryIntent::ReadFile
+    } else if system_keywords.iter().any(|k| lower.contains(k)) {
+        QueryIntent::SystemInfo
+    } else {
+        QueryIntent::General
+    }
+}
+
+fn select_tool_for_intent(intent: &QueryIntent, prompt: &str) -> Option<(String, ToolInput)> {
+    let lower = prompt.to_lowercase();
+
+    match intent {
+        QueryIntent::Search => {
+            let query = prompt
+                .split(|c| c == ':' || c == '?' || c == ' ')
+                .skip_while(|s| s.len() < 4 || !s.chars().any(|c| c.is_alphabetic()))
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if lower.contains("find") && lower.contains("bug")
+                || lower.contains("analyze")
+                || lower.contains("review")
+            {
+                Some((
+                    "search_and_open".to_string(),
+                    ToolInput {
+                        path: None,
+                        pattern: None,
+                        args: Some(HashMap::from([
+                            (
+                                "query".to_string(),
+                                serde_json::Value::String(query.clone()),
+                            ),
+                            ("top_k".to_string(), serde_json::Value::Number(3.into())),
+                        ])),
+                    },
+                ))
+            } else {
+                Some((
+                    "search_code".to_string(),
+                    ToolInput {
+                        path: None,
+                        pattern: None,
+                        args: Some(HashMap::from([
+                            ("query".to_string(), serde_json::Value::String(query)),
+                            ("top_k".to_string(), serde_json::Value::Number(5.into())),
+                        ])),
+                    },
+                ))
+            }
+        }
+        QueryIntent::ReadFile => {
+            let path = lower
+                .split_whitespace()
+                .find(|w| w.contains('.') && !w.contains("file"))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| ".".to_string());
+
+            Some((
+                "open_file".to_string(),
+                ToolInput {
+                    path: Some(path),
+                    pattern: None,
+                    args: None,
+                },
+            ))
+        }
+        QueryIntent::SystemInfo => Some((
+            "system_version".to_string(),
+            ToolInput {
+                path: None,
+                pattern: None,
+                args: None,
+            },
+        )),
+        QueryIntent::General => None,
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Action {
@@ -30,11 +142,25 @@ impl MinimalPlanner {
         let mut steps = Vec::new();
         let capabilities = infer_capabilities(input);
         let lower = input.to_lowercase();
+        let intent = classify_intent(input);
 
-        steps.push(PlanStep {
-            action: Action::RetrieveContext,
-            description: "Gathering relevant project context and files.".to_string(),
-        });
+        if matches!(intent, QueryIntent::Search) || matches!(intent, QueryIntent::ReadFile) {
+            if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
+                let tool_desc = tool_name.clone();
+                steps.push(PlanStep {
+                    action: Action::ToolCall {
+                        name: tool_name,
+                        input: tool_input,
+                    },
+                    description: format!("Using tool: {}", tool_desc),
+                });
+            }
+        } else {
+            steps.push(PlanStep {
+                action: Action::RetrieveContext,
+                description: "Gathering relevant project context and files.".to_string(),
+            });
+        }
 
         if lower.contains("analyze")
             || lower.contains("review")

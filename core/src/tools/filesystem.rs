@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::tools::{ToolInput, ToolResult, Tool};
 
-pub fn normalize_path(base: &PathBuf, relative: &str) -> Result<PathBuf, String> {
+pub fn normalize_path(base: &Path, relative: &str) -> Result<PathBuf, String> {
     let relative_path = Path::new(relative);
 
     if relative_path.is_absolute() {
@@ -40,13 +40,13 @@ impl Tool for FsLs {
         })
     }
 
-    async fn execute(&self, input: ToolInput, project_root: &PathBuf) -> ToolResult {
+    async fn execute(&self, input: ToolInput, project_root: &Path) -> ToolResult {
         let target_path = match input.path {
             Some(p) => match normalize_path(project_root, &p) {
                 Ok(path) => path,
                 Err(e) => return ToolResult::err(e),
             },
-            None => project_root.clone(),
+            None => project_root.to_path_buf(),
         };
 
         if !target_path.exists() {
@@ -106,7 +106,7 @@ impl Tool for FsCat {
         })
     }
 
-    async fn execute(&self, input: ToolInput, project_root: &PathBuf) -> ToolResult {
+    async fn execute(&self, input: ToolInput, project_root: &Path) -> ToolResult {
         let path = match input.path {
             Some(p) => p,
             None => return ToolResult::err("path is required"),
@@ -154,7 +154,7 @@ impl Tool for FsGrep {
         })
     }
 
-    async fn execute(&self, input: ToolInput, project_root: &PathBuf) -> ToolResult {
+    async fn execute(&self, input: ToolInput, project_root: &Path) -> ToolResult {
         let pattern = match input.pattern {
             Some(p) => p,
             None => return ToolResult::err("pattern is required"),
@@ -165,7 +165,7 @@ impl Tool for FsGrep {
                 Ok(path) => path,
                 Err(e) => return ToolResult::err(e),
             },
-            None => project_root.clone(),
+            None => project_root.to_path_buf(),
         };
 
         let limit = input.args
