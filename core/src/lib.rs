@@ -61,6 +61,4 @@ pub use skills::{
     Skill, SkillLoader, SkillManifest, SkillOrchestrator, SkillParameter, SkillShare, SkillSharer,
 };
 pub use system::{OllamaInstallPlan, SystemService};
-pub use tools::{
-    Tool, ToolExecutor, ToolInput, ToolRegistry, ToolResult, create_default_registry,
-};
+pub use tools::{create_default_registry, Tool, ToolExecutor, ToolInput, ToolRegistry, ToolResult};
