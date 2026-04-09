@@ -168,6 +168,10 @@ pub trait LLMProvider: Send + Sync {
     }
 
     async fn health_check(&self) -> Result<bool, LLMError>;
+    
+    async fn warmup_model(&self, _model: &str) -> Result<(), LLMError> {
+        Ok(())
+    }
 }
 
 impl ProviderCapabilities {

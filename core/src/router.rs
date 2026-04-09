@@ -108,10 +108,29 @@ impl ProviderRouter {
         self.providers.insert(id, provider);
     }
 
+    pub fn get_provider(&self, id: ProviderId) -> Option<&Arc<dyn LLMProvider>> {
+        self.providers.get(&id)
+    }
+
     pub async fn init_health_states(&self) {
         let mut states = self.health_states.write().await;
         for id in &self.order {
             states.entry(*id).or_default();
+        }
+    }
+
+    pub async fn warmup_model(&self, provider_id: ProviderId, model: &str) {
+        if let Some(provider) = self.providers.get(&provider_id) {
+            // Try warmup using a simple minimal prompt to trigger model loading
+            // This works for any provider type without needing downcasting
+            let warmup_options = PromptOptions {
+                model: Some(model.to_string()),
+                ..Default::default()
+            };
+            
+            // Send a minimal request - if model isn't loaded, this triggers loading
+            // We don't care about the result, just triggering the load
+            let _ = provider.send("Hi".to_string(), warmup_options).await;
         }
     }
 

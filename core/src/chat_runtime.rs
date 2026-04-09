@@ -690,9 +690,12 @@ impl ChatRuntime {
         let mut model_profile: Option<ModelProfile> = None;
         let mut model_capabilities: Option<ProviderCapabilities> = None;
         if let Some(model_name) = model.as_ref() {
-            // Increase timeout to 30s as some models (like gemma4) have massive metadata bodies
-            // that can take a few seconds to download and parse.
             const MODEL_INFO_TIMEOUT_SECS: u64 = 30;
+            
+            // Warmup model first to trigger loading (especially for large models like gemma4)
+            // This sends a minimal request to trigger Ollama to load the model into memory
+            let _ = self.router.warmup_model(ProviderId::Ollama, model_name).await;
+            
             if let Ok(Ok(caps)) = tokio::time::timeout(
                 Duration::from_secs(MODEL_INFO_TIMEOUT_SECS),
                 self.router.get_model_info(provider, model_name),
