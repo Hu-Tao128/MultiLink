@@ -106,11 +106,16 @@ impl Executor {
     }
 
     pub async fn execute_multi_step(&self, plan: MultiStepPlan) -> Result<String, String> {
+        self.execute_multi_step_with_limit(plan, crate::orchestrator::planner::DEFAULT_MAX_STEPS).await
+    }
+
+    pub async fn execute_multi_step_with_limit(&self, plan: MultiStepPlan, max_steps: usize) -> Result<String, String> {
         let mut last_output = String::new();
         let mut context = Vec::new();
         let mut steps = plan.steps;
+        let mut step_index = 0;
 
-        for index in 0..steps.len() {
+        while step_index < steps.len() && context.len() < max_steps {
             let step = steps.remove(0);
             
             match step {
@@ -120,14 +125,14 @@ impl Executor {
                     let json_output = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
                     
                     let metadata = Some(crate::orchestrator::planner::StepMetadata::new(
-                        index,
+                        context.len(),
                         Some(&name),
                         Some(input_json.clone()),
                     ));
                     
                     context.push(crate::orchestrator::planner::StepResult {
-                        step_index: index,
-                        step_id: format!("step_{}", index),
+                        step_index: context.len(),
+                        step_id: format!("step_{}", context.len()),
                         output: json_output.clone(),
                         tool_name: Some(name.clone()),
                         metadata,
@@ -162,23 +167,114 @@ impl Executor {
                     }
                     
                     last_output = json_output;
+                    step_index += 1;
                 }
                 Step::LLMCall { prompt } => {
-                    last_output = self.execute_llm_step(index, &prompt, &context).await?;
+                    last_output = self.execute_llm_step(context.len(), &prompt, &context).await?;
                     
-                    let metadata = Some(crate::orchestrator::planner::StepMetadata::for_llm(index));
+                    let metadata = Some(crate::orchestrator::planner::StepMetadata::for_llm(context.len()));
                     context.push(crate::orchestrator::planner::StepResult {
-                        step_index: index,
-                        step_id: format!("step_{}", index),
+                        step_index: context.len(),
+                        step_id: format!("step_{}", context.len()),
                         output: last_output.clone(),
                         tool_name: None,
                         metadata,
                     });
+                    step_index += 1;
+                }
+                Step::DecideNext => {
+                    let decision = self.execute_decision_step(&plan.goal, &context).await?;
+                    let decision_json = serde_json::to_string(&decision).unwrap_or_default();
+                    
+                    match decision.next_action.as_str() {
+                        "done" => {
+                            context.push(crate::orchestrator::planner::StepResult {
+                                step_index: context.len(),
+                                step_id: format!("step_{}", context.len()),
+                                output: decision_json,
+                                tool_name: Some("decide_next".to_string()),
+                                metadata: None,
+                            });
+                            break;
+                        }
+                        "tool" => {
+                            if let (Some(tool_name), Some(tool_input)) = (decision.tool.clone(), decision.input.clone()) {
+                                steps.insert(0, Step::ToolCall {
+                                    name: tool_name,
+                                    input: tool_input,
+                                });
+                            }
+                        }
+                        "llm" => {
+                            if let Some(input) = decision.input.clone() {
+                                if let Some(prompt) = input.pattern {
+                                    steps.insert(0, Step::LLMCall { prompt });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    step_index += 1;
                 }
             }
         }
 
         Ok(last_output)
+    }
+
+    async fn execute_decision_step(&self, goal: &str, context: &[crate::orchestrator::planner::StepResult]) -> Result<crate::orchestrator::planner::DecisionResult, String> {
+        let available_providers = self.router.get_available_providers().await;
+        let selected_provider = ProviderSelector::select(
+            &crate::orchestrator::provider_selector::RequiredCapabilities::new(),
+            &available_providers
+        ).unwrap_or(ProviderId::Ollama);
+
+        let structured_context = if !context.is_empty() {
+            let ctx_items: Vec<serde_json::Value> = context.iter().map(|r| {
+                serde_json::json!({
+                    "step_id": r.step_id,
+                    "tool_name": r.tool_name,
+                    "output": r.output
+                })
+            }).collect();
+            serde_json::to_string_pretty(&ctx_items).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let decision_prompt = format!(
+            r#"You are a decision engine. Based on the goal and previous tool results, decide what to do next.
+
+Goal: {}
+
+Previous tool results (JSON):
+{}
+
+Your response must be a JSON object with this structure:
+{{
+    "next_action": "tool" | "llm" | "done",
+    "tool": "tool_name_if_tool" (optional),
+    "input": {{"path": "...", "pattern": "...", "args": ...}} (optional),
+    "reason": "why you made this decision"
+}}
+
+- If task is complete, set next_action to "done"
+- If need more info, set next_action to "tool" and specify tool name and input
+- If need analysis, set next_action to "llm" and provide prompt
+
+Respond ONLY with valid JSON, no other text."#,
+            goal,
+            structured_context
+        );
+
+        let options = PromptOptions::default();
+        let response = self.router.send(selected_provider, decision_prompt, options).await
+            .map_err(|e| format!("LLM decision error: {:?}", e))?;
+
+        let decision = crate::orchestrator::planner::DecisionResult::parse_from_json(&response.text)
+            .unwrap_or_else(|| crate::orchestrator::planner::DecisionResult::done(Some("Failed to parse decision".to_string())));
+
+        Ok(decision)
     }
 
     async fn execute_llm_step(&self, _step_index: usize, prompt: &str, context: &[crate::orchestrator::planner::StepResult]) -> Result<String, String> {

@@ -119,6 +119,55 @@ fn select_tool_for_intent(intent: &QueryIntent, prompt: &str) -> Option<(String,
 pub enum Step {
     ToolCall { name: String, input: ToolInput },
     LLMCall { prompt: String },
+    DecideNext,
+}
+
+pub const MAX_STEPS: usize = 5;
+pub const DEFAULT_MAX_STEPS: usize = 5;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecisionResult {
+    pub next_action: String,
+    pub tool: Option<String>,
+    pub input: Option<ToolInput>,
+    pub reason: Option<String>,
+}
+
+impl DecisionResult {
+    pub fn done(reason: Option<String>) -> Self {
+        Self {
+            next_action: "done".to_string(),
+            tool: None,
+            input: None,
+            reason,
+        }
+    }
+
+    pub fn tool(name: String, input: ToolInput, reason: Option<String>) -> Self {
+        Self {
+            next_action: "tool".to_string(),
+            tool: Some(name),
+            input: Some(input),
+            reason,
+        }
+    }
+
+    pub fn llm(prompt: String, reason: Option<String>) -> Self {
+        Self {
+            next_action: "llm".to_string(),
+            tool: None,
+            input: Some(ToolInput {
+                path: None,
+                pattern: Some(prompt),
+                args: None,
+            }),
+            reason,
+        }
+    }
+
+    pub fn parse_from_json(json_str: &str) -> Option<Self> {
+        serde_json::from_str(json_str).ok()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
