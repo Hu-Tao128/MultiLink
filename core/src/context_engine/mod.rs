@@ -1,8 +1,8 @@
 pub mod bm25;
 pub mod chunker;
 pub mod compress;
-pub mod embeddings;
 pub mod embedding_index;
+pub mod embeddings;
 pub mod index;
 pub mod lexical_search;
 pub mod parser;

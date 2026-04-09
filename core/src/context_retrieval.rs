@@ -794,7 +794,8 @@ fn lexical_scores(prompt: &str, chunks: &[ProjectChunk]) -> Vec<(usize, f32)> {
                 }
             }
 
-            if terms_matched_in_filename >= 2 || (terms.len() == 1 && terms_matched_in_filename == 1)
+            if terms_matched_in_filename >= 2
+                || (terms.len() == 1 && terms_matched_in_filename == 1)
             {
                 score += 50.0;
             }

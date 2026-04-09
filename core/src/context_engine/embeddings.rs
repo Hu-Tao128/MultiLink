@@ -131,10 +131,13 @@ pub async fn blend_embedding_scores(
                 let ts = get_timestamp_secs();
                 for (idx, vec) in vectors.into_iter().enumerate() {
                     if let Some(hash) = missing_ids.get(offset + idx) {
-                        cache.vectors.insert(hash.clone(), EmbeddingCacheEntry {
-                            vector: vec,
-                            timestamp_secs: ts,
-                        });
+                        cache.vectors.insert(
+                            hash.clone(),
+                            EmbeddingCacheEntry {
+                                vector: vec,
+                                timestamp_secs: ts,
+                            },
+                        );
                     }
                 }
             } else {
@@ -154,7 +157,10 @@ pub async fn blend_embedding_scores(
     let mut scores = HashMap::new();
     for chunk in candidates {
         if let Some(entry) = cache.vectors.get(&chunk.chunk_hash) {
-            scores.insert(chunk.chunk_hash.clone(), cosine_similarity(&query_vec, &entry.vector));
+            scores.insert(
+                chunk.chunk_hash.clone(),
+                cosine_similarity(&query_vec, &entry.vector),
+            );
         }
     }
 
@@ -179,14 +185,16 @@ fn load_cache(path: &Path) -> EmbeddingCacheFile {
         return EmbeddingCacheFile::default();
     };
     let mut cache = serde_json::from_slice::<EmbeddingCacheFile>(&raw).unwrap_or_default();
-    
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    
-    cache.vectors.retain(|_key, entry| now.saturating_sub(entry.timestamp_secs) < EMBEDDING_CACHE_TTL_SECS);
-    
+
+    cache
+        .vectors
+        .retain(|_key, entry| now.saturating_sub(entry.timestamp_secs) < EMBEDDING_CACHE_TTL_SECS);
+
     cache
 }
 
@@ -365,7 +373,9 @@ async fn embed_inputs(
 mod tests {
     use std::fs;
 
-    use super::{get_timestamp_secs, load_cache, save_cache, EmbeddingCacheEntry, EmbeddingCacheFile};
+    use super::{
+        get_timestamp_secs, load_cache, save_cache, EmbeddingCacheEntry, EmbeddingCacheFile,
+    };
 
     #[test]
     fn embedding_cache_roundtrip() {
@@ -373,10 +383,13 @@ mod tests {
         let path = temp.path().join("embeddings.json");
 
         let mut cache = EmbeddingCacheFile::default();
-        cache.vectors.insert("abc".to_string(), EmbeddingCacheEntry {
-            vector: vec![0.1, 0.2, 0.3],
-            timestamp_secs: get_timestamp_secs(),
-        });
+        cache.vectors.insert(
+            "abc".to_string(),
+            EmbeddingCacheEntry {
+                vector: vec![0.1, 0.2, 0.3],
+                timestamp_secs: get_timestamp_secs(),
+            },
+        );
         save_cache(&path, &cache).expect("save");
         assert!(fs::metadata(&path).is_ok());
 

@@ -250,10 +250,15 @@ fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> LexicalScores {
     let is_project_overview_prompt = looks_like_project_overview_prompt(prompt);
     let is_code_query = detect_code_query(prompt);
 
-    let heuristic_scores = compute_heuristic_scores(chunks, &terms, &path_hints, is_project_overview_prompt);
+    let heuristic_scores =
+        compute_heuristic_scores(chunks, &terms, &path_hints, is_project_overview_prompt);
     let bm25_scores = compute_bm25_scores(prompt, chunks);
 
-    let (bm25_weight, heuristic_weight) = if is_code_query { (0.4, 0.6) } else { (0.5, 0.5) };
+    let (bm25_weight, heuristic_weight) = if is_code_query {
+        (0.4, 0.6)
+    } else {
+        (0.5, 0.5)
+    };
 
     let normalized_bm25 = normalize_scores(&bm25_scores);
     let normalized_heuristic = normalize_scores(&heuristic_scores);
@@ -267,15 +272,13 @@ fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> LexicalScores {
 
     let max_score = combined.iter().copied().fold(0.0f32, f32::max);
     if max_score == 0.0 && !terms.is_empty() {
-        let fuzzy_terms: Vec<String> = terms.iter()
-            .filter(|t| t.len() >= 3)
-            .cloned()
-            .collect();
+        let fuzzy_terms: Vec<String> = terms.iter().filter(|t| t.len() >= 3).cloned().collect();
         for (i, chunk) in chunks.iter().enumerate() {
             let content_l = chunk.content.to_lowercase();
             let path_l = chunk.file.to_lowercase();
             for term in &fuzzy_terms {
-                if content_l.contains(&term.to_lowercase()) || path_l.contains(&term.to_lowercase()) {
+                if content_l.contains(&term.to_lowercase()) || path_l.contains(&term.to_lowercase())
+                {
                     combined[i] += 1.0;
                 }
             }
@@ -329,8 +332,26 @@ fn compute_heuristic_scores(
             .to_ascii_lowercase();
         let is_code_ext = matches!(
             ext.as_str(),
-            "rs" | "py" | "js" | "jsx" | "ts" | "tsx" | "dart" | "java" | "kt" | "kts"
-                | "cpp" | "c" | "cc" | "cxx" | "cs" | "go" | "swift" | "php" | "rb" | "scala" | "zig"
+            "rs" | "py"
+                | "js"
+                | "jsx"
+                | "ts"
+                | "tsx"
+                | "dart"
+                | "java"
+                | "kt"
+                | "kts"
+                | "cpp"
+                | "c"
+                | "cc"
+                | "cxx"
+                | "cs"
+                | "go"
+                | "swift"
+                | "php"
+                | "rb"
+                | "scala"
+                | "zig"
         );
         let is_root_file = depth == 0;
         let in_test_like_tree = path_l.starts_with("tests/")
@@ -410,7 +431,8 @@ fn compute_heuristic_scores(
                 }
             }
 
-            if terms_matched_in_filename >= 2 || (terms.len() == 1 && terms_matched_in_filename == 1)
+            if terms_matched_in_filename >= 2
+                || (terms.len() == 1 && terms_matched_in_filename == 1)
             {
                 score += 50.0;
             }
