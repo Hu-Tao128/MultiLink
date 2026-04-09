@@ -15,104 +15,93 @@ pub enum QueryIntent {
 pub fn classify_intent(prompt: &str) -> QueryIntent {
     let lower = prompt.to_lowercase();
 
-    let search_keywords = [
-        "find",
-        "search",
-        "locate",
-        "where is",
-        "look for",
-        "grep",
-        "search for",
-        "look up",
-        "get info",
-        "show me",
-        "list",
+    let read_keywords = [
+        "abre",
+        "open",
+        "lee archivo",
+        "read file",
+        "show file",
+        "show content",
+        "cat",
+        "display",
+        "view",
     ];
+    let search_keywords = ["busca", "find", "where is", "donde está", "donde esta"];
+    let system_keywords = ["version", "node", "java", "python"];
 
-    let read_keywords = ["open", "read", "show content", "cat", "display", "view"];
-
-    let system_keywords = ["system", "version", "info", "config", "settings", "status"];
-
-    if search_keywords.iter().any(|k| lower.contains(k)) {
-        QueryIntent::Search
-    } else if read_keywords.iter().any(|k| lower.contains(k)) {
+    let intent = if has_file_path_pattern(prompt) || read_keywords.iter().any(|k| lower.contains(k))
+    {
         QueryIntent::ReadFile
+    } else if search_keywords.iter().any(|k| lower.contains(k)) {
+        QueryIntent::Search
     } else if system_keywords.iter().any(|k| lower.contains(k)) {
         QueryIntent::SystemInfo
     } else {
         QueryIntent::General
-    }
+    };
+
+    eprintln!("[planner] selected_intent={:?} prompt={}", intent, prompt);
+    intent
 }
 
 fn select_tool_for_intent(intent: &QueryIntent, prompt: &str) -> Option<(String, ToolInput)> {
-    let lower = prompt.to_lowercase();
-
-    match intent {
-        QueryIntent::Search => {
-            let query = prompt
-                .split(|c| [':', '?', ' '].contains(&c))
-                .skip_while(|s| s.len() < 4 || !s.chars().any(|c| c.is_alphabetic()))
-                .collect::<Vec<_>>()
-                .join(" ");
-
-            if lower.contains("find") && lower.contains("bug")
-                || lower.contains("analyze")
-                || lower.contains("review")
-            {
-                Some((
-                    "search_and_open".to_string(),
-                    ToolInput {
-                        path: None,
-                        pattern: None,
-                        args: Some(HashMap::from([
-                            (
-                                "query".to_string(),
-                                serde_json::Value::String(query.clone()),
-                            ),
-                            ("top_k".to_string(), serde_json::Value::Number(3.into())),
-                        ])),
-                    },
-                ))
-            } else {
-                Some((
-                    "search_code".to_string(),
-                    ToolInput {
-                        path: None,
-                        pattern: None,
-                        args: Some(HashMap::from([
-                            ("query".to_string(), serde_json::Value::String(query)),
-                            ("top_k".to_string(), serde_json::Value::Number(5.into())),
-                        ])),
-                    },
-                ))
-            }
-        }
-        QueryIntent::ReadFile => {
-            let path = lower
-                .split_whitespace()
-                .find(|w| w.contains('.') && !w.contains("file"))
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| ".".to_string());
-
-            Some((
+    let selection = match intent {
+        QueryIntent::Search => Some((
+            "search_code".to_string(),
+            ToolInput {
+                path: None,
+                pattern: None,
+                args: Some(HashMap::from([
+                    (
+                        "query".to_string(),
+                        serde_json::Value::String(extract_search_query(prompt)),
+                    ),
+                    ("top_k".to_string(), serde_json::Value::Number(5.into())),
+                ])),
+            },
+        )),
+        QueryIntent::ReadFile => extract_file_path(prompt).map(|path| {
+            (
                 "open_file".to_string(),
                 ToolInput {
                     path: Some(path),
                     pattern: None,
                     args: None,
                 },
-            ))
-        }
+            )
+        }),
         QueryIntent::SystemInfo => Some((
             "system_version".to_string(),
             ToolInput {
                 path: None,
                 pattern: None,
-                args: None,
+                args: Some(HashMap::from([(
+                    "tools".to_string(),
+                    serde_json::Value::Array(
+                        extract_requested_system_tools(prompt)
+                            .into_iter()
+                            .map(serde_json::Value::String)
+                            .collect(),
+                    ),
+                )])),
             },
         )),
         QueryIntent::General => None,
+    };
+
+    if let Some((tool_name, _)) = selection.as_ref() {
+        eprintln!(
+            "[planner] selected_tool={} intent={:?} skipped=false",
+            tool_name, intent
+        );
+    } else {
+        eprintln!(
+            "[planner] selected_tool=none intent={:?} skipped=true",
+            intent
+        );
     }
+
+    selection
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -243,7 +232,10 @@ impl MinimalPlanner {
         let lower = input.to_lowercase();
         let intent = classify_intent(input);
 
-        if matches!(intent, QueryIntent::Search) || matches!(intent, QueryIntent::ReadFile) {
+        if matches!(
+            intent,
+            QueryIntent::Search | QueryIntent::ReadFile | QueryIntent::SystemInfo
+        ) {
             if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
                 let tool_desc = tool_name.clone();
                 steps.push(PlanStep {
@@ -287,37 +279,38 @@ impl MinimalPlanner {
 
     pub fn plan_multi_step(input: &str) -> MultiStepPlan {
         let intent = classify_intent(input);
-        let lower = input.to_lowercase();
         let mut steps = Vec::new();
         let context = Vec::new();
 
         match intent {
-            QueryIntent::Search | QueryIntent::ReadFile => {
+            QueryIntent::ReadFile => {
                 if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
-                    if tool_name == "search_and_open" || tool_name == "search_code" {
-                        let query = input.to_string();
-                        steps.push(Step::ToolCall {
-                            name: tool_name.clone(),
-                            input: tool_input,
-                        });
-
-                        if lower.contains("analyze")
-                            || lower.contains("find bug")
-                            || lower.contains("review")
-                        {
-                            steps.push(Step::LLMCall {
-                                prompt: format!(
-                                    "Analyze the search results and provide insights about: {}\n\nProvide a detailed analysis.",
-                                    query
-                                ),
-                            });
-                        }
-                    } else {
-                        steps.push(Step::ToolCall {
-                            name: tool_name,
-                            input: tool_input,
-                        });
-                    }
+                    steps.push(Step::ToolCall {
+                        name: tool_name,
+                        input: tool_input,
+                    });
+                    steps.push(Step::LLMCall {
+                        prompt: format!(
+                            "Usa exclusivamente el resultado real de open_file como fuente de verdad. \
+Si el usuario pidió copiar el código, reproduce el contenido real del archivo. \
+Luego explica brevemente si hace falta.\n\nSolicitud original: {}",
+                            input
+                        ),
+                    });
+                }
+            }
+            QueryIntent::Search => {
+                if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
+                    steps.push(Step::ToolCall {
+                        name: tool_name,
+                        input: tool_input,
+                    });
+                    steps.push(Step::LLMCall {
+                        prompt: format!(
+                            "Resume los resultados reales de search_code y responde la solicitud del usuario sin inventar coincidencias.\n\nSolicitud original: {}",
+                            input
+                        ),
+                    });
                 }
             }
             QueryIntent::SystemInfo => {
@@ -325,6 +318,12 @@ impl MinimalPlanner {
                     steps.push(Step::ToolCall {
                         name: tool_name,
                         input: tool_input,
+                    });
+                    steps.push(Step::LLMCall {
+                        prompt: format!(
+                            "Resume la informacion real devuelta por system_version y contesta la solicitud del usuario.\n\nSolicitud original: {}",
+                            input
+                        ),
                     });
                 }
             }
@@ -347,6 +346,82 @@ impl MinimalPlanner {
             context,
         }
     }
+}
+
+fn has_file_path_pattern(prompt: &str) -> bool {
+    prompt
+        .split_whitespace()
+        .any(|token| extract_path_candidate(token).is_some())
+}
+
+fn extract_file_path(prompt: &str) -> Option<String> {
+    prompt.split_whitespace().find_map(extract_path_candidate)
+}
+
+fn extract_path_candidate(token: &str) -> Option<String> {
+    let cleaned = token
+        .trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | '`' | ',' | ':' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+            )
+        })
+        .trim();
+
+    let has_known_extension = [
+        ".rs", ".ts", ".tsx", ".js", ".jsx", ".md", ".toml", ".json", ".yaml", ".yml", ".cpp",
+        ".h", ".hpp", ".py", ".java", ".qml",
+    ]
+    .iter()
+    .any(|ext| cleaned.ends_with(ext));
+
+    if cleaned.is_empty()
+        || !cleaned.contains('.')
+        || !(cleaned.contains('/') || has_known_extension)
+        || cleaned.starts_with("http://")
+        || cleaned.starts_with("https://")
+    {
+        return None;
+    }
+
+    Some(cleaned.to_string())
+}
+
+fn extract_search_query(prompt: &str) -> String {
+    let lower = prompt.to_lowercase();
+    let phrases = ["busca", "find", "where is", "donde está", "donde esta"];
+
+    for phrase in phrases {
+        if let Some(index) = lower.find(phrase) {
+            let query = prompt[index + phrase.len()..].trim();
+            if !query.is_empty() {
+                return query.to_string();
+            }
+        }
+    }
+
+    prompt.trim().to_string()
+}
+
+fn extract_requested_system_tools(prompt: &str) -> Vec<String> {
+    let lower = prompt.to_lowercase();
+    let mut tools = Vec::new();
+
+    for tool in ["node", "java", "python"] {
+        if lower.contains(tool) {
+            tools.push(tool.to_string());
+        }
+    }
+
+    if lower.contains("version") && tools.is_empty() {
+        tools = vec!["node".to_string(), "java".to_string(), "python".to_string()];
+    }
+
+    if tools.is_empty() {
+        tools = vec!["node".to_string(), "java".to_string(), "python".to_string()];
+    }
+
+    tools
 }
 
 pub fn infer_capabilities(prompt: &str) -> RequiredCapabilities {
@@ -483,6 +558,56 @@ mod tests {
         let plan = MinimalPlanner::plan("analyze my project");
         assert_eq!(plan.steps.len(), 3);
         assert!(matches!(plan.steps[1].action, Action::ExecuteSkill));
+    }
+
+    #[test]
+    fn classify_read_file_intent_from_spanish_and_path() {
+        assert_eq!(
+            classify_intent("Abre core/src/router.rs"),
+            QueryIntent::ReadFile
+        );
+        assert_eq!(
+            classify_intent("show file docs/README.md"),
+            QueryIntent::ReadFile
+        );
+    }
+
+    #[test]
+    fn classify_search_and_system_intents() {
+        assert_eq!(
+            classify_intent("busca donde está ProviderRouter"),
+            QueryIntent::Search
+        );
+        assert_eq!(classify_intent("python version"), QueryIntent::SystemInfo);
+    }
+
+    #[test]
+    fn multi_step_plan_uses_tool_first_for_file_queries() {
+        let plan = MinimalPlanner::plan_multi_step("Abre core/src/router.rs y copia el código");
+        assert_eq!(plan.steps.len(), 2);
+        match &plan.steps[0] {
+            Step::ToolCall { name, input } => {
+                assert_eq!(name, "open_file");
+                assert_eq!(input.path.as_deref(), Some("core/src/router.rs"));
+            }
+            other => panic!("expected tool call, got {:?}", other),
+        }
+        match &plan.steps[1] {
+            Step::LLMCall { prompt } => {
+                assert!(prompt.contains("open_file"));
+            }
+            other => panic!("expected llm call, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn multi_step_plan_uses_tool_first_for_search_queries() {
+        let plan = MinimalPlanner::plan_multi_step("busca donde está ProviderRouter");
+        assert_eq!(plan.steps.len(), 2);
+        match &plan.steps[0] {
+            Step::ToolCall { name, .. } => assert_eq!(name, "search_code"),
+            other => panic!("expected tool call, got {:?}", other),
+        }
     }
 
     #[test]

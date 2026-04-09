@@ -136,6 +136,7 @@ impl Executor {
         plan: MultiStepPlan,
         max_steps: usize,
     ) -> Result<String, String> {
+        let plan_intent = crate::orchestrator::planner::classify_intent(&plan.goal);
         let mut last_output = String::new();
         let mut context = Vec::new();
         let mut steps = plan.steps;
@@ -146,8 +147,13 @@ impl Executor {
 
             match step {
                 Step::ToolCall { name, input } => {
+                    eprintln!(
+                        "[planner] tool_step intent={:?} selected_tool={} executed=true",
+                        plan_intent, name
+                    );
                     let input_json = serde_json::to_string(&input).unwrap_or_default();
                     let result = self.tool_executor.execute(&name, input.clone()).await;
+                    let tool_failed = !result.success;
                     let json_output =
                         serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
 
@@ -164,6 +170,51 @@ impl Executor {
                         tool_name: Some(name.clone()),
                         metadata,
                     });
+
+                    if tool_failed {
+                        eprintln!(
+                            "[planner] tool_failure intent={:?} selected_tool={} fallback=context_engine",
+                            plan_intent, name
+                        );
+
+                        let fallback = old_tools::retrieve_context(
+                            &self.context_engine,
+                            &plan.goal,
+                            &plan.goal,
+                            2048,
+                        )
+                        .await;
+
+                        match fallback {
+                            Ok(result) => {
+                                let fallback_output = serde_json::json!({
+                                    "success": true,
+                                    "fallback": "context_engine",
+                                    "selected_files": result.selected_files,
+                                    "context": result.context
+                                })
+                                .to_string();
+
+                                context.push(crate::orchestrator::planner::StepResult {
+                                    step_index: context.len(),
+                                    step_id: format!("step_{}", context.len()),
+                                    output: fallback_output.clone(),
+                                    tool_name: Some("context_engine_fallback".to_string()),
+                                    metadata: None,
+                                });
+                                last_output = fallback_output;
+                            }
+                            Err(err) => {
+                                return Err(format!(
+                                    "Tool {} failed and context fallback also failed: {}",
+                                    name, err
+                                ));
+                            }
+                        }
+
+                        step_index += 1;
+                        continue;
+                    }
 
                     if name == "search_code" || name == "search_and_open" {
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json_output)
@@ -205,6 +256,7 @@ impl Executor {
                     step_index += 1;
                 }
                 Step::LLMCall { prompt } => {
+                    eprintln!("[planner] llm_step intent={:?} executed=true", plan_intent);
                     last_output = self
                         .execute_llm_step(context.len(), &prompt, &context)
                         .await?;
