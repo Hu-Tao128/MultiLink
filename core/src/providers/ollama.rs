@@ -113,14 +113,15 @@ impl OllamaProvider {
         };
 
         let timeout = Duration::from_secs(Self::model_load_timeout_secs());
-        
+
         let result = tokio::time::timeout(
             timeout,
             self.client
                 .post(format!("{}/api/chat", self.base_url))
                 .json(&body)
-                .send()
-        ).await;
+                .send(),
+        )
+        .await;
 
         match result {
             Ok(Ok(response)) if response.status().is_success() => {
@@ -144,7 +145,10 @@ impl OllamaProvider {
             }
             Ok(Err(e)) => {
                 if e.to_string().contains("timeout") {
-                    eprintln!("[ollama] model {} is loading into memory (timeout during warmup)", model);
+                    eprintln!(
+                        "[ollama] model {} is loading into memory (timeout during warmup)",
+                        model
+                    );
                     let mut warmed = self.warmup_models.write().await;
                     warmed.insert(model.to_string(), true);
                     Ok(())
@@ -153,7 +157,10 @@ impl OllamaProvider {
                 }
             }
             Err(_) => {
-                eprintln!("[ollama] model {} is loading into memory (warmup timed out)", model);
+                eprintln!(
+                    "[ollama] model {} is loading into memory (warmup timed out)",
+                    model
+                );
                 let mut warmed = self.warmup_models.write().await;
                 warmed.insert(model.to_string(), true);
                 Ok(())
@@ -395,10 +402,15 @@ impl OllamaProvider {
                     };
 
                     if !is_transient_status(status) || attempt + 1 == Self::RETRY_ATTEMPTS {
-                        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                        if status == reqwest::StatusCode::NOT_FOUND
+                            || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                        {
                             if attempt == 0 {
                                 sleep(Duration::from_secs(3)).await;
-                                last_error = Some(LLMError::Http(format!("model may be loading: {}", detail)));
+                                last_error = Some(LLMError::Http(format!(
+                                    "model may be loading: {}",
+                                    detail
+                                )));
                                 continue;
                             }
                         }
