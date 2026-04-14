@@ -145,6 +145,14 @@ impl Tool for OpenFile {
         const DEFAULT_MAX_FILE_LINES: usize = 2000;
         const DEFAULT_TRUNCATE_LINES: usize = 500;
         const DEFAULT_LINES_PER_CHUNK: usize = 500;
+        const TOKENS_PER_LINE: usize = 4;
+
+        let available_tokens = input
+            .args
+            .as_ref()
+            .and_then(|a| a.get("available_tokens"))
+            .and_then(|v| v.as_u64())
+            .map(|c| c as usize);
 
         let max_lines = input
             .args
@@ -183,15 +191,28 @@ impl Tool for OpenFile {
             .and_then(|a| a.get("search"))
             .and_then(|v| v.as_str());
 
+        let (dynamic_max_lines, dynamic_truncate, dynamic_chunk_size) = if let Some(tokens) = available_tokens {
+            let safe_tokens = tokens.saturating_sub(500);
+            let calculated = safe_tokens / TOKENS_PER_LINE;
+            (
+                calculated.saturating_add(500),
+                calculated.saturating_sub(200),
+                calculated.saturating_sub(200),
+            )
+        } else {
+            (max_lines, truncate_lines, lines_per_chunk)
+        };
+
         match tokio::fs::read_to_string(&full_path).await {
             Ok(content) => {
                 let total_lines = content.lines().count();
-                let total_chunks = total_lines.div_ceil(lines_per_chunk);
+                let effective_chunk_size = if dynamic_chunk_size > 0 { dynamic_chunk_size } else { DEFAULT_LINES_PER_CHUNK };
+                let total_chunks = total_lines.div_ceil(effective_chunk_size);
 
-                let (display_content, chunk_info) = if total_lines > max_lines {
+                let (display_content, chunk_info) = if total_lines > dynamic_max_lines {
                     if let Some(chunk_idx) = chunk_index {
-                        let start = chunk_idx * lines_per_chunk;
-                        let end = std::cmp::min(start + lines_per_chunk, total_lines);
+                        let start = chunk_idx * effective_chunk_size;
+                        let end = std::cmp::min(start + effective_chunk_size, total_lines);
                         let chunk_content: String = content.lines().skip(start).take(end - start).collect::<Vec<_>>().join("\n");
                         let info = json!({
                             "chunk_index": chunk_idx,
@@ -201,12 +222,12 @@ impl Tool for OpenFile {
                         });
                         (chunk_content, Some(info))
                     } else {
-                        let truncated: String = content.lines().take(truncate_lines).collect::<Vec<_>>().join("\n");
+                        let truncated: String = content.lines().take(dynamic_truncate).collect::<Vec<_>>().join("\n");
                         let info = json!({
                             "chunk_index": 0,
                             "total_chunks": total_chunks,
-                            "lines_in_chunk": truncate_lines,
-                            "message": format!("[truncated] Showing first {} of {} lines. Total chunks: {}. Use 'chunk' param to access other chunks.", truncate_lines, total_lines, total_chunks)
+                            "lines_in_chunk": dynamic_truncate,
+                            "message": format!("[truncated] Showing first {} of {} lines. Total chunks: {}. Use 'chunk' param to access other chunks.", dynamic_truncate, total_lines, total_chunks)
                         });
                         (truncated, Some(info))
                     }

@@ -433,7 +433,11 @@ Respond ONLY with valid JSON, no other text."#,
             "Use previous tool results to understand what was done and build upon them."
                 .to_string()
         } else {
-            "IMPORTANT: You MUST use the content below EXACTLY. Do NOT explain unless explicitly asked. Do NOT hallucinate or invent file contents. Use the injected tool results as ground truth.".to_string()
+            "You MUST base your answer ONLY on the tool results below. \
+Do NOT explain unless explicitly asked. \
+Do NOT hallucinate or invent file contents. \
+If the answer is NOT in the tool results, respond exactly: \"[Not found in provided context]\" \
+Use the injected tool results as ground truth.".to_string()
         };
 
         let full_prompt = if injected_tool_context.is_empty() && structured_context.is_empty() {
@@ -442,19 +446,20 @@ Respond ONLY with valid JSON, no other text."#,
             let mut assembled = format!("Task: {}\n\n", prompt);
 
             if !injected_tool_context.is_empty() {
-                assembled.push_str("Injected tool context (ground truth):\n");
+                assembled.push_str("=== TOOL RESULTS (GROUND TRUTH) ===\n");
                 assembled.push_str(&injected_tool_context);
-                assembled.push_str("\n\n");
+                assembled.push_str("\n=== END TOOL RESULTS ===\n\n");
             }
 
             if !structured_context.is_empty() {
                 assembled.push_str("Previous tool results (structured JSON):\n");
                 assembled.push_str(&structured_context);
-                assembled.push_str("\n\n");
+                assembled.push('\n');
             }
 
             assembled.push_str(
-                "Provide a response that builds strictly on the real tool outputs above.",
+                "IMPORTANT: Your answer must be based ONLY on the tool results above. \
+If you cannot find the answer in the tool results, respond exactly: \"[Not found in provided context]\"",
             );
             assembled
         };
