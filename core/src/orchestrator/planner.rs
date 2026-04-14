@@ -4,18 +4,33 @@ use std::collections::HashMap;
 use crate::orchestrator::provider_selector::RequiredCapabilities;
 use crate::tools::ToolInput;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecutionMode {
-    ToolOnly,
-    ToolThenLLM,
-    LLMOnly,
+#[derive(Debug, Clone, Default)]
+pub struct IntentFeatures {
+    pub has_file_path: bool,
+    pub file_path: Option<String>,
+    pub asks_for_content: bool,
+    pub asks_for_analysis: bool,
+    pub asks_for_search: bool,
+    pub asks_for_creation: bool,
+    pub asks_for_modification: bool,
+    pub is_read_operation: bool,
+    pub is_write_operation: bool,
+    pub wants_explanation: bool,
+    pub wants_summary: bool,
+    pub is_system_query: bool,
+    pub is_general_conversation: bool,
 }
 
-impl ExecutionMode {
-    pub fn classify(prompt: &str) -> Self {
+impl IntentFeatures {
+    #[allow(clippy::field_reassign_with_default)]
+    pub fn extract(prompt: &str) -> Self {
         let p = prompt.to_lowercase();
+        let mut features = IntentFeatures::default();
 
-        let tool_only_keywords = [
+        features.has_file_path = has_file_path_pattern(prompt);
+        features.file_path = extract_file_path(prompt);
+
+        let content_keywords = [
             "abre",
             "open",
             "copia",
@@ -28,57 +43,182 @@ impl ExecutionMode {
             "lee archivo",
             "read file",
             "muestrame",
-            "dame el contenido",
+            "dame",
+            "contenido",
+            "mostrar",
         ];
+        features.asks_for_content = content_keywords.iter().any(|k| p.contains(k));
 
-        let search_only_keywords = [
+        let search_keywords = [
             "busca",
             "search",
             "grep",
             "find",
-            "donde esta",
-            "donde está",
+            "donde",
             "encontrar",
             "localizar",
+            "search for",
         ];
+        features.asks_for_search = search_keywords.iter().any(|k| p.contains(k));
 
         let analysis_keywords = [
-            "analiza",
-            "analyze",
+            "analiza", "analyze", "explica", "explain", "por que", "entiende", "revisar", "review",
+            "debug", "bug", "error", "problema", "issue", "fix", "corregir", "optimize", "audit",
+            "evalua", "evaluate", "compara", "compare",
+        ];
+        features.asks_for_analysis = analysis_keywords.iter().any(|k| p.contains(k));
+
+        let creation_keywords = [
+            "crea", "create", "nuevo", "new", "escribe", "write", "genera", "generate", "add",
+        ];
+        features.asks_for_creation = creation_keywords.iter().any(|k| p.contains(k));
+
+        let modification_keywords = [
+            "modifica",
+            "modify",
+            "cambia",
+            "change",
+            "actualiza",
+            "update",
+            "edita",
+            "edit",
+        ];
+        features.asks_for_modification = modification_keywords.iter().any(|k| p.contains(k));
+
+        let explanation_keywords = [
             "explica",
             "explain",
+            "que es",
+            "what is",
+            "como funciona",
+            "how does",
             "por que",
-            "por qué",
-            "entiende",
-            "understand",
-            "revisar",
-            "review",
-            "debug",
-            "bug",
-            "error",
-            "problema",
-            "issue",
-            "fix",
-            "corregir",
+            "why",
         ];
+        features.wants_explanation = explanation_keywords.iter().any(|k| p.contains(k));
 
-        if tool_only_keywords.iter().any(|k| p.contains(k))
-            && !analysis_keywords.iter().any(|k| p.contains(k))
-        {
+        let summary_keywords = ["resume", "summary", "resumen", "resume"];
+        features.wants_summary = summary_keywords.iter().any(|k| p.contains(k));
+
+        let system_keywords = [
+            "version",
+            "node",
+            "java",
+            "python",
+            "cargo",
+            "git",
+            "system",
+            " installed",
+        ];
+        features.is_system_query = system_keywords.iter().any(|k| p.contains(k));
+
+        let read_ops = [
+            "abre",
+            "open",
+            "lee",
+            "read",
+            "muestrame",
+            "show",
+            "dame",
+            "ver",
+        ];
+        features.is_read_operation = read_ops.iter().any(|k| p.contains(k));
+
+        let write_ops = [
+            "crea",
+            "create",
+            "escribe",
+            "write",
+            "modifica",
+            "modify",
+            "actualiza",
+            "update",
+            "add",
+            "append",
+        ];
+        features.is_write_operation = write_ops.iter().any(|k| p.contains(k));
+
+        features.is_general_conversation = !features.has_file_path
+            && !features.asks_for_content
+            && !features.asks_for_search
+            && !features.asks_for_analysis
+            && !features.is_system_query;
+
+        features
+    }
+
+    pub fn tool_confidence(&self) -> f32 {
+        let mut score: f32 = 0.0;
+
+        if self.has_file_path && self.is_read_operation && !self.wants_explanation {
+            score += 0.95;
+        }
+        if self.has_file_path && self.asks_for_content && !self.asks_for_analysis {
+            score += 0.90;
+        }
+        if self.asks_for_search && !self.asks_for_analysis {
+            score += 0.85;
+        }
+        if self.is_system_query && !self.wants_explanation {
+            score += 0.90;
+        }
+        if self.is_read_operation && self.asks_for_content {
+            score += 0.80;
+        }
+
+        score.min(1.0)
+    }
+
+    pub fn requires_llm(&self) -> bool {
+        self.asks_for_analysis
+            || self.wants_explanation
+            || self.wants_summary
+            || self.is_general_conversation
+            || self.asks_for_creation
+            || self.asks_for_modification
+    }
+
+    pub fn requires_file_access(&self) -> bool {
+        self.has_file_path || self.asks_for_search
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    ToolOnly,
+    ToolThenLLM,
+    LLMOnly,
+}
+
+impl ExecutionMode {
+    pub fn classify(prompt: &str) -> Self {
+        let features = IntentFeatures::extract(prompt);
+
+        let tool_confidence = features.tool_confidence();
+
+        eprintln!(
+            "[planner] intent_features: has_path={} content={} search={} analysis={} system={} confidence={:.2}",
+            features.has_file_path,
+            features.asks_for_content,
+            features.asks_for_search,
+            features.asks_for_analysis,
+            features.is_system_query,
+            tool_confidence
+        );
+
+        if tool_confidence >= 0.85 {
             return ExecutionMode::ToolOnly;
         }
 
-        if search_only_keywords.iter().any(|k| p.contains(k))
-            && !analysis_keywords.iter().any(|k| p.contains(k))
-        {
-            return ExecutionMode::ToolOnly;
-        }
-
-        if analysis_keywords.iter().any(|k| p.contains(k)) {
+        if features.requires_llm() && features.requires_file_access() {
             return ExecutionMode::ToolThenLLM;
         }
 
-        ExecutionMode::LLMOnly
+        if features.is_general_conversation {
+            return ExecutionMode::LLMOnly;
+        }
+
+        ExecutionMode::ToolThenLLM
     }
 }
 
