@@ -9,6 +9,8 @@ use crate::skills::SkillOrchestrator;
 use crate::tools::ToolExecutor;
 use std::sync::Arc;
 
+const MAX_TOOL_RESULT_LINES: usize = 500;
+
 pub struct ExecutionContext {
     pub context: Option<Vec<CodeChunk>>,
     pub intermediate_results: Vec<String>,
@@ -137,10 +139,16 @@ impl Executor {
         max_steps: usize,
     ) -> Result<String, String> {
         let plan_intent = crate::orchestrator::planner::classify_intent(&plan.goal);
+        let raw_mode = plan.raw_mode;
         let mut last_output = String::new();
         let mut context = Vec::new();
         let mut steps = plan.steps;
         let mut step_index = 0;
+
+        eprintln!(
+            "[executor] starting raw_mode={} intent={:?} goal={}",
+            raw_mode, plan_intent, plan.goal
+        );
 
         while step_index < steps.len() && context.len() < max_steps {
             let step = steps.remove(0);
@@ -256,7 +264,10 @@ impl Executor {
                     step_index += 1;
                 }
                 Step::LLMCall { prompt } => {
-                    eprintln!("[planner] llm_step intent={:?} executed=true", plan_intent);
+                    eprintln!(
+                        "[executor] llm_step intent={:?} raw_mode={} executed=true",
+                        plan_intent, raw_mode
+                    );
                     last_output = self
                         .execute_llm_step(context.len(), &prompt, &context)
                         .await?;
@@ -401,6 +412,7 @@ Respond ONLY with valid JSON, no other text."#,
         )
         .unwrap_or(ProviderId::Ollama);
 
+        let injected_tool_context = build_tool_context_message(context);
         let structured_context = if !context.is_empty() {
             let ctx_items: Vec<serde_json::Value> = context
                 .iter()
@@ -417,21 +429,40 @@ Respond ONLY with valid JSON, no other text."#,
             String::new()
         };
 
-        let reasoning_instruction =
-            "Use previous tool results to understand what was done and build upon them.";
-
-        let full_prompt = if structured_context.is_empty() {
-            format!("{}\n\n{}", reasoning_instruction, prompt)
+        let system_instruction = if injected_tool_context.is_empty() {
+            "Use previous tool results to understand what was done and build upon them."
+                .to_string()
         } else {
-            format!(
-                "{}\n\nTask: {}\n\nPrevious tool results (structured JSON):\n{}\n\nProvide a response that builds on the tool results.",
-                reasoning_instruction,
-                prompt,
-                structured_context
-            )
+            "IMPORTANT: You MUST use the content below EXACTLY. Do NOT explain unless explicitly asked. Do NOT hallucinate or invent file contents. Use the injected tool results as ground truth.".to_string()
         };
 
-        let options = PromptOptions::default();
+        let full_prompt = if injected_tool_context.is_empty() && structured_context.is_empty() {
+            prompt.to_string()
+        } else {
+            let mut assembled = format!("Task: {}\n\n", prompt);
+
+            if !injected_tool_context.is_empty() {
+                assembled.push_str("Injected tool context (ground truth):\n");
+                assembled.push_str(&injected_tool_context);
+                assembled.push_str("\n\n");
+            }
+
+            if !structured_context.is_empty() {
+                assembled.push_str("Previous tool results (structured JSON):\n");
+                assembled.push_str(&structured_context);
+                assembled.push_str("\n\n");
+            }
+
+            assembled.push_str(
+                "Provide a response that builds strictly on the real tool outputs above.",
+            );
+            assembled
+        };
+
+        let options = PromptOptions {
+            system_prompt: Some(system_instruction),
+            ..PromptOptions::default()
+        };
         let response = self
             .router
             .send(selected_provider, full_prompt, options)
@@ -442,6 +473,106 @@ Respond ONLY with valid JSON, no other text."#,
     }
 }
 
+fn build_tool_context_message(context: &[crate::orchestrator::planner::StepResult]) -> String {
+    let blocks: Vec<String> = context
+        .iter()
+        .filter_map(render_tool_result_block)
+        .inspect(|block| {
+            eprintln!(
+                "[executor] injecting_tool_result size={} chars",
+                block.chars().count()
+            );
+        })
+        .collect();
+
+    if blocks.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "You have access to the following real tool results. Treat them as ground truth.\n\n{}",
+            blocks.join("\n\n")
+        )
+    }
+}
+
+fn render_tool_result_block(step: &crate::orchestrator::planner::StepResult) -> Option<String> {
+    let tool_name = step.tool_name.as_deref()?;
+    if tool_name == "decide_next" {
+        return None;
+    }
+
+    let body = match serde_json::from_str::<crate::tools::ToolResult>(&step.output) {
+        Ok(parsed_result) => render_tool_result_body(tool_name, &parsed_result),
+        Err(_) => limit_tool_text(&step.output),
+    };
+
+    Some(format!("---\n[TOOL RESULT - {}]\n{}\n---", tool_name, body))
+}
+
+fn render_tool_result_body(tool_name: &str, result: &crate::tools::ToolResult) -> String {
+    if !result.success {
+        return format!(
+            "Status: error\n\n{}",
+            result
+                .error
+                .as_deref()
+                .unwrap_or("Tool failed without an error message.")
+        );
+    }
+
+    match tool_name {
+        "open_file" => render_open_file_result(&result.output),
+        _ => limit_tool_text(
+            &serde_json::to_string_pretty(&result.output)
+                .unwrap_or_else(|_| result.output.to_string()),
+        ),
+    }
+}
+
+fn render_open_file_result(output: &serde_json::Value) -> String {
+    let path = output
+        .get("path")
+        .and_then(|value| value.as_str())
+        .unwrap_or("<unknown>");
+    let content = output
+        .get("content")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+
+    if content.is_empty() {
+        return format!(
+            "Path: {}\n\n{}",
+            path,
+            limit_tool_text(
+                &serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string())
+            )
+        );
+    }
+
+    format!("Path: {}\n\n{}", path, limit_tool_text(content))
+}
+
+fn limit_tool_text(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= MAX_TOOL_RESULT_LINES {
+        return text.to_string();
+    }
+
+    let truncated = lines
+        .iter()
+        .take(MAX_TOOL_RESULT_LINES)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "{}\n\n[truncated to first {} lines out of {} total lines]",
+        truncated,
+        MAX_TOOL_RESULT_LINES,
+        lines.len()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,7 +580,7 @@ mod tests {
     use crate::orchestrator::planner::MinimalPlanner;
     use crate::router::ProviderRouter;
     use crate::skills::SkillOrchestrator;
-    use crate::tools::{ToolExecutor, ToolRegistry};
+    use crate::tools::{ToolExecutor, ToolRegistry, ToolResult};
     use std::path::PathBuf;
 
     #[tokio::test]
@@ -467,5 +598,43 @@ mod tests {
         let result = executor.execute(plan).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("LLM error"));
+    }
+
+    #[test]
+    fn render_open_file_tool_result_includes_real_content_and_path() {
+        let step = crate::orchestrator::planner::StepResult {
+            step_index: 0,
+            step_id: "step_0".to_string(),
+            output: serde_json::to_string(&ToolResult::ok(serde_json::json!({
+                "path": "core/src/router.rs",
+                "content": "fn alpha() {}\nfn beta() {}",
+                "size": 27
+            })))
+            .unwrap(),
+            tool_name: Some("open_file".to_string()),
+            metadata: None,
+        };
+
+        let rendered = render_tool_result_block(&step).expect("tool result should render");
+
+        assert!(rendered.contains("[TOOL RESULT - open_file]"));
+        assert!(rendered.contains("Path: core/src/router.rs"));
+        assert!(rendered.contains("fn alpha() {}"));
+        assert!(rendered.contains("fn beta() {}"));
+    }
+
+    #[test]
+    fn limit_tool_text_keeps_partial_content_with_explicit_truncation_notice() {
+        let long_text = (0..=MAX_TOOL_RESULT_LINES)
+            .map(|idx| format!("line {}", idx))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let limited = limit_tool_text(&long_text);
+
+        assert!(limited.contains("line 0"));
+        assert!(limited.contains(&format!("line {}", MAX_TOOL_RESULT_LINES - 1)));
+        assert!(!limited.contains(&format!("line {}", MAX_TOOL_RESULT_LINES)));
+        assert!(limited.contains("truncated to first"));
     }
 }

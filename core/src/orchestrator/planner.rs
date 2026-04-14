@@ -4,6 +4,16 @@ use std::collections::HashMap;
 use crate::orchestrator::provider_selector::RequiredCapabilities;
 use crate::tools::ToolInput;
 
+pub fn is_raw_file_request(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    lower.contains("copia")
+        || lower.contains("copy")
+        || lower.contains("completo")
+        || lower.contains("full file")
+        || lower.contains("todo el archivo")
+        || lower.contains("entire file")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum QueryIntent {
     Search,
@@ -192,6 +202,18 @@ pub struct MultiStepPlan {
     pub steps: Vec<Step>,
     pub goal: String,
     pub context: Vec<StepResult>,
+    pub raw_mode: bool,
+}
+
+impl MultiStepPlan {
+    pub fn new(steps: Vec<Step>, goal: String, raw_mode: bool) -> Self {
+        Self {
+            steps,
+            goal,
+            context: Vec::new(),
+            raw_mode,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -279,8 +301,23 @@ impl MinimalPlanner {
 
     pub fn plan_multi_step(input: &str) -> MultiStepPlan {
         let intent = classify_intent(input);
+        let raw_mode = is_raw_file_request(input);
         let mut steps = Vec::new();
-        let context = Vec::new();
+
+        eprintln!(
+            "[planner] raw_mode={} intent={:?} goal={}",
+            raw_mode, intent, input
+        );
+
+        if raw_mode && matches!(intent, QueryIntent::ReadFile) {
+            if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
+                steps.push(Step::ToolCall {
+                    name: tool_name,
+                    input: tool_input,
+                });
+            }
+            return MultiStepPlan::new(steps, input.to_string(), true);
+        }
 
         match intent {
             QueryIntent::ReadFile => {
@@ -292,7 +329,7 @@ impl MinimalPlanner {
                     steps.push(Step::LLMCall {
                         prompt: format!(
                             "Usa exclusivamente el resultado real de open_file como fuente de verdad. \
-Si el usuario pidió copiar el código, reproduce el contenido real del archivo. \
+Si el usuario pidio copiar el codigo, reproduce el contenido real del archivo. \
 Luego explica brevemente si hace falta.\n\nSolicitud original: {}",
                             input
                         ),
@@ -340,11 +377,7 @@ Luego explica brevemente si hace falta.\n\nSolicitud original: {}",
             });
         }
 
-        MultiStepPlan {
-            steps,
-            goal: input.to_string(),
-            context,
-        }
+        MultiStepPlan::new(steps, input.to_string(), false)
     }
 }
 
@@ -584,19 +617,14 @@ mod tests {
     #[test]
     fn multi_step_plan_uses_tool_first_for_file_queries() {
         let plan = MinimalPlanner::plan_multi_step("Abre core/src/router.rs y copia el código");
-        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps.len(), 1);
+        assert!(plan.raw_mode, "raw_mode should be true for copy requests");
         match &plan.steps[0] {
             Step::ToolCall { name, input } => {
                 assert_eq!(name, "open_file");
                 assert_eq!(input.path.as_deref(), Some("core/src/router.rs"));
             }
             other => panic!("expected tool call, got {:?}", other),
-        }
-        match &plan.steps[1] {
-            Step::LLMCall { prompt } => {
-                assert!(prompt.contains("open_file"));
-            }
-            other => panic!("expected llm call, got {:?}", other),
         }
     }
 

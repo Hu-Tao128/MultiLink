@@ -142,15 +142,36 @@ impl Tool for OpenFile {
 
         let full_path = project_root.join(&path);
 
+        const MAX_FILE_LINES: usize = 2000;
+        const TRUNCATE_TO_LINES: usize = 500;
+
         match tokio::fs::read_to_string(&full_path).await {
             Ok(content) => {
-                let preview: String = content.lines().take(50).collect::<Vec<_>>().join("\n");
-                ToolResult::ok(json!({
+                let total_lines = content.lines().count();
+                let (display_content, was_truncated) = if total_lines > MAX_FILE_LINES {
+                    let truncated: String = content.lines().take(TRUNCATE_TO_LINES).collect::<Vec<_>>().join("\n");
+                    (truncated, true)
+                } else {
+                    (content.clone(), false)
+                };
+
+                let _preview: String = display_content.lines().take(50).collect::<Vec<_>>().join("\n");
+                let mut result = json!({
                     "path": path,
-                    "content": content,
-                    "content_preview": preview,
-                    "size": content.len()
-                }))
+                    "content": display_content,
+                    "size": display_content.len()
+                });
+
+                if was_truncated {
+                    result["truncated"] = json!(true);
+                    result["truncated_info"] = json!({
+                        "total_lines": total_lines,
+                        "showing_lines": TRUNCATE_TO_LINES,
+                        "message": format!("[truncated] Showing first {} of {} lines", TRUNCATE_TO_LINES, total_lines)
+                    });
+                }
+
+                ToolResult::ok(result)
             }
             Err(e) => ToolResult::err(format!("Failed to read file: {}", e)),
         }
