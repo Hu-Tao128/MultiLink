@@ -146,13 +146,8 @@ impl Tool for OpenFile {
         const DEFAULT_TRUNCATE_LINES: usize = 500;
         const DEFAULT_LINES_PER_CHUNK: usize = 500;
         const TOKENS_PER_LINE: usize = 4;
-
-        let available_tokens = input
-            .args
-            .as_ref()
-            .and_then(|a| a.get("available_tokens"))
-            .and_then(|v| v.as_u64())
-            .map(|c| c as usize);
+        const RESERVED_TOKENS: usize = 800;
+        const CHUNK_SAFE_PERCENT: f32 = 0.6;
 
         let max_lines = input
             .args
@@ -191,13 +186,21 @@ impl Tool for OpenFile {
             .and_then(|a| a.get("search"))
             .and_then(|v| v.as_str());
 
+        let available_tokens = input
+            .args
+            .as_ref()
+            .and_then(|a| a.get("available_tokens"))
+            .and_then(|v| v.as_u64())
+            .map(|c| c as usize);
+
         let (dynamic_max_lines, dynamic_truncate, dynamic_chunk_size) = if let Some(tokens) = available_tokens {
-            let safe_tokens = tokens.saturating_sub(500);
-            let calculated = safe_tokens / TOKENS_PER_LINE;
+            let reserved = RESERVED_TOKENS.max(tokens / 4);
+            let safe_for_content = (tokens.saturating_sub(reserved) as f32 * CHUNK_SAFE_PERCENT) as usize;
+            let calculated = safe_for_content / TOKENS_PER_LINE;
             (
-                calculated.saturating_add(500),
-                calculated.saturating_sub(200),
-                calculated.saturating_sub(200),
+                calculated.saturating_add(300),
+                calculated.saturating_sub(150),
+                calculated.saturating_sub(150),
             )
         } else {
             (max_lines, truncate_lines, lines_per_chunk)
