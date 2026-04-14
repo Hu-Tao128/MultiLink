@@ -169,6 +169,49 @@ impl IntentFeatures {
         score.min(1.0)
     }
 
+    pub fn llm_confidence(&self) -> f32 {
+        let mut score: f32 = 0.0;
+
+        if self.is_general_conversation {
+            score += 0.95;
+        }
+        if self.wants_explanation {
+            score += 0.90;
+        }
+        if self.asks_for_analysis {
+            score += 0.85;
+        }
+        if self.wants_summary {
+            score += 0.80;
+        }
+        if self.asks_for_creation {
+            score += 0.75;
+        }
+        if self.asks_for_modification {
+            score += 0.70;
+        }
+        if self.has_file_path && self.wants_explanation {
+            score += 0.65;
+        }
+
+        score.min(1.0)
+    }
+
+    pub fn tool_vs_llm_score(&self) -> (f32, f32, ExecutionMode) {
+        let tool_score = self.tool_confidence();
+        let llm_score = self.llm_confidence();
+
+        let mode = if tool_score > llm_score + 0.15 {
+            ExecutionMode::ToolOnly
+        } else if llm_score > tool_score + 0.10 {
+            ExecutionMode::LLMOnly
+        } else {
+            ExecutionMode::ToolThenLLM
+        };
+
+        (tool_score, llm_score, mode)
+    }
+
     pub fn requires_llm(&self) -> bool {
         self.asks_for_analysis
             || self.wants_explanation
@@ -194,31 +237,14 @@ impl ExecutionMode {
     pub fn classify(prompt: &str) -> Self {
         let features = IntentFeatures::extract(prompt);
 
-        let tool_confidence = features.tool_confidence();
+        let (tool_score, llm_score, mode) = features.tool_vs_llm_score();
 
         eprintln!(
-            "[planner] intent_features: has_path={} content={} search={} analysis={} system={} confidence={:.2}",
-            features.has_file_path,
-            features.asks_for_content,
-            features.asks_for_search,
-            features.asks_for_analysis,
-            features.is_system_query,
-            tool_confidence
+            "[planner] tool_vs_llm: tool={:.2} llm={:.2} mode={:?} goal={}",
+            tool_score, llm_score, mode, prompt
         );
 
-        if tool_confidence >= 0.85 {
-            return ExecutionMode::ToolOnly;
-        }
-
-        if features.requires_llm() && features.requires_file_access() {
-            return ExecutionMode::ToolThenLLM;
-        }
-
-        if features.is_general_conversation {
-            return ExecutionMode::LLMOnly;
-        }
-
-        ExecutionMode::ToolThenLLM
+        mode
     }
 }
 
