@@ -4,6 +4,84 @@ use std::collections::HashMap;
 use crate::orchestrator::provider_selector::RequiredCapabilities;
 use crate::tools::ToolInput;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    ToolOnly,
+    ToolThenLLM,
+    LLMOnly,
+}
+
+impl ExecutionMode {
+    pub fn classify(prompt: &str) -> Self {
+        let p = prompt.to_lowercase();
+
+        let tool_only_keywords = [
+            "abre",
+            "open",
+            "copia",
+            "copy",
+            "cat",
+            "lee",
+            "display",
+            "view",
+            "show file",
+            "lee archivo",
+            "read file",
+            "muestrame",
+            "dame el contenido",
+        ];
+
+        let search_only_keywords = [
+            "busca",
+            "search",
+            "grep",
+            "find",
+            "donde esta",
+            "donde está",
+            "encontrar",
+            "localizar",
+        ];
+
+        let analysis_keywords = [
+            "analiza",
+            "analyze",
+            "explica",
+            "explain",
+            "por que",
+            "por qué",
+            "entiende",
+            "understand",
+            "revisar",
+            "review",
+            "debug",
+            "bug",
+            "error",
+            "problema",
+            "issue",
+            "fix",
+            "corregir",
+        ];
+
+        if tool_only_keywords.iter().any(|k| p.contains(k))
+            && !analysis_keywords.iter().any(|k| p.contains(k))
+        {
+            return ExecutionMode::ToolOnly;
+        }
+
+        if search_only_keywords.iter().any(|k| p.contains(k))
+            && !analysis_keywords.iter().any(|k| p.contains(k))
+        {
+            return ExecutionMode::ToolOnly;
+        }
+
+        if analysis_keywords.iter().any(|k| p.contains(k)) {
+            return ExecutionMode::ToolThenLLM;
+        }
+
+        ExecutionMode::LLMOnly
+    }
+}
+
 pub fn is_raw_file_request(prompt: &str) -> bool {
     let lower = prompt.to_lowercase();
     lower.contains("copia")
@@ -301,26 +379,25 @@ impl MinimalPlanner {
 
     pub fn plan_multi_step(input: &str) -> MultiStepPlan {
         let intent = classify_intent(input);
-        let raw_mode = is_raw_file_request(input);
+        let mode = ExecutionMode::classify(input);
+        let raw_mode = matches!(mode, ExecutionMode::ToolOnly);
         let mut steps = Vec::new();
 
         eprintln!(
-            "[planner] raw_mode={} intent={:?} goal={}",
-            raw_mode, intent, input
+            "[planner] mode={:?} intent={:?} raw_mode={} goal={}",
+            mode, intent, raw_mode, input
         );
 
-        if raw_mode && matches!(intent, QueryIntent::ReadFile) {
-            if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
-                steps.push(Step::ToolCall {
-                    name: tool_name,
-                    input: tool_input,
-                });
+        match mode {
+            ExecutionMode::ToolOnly => {
+                if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
+                    steps.push(Step::ToolCall {
+                        name: tool_name,
+                        input: tool_input,
+                    });
+                }
             }
-            return MultiStepPlan::new(steps, input.to_string(), true);
-        }
-
-        match intent {
-            QueryIntent::ReadFile => {
+            ExecutionMode::ToolThenLLM => {
                 if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
                     steps.push(Step::ToolCall {
                         name: tool_name,
@@ -328,43 +405,18 @@ impl MinimalPlanner {
                     });
                     steps.push(Step::LLMCall {
                         prompt: format!(
-                            "Usa exclusivamente el resultado real de open_file como fuente de verdad. \
-Si el usuario pidio copiar el codigo, reproduce el contenido real del archivo. \
-Luego explica brevemente si hace falta.\n\nSolicitud original: {}",
+                            "Usa exclusivamente el resultado real de la tool como fuente de verdad. \
+Analiza y responde la solicitud del usuario.\n\nSolicitud original: {}",
                             input
                         ),
                     });
-                }
-            }
-            QueryIntent::Search => {
-                if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
-                    steps.push(Step::ToolCall {
-                        name: tool_name,
-                        input: tool_input,
-                    });
+                } else {
                     steps.push(Step::LLMCall {
-                        prompt: format!(
-                            "Resume los resultados reales de search_code y responde la solicitud del usuario sin inventar coincidencias.\n\nSolicitud original: {}",
-                            input
-                        ),
+                        prompt: input.to_string(),
                     });
                 }
             }
-            QueryIntent::SystemInfo => {
-                if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
-                    steps.push(Step::ToolCall {
-                        name: tool_name,
-                        input: tool_input,
-                    });
-                    steps.push(Step::LLMCall {
-                        prompt: format!(
-                            "Resume la informacion real devuelta por system_version y contesta la solicitud del usuario.\n\nSolicitud original: {}",
-                            input
-                        ),
-                    });
-                }
-            }
-            QueryIntent::General => {
+            ExecutionMode::LLMOnly => {
                 steps.push(Step::LLMCall {
                     prompt: input.to_string(),
                 });
@@ -377,7 +429,7 @@ Luego explica brevemente si hace falta.\n\nSolicitud original: {}",
             });
         }
 
-        MultiStepPlan::new(steps, input.to_string(), false)
+        MultiStepPlan::new(steps, input.to_string(), raw_mode)
     }
 }
 
@@ -631,7 +683,8 @@ mod tests {
     #[test]
     fn multi_step_plan_uses_tool_first_for_search_queries() {
         let plan = MinimalPlanner::plan_multi_step("busca donde está ProviderRouter");
-        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps.len(), 1, "search is now ToolOnly, no LLM call");
+        assert!(plan.raw_mode, "raw_mode should be true for search");
         match &plan.steps[0] {
             Step::ToolCall { name, .. } => assert_eq!(name, "search_code"),
             other => panic!("expected tool call, got {:?}", other),

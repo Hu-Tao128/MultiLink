@@ -144,31 +144,75 @@ impl Tool for OpenFile {
 
         const MAX_FILE_LINES: usize = 2000;
         const TRUNCATE_TO_LINES: usize = 500;
+        const LINES_PER_CHUNK: usize = 500;
+
+        let chunk_index = input
+            .args
+            .as_ref()
+            .and_then(|a| a.get("chunk"))
+            .and_then(|v| v.as_u64())
+            .map(|c| c as usize);
+
+        let search_pattern = input
+            .args
+            .as_ref()
+            .and_then(|a| a.get("search"))
+            .and_then(|v| v.as_str());
 
         match tokio::fs::read_to_string(&full_path).await {
             Ok(content) => {
                 let total_lines = content.lines().count();
-                let (display_content, was_truncated) = if total_lines > MAX_FILE_LINES {
-                    let truncated: String = content.lines().take(TRUNCATE_TO_LINES).collect::<Vec<_>>().join("\n");
-                    (truncated, true)
+                let total_chunks = total_lines.div_ceil(LINES_PER_CHUNK);
+
+                let (display_content, chunk_info) = if total_lines > MAX_FILE_LINES {
+                    if let Some(chunk_idx) = chunk_index {
+                        let start = chunk_idx * LINES_PER_CHUNK;
+                        let end = std::cmp::min(start + LINES_PER_CHUNK, total_lines);
+                        let chunk_content: String = content.lines().skip(start).take(end - start).collect::<Vec<_>>().join("\n");
+                        let info = json!({
+                            "chunk_index": chunk_idx,
+                            "total_chunks": total_chunks,
+                            "lines_in_chunk": end - start,
+                            "message": format!("[Chunk {}/{}]", chunk_idx + 1, total_chunks)
+                        });
+                        (chunk_content, Some(info))
+                    } else {
+                        let truncated: String = content.lines().take(TRUNCATE_TO_LINES).collect::<Vec<_>>().join("\n");
+                        let info = json!({
+                            "chunk_index": 0,
+                            "total_chunks": total_chunks,
+                            "lines_in_chunk": TRUNCATE_TO_LINES,
+                            "message": format!("[truncated] Showing first {} of {} lines. Total chunks: {}. Use 'chunk' param to access other chunks.", TRUNCATE_TO_LINES, total_lines, total_chunks)
+                        });
+                        (truncated, Some(info))
+                    }
                 } else {
-                    (content.clone(), false)
+                    (content.clone(), None)
                 };
 
-                let _preview: String = display_content.lines().take(50).collect::<Vec<_>>().join("\n");
                 let mut result = json!({
                     "path": path,
                     "content": display_content,
-                    "size": display_content.len()
+                    "size": display_content.len(),
+                    "total_lines": total_lines
                 });
 
-                if was_truncated {
-                    result["truncated"] = json!(true);
-                    result["truncated_info"] = json!({
-                        "total_lines": total_lines,
-                        "showing_lines": TRUNCATE_TO_LINES,
-                        "message": format!("[truncated] Showing first {} of {} lines", TRUNCATE_TO_LINES, total_lines)
-                    });
+                if let Some(info) = chunk_info {
+                    result["chunk_info"] = info;
+                }
+
+                if let Some(pattern) = search_pattern {
+                    let pattern_lower = pattern.to_lowercase();
+                    let matching_lines: Vec<String> = display_content
+                        .lines()
+                        .enumerate()
+                        .filter(|(_, line)| line.to_lowercase().contains(&pattern_lower))
+                        .map(|(idx, line)| format!("{}: {}", idx + 1, line))
+                        .take(20)
+                        .collect();
+                    
+                    result["matching_lines"] = json!(matching_lines);
+                    result["search_pattern"] = json!(pattern);
                 }
 
                 ToolResult::ok(result)
