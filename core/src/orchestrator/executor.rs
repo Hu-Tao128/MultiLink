@@ -429,21 +429,12 @@ Respond ONLY with valid JSON, no other text."#,
             String::new()
         };
 
-        let system_instruction = if injected_tool_context.is_empty() {
-            "Use previous tool results to understand what was done and build upon them."
-                .to_string()
-        } else {
-            "You MUST base your answer ONLY on the tool results below. \
-Do NOT explain unless explicitly asked. \
-Do NOT hallucinate or invent file contents. \
-If the answer is NOT in the tool results, respond exactly: \"[Not found in provided context]\" \
-Use the injected tool results as ground truth.".to_string()
-        };
+        let system_instruction = "You are a constrained executor. You MUST answer ONLY using the provided tool results as ground truth. Do NOT explain unrelated concepts. Do NOT suggest improvements. Do NOT hallucinate code.".to_string();
 
         let full_prompt = if injected_tool_context.is_empty() && structured_context.is_empty() {
             prompt.to_string()
         } else {
-            let mut assembled = format!("Task: {}\n\n", prompt);
+            let mut assembled = String::new();
 
             if !injected_tool_context.is_empty() {
                 assembled.push_str("=== TOOL RESULTS (GROUND TRUTH) ===\n");
@@ -451,18 +442,28 @@ Use the injected tool results as ground truth.".to_string()
                 assembled.push_str("\n=== END TOOL RESULTS ===\n\n");
             }
 
-            if !structured_context.is_empty() {
-                assembled.push_str("Previous tool results (structured JSON):\n");
-                assembled.push_str(&structured_context);
-                assembled.push('\n');
-            }
+            assembled.push_str("=== INSTRUCTIONS ===\n");
+            assembled.push_str("You MUST answer ONLY using the tool results above.\n\n");
+            assembled.push_str("If the answer is not explicitly present in the tool results, respond EXACTLY with:\n");
+            assembled.push_str("[Not found in provided context]\n\n");
+            assembled.push_str("Do NOT:\n");
+            assembled.push_str("- explain unrelated concepts\n");
+            assembled.push_str("- suggest improvements\n");
+            assembled.push_str("- hallucinate code\n");
+            assembled.push_str("- add commentary beyond what was asked\n\n");
 
-            assembled.push_str(
-                "IMPORTANT: Your answer must be based ONLY on the tool results above. \
-If you cannot find the answer in the tool results, respond exactly: \"[Not found in provided context]\"",
-            );
+            use std::fmt::Write;
+
+            assembled.push_str("=== TASK ===\n");
+            write!(assembled, "{}", prompt).ok();
             assembled
         };
+
+        eprintln!(
+            "[executor] full_prompt_chars={} tool_context_chars={}",
+            full_prompt.len(),
+            injected_tool_context.len()
+        );
 
         let options = PromptOptions {
             system_prompt: Some(system_instruction),
@@ -493,10 +494,12 @@ fn build_tool_context_message(context: &[crate::orchestrator::planner::StepResul
     if blocks.is_empty() {
         String::new()
     } else {
-        format!(
+        let result = format!(
             "You have access to the following real tool results. Treat them as ground truth.\n\n{}",
             blocks.join("\n\n")
-        )
+        );
+        eprintln!("[executor] TOOL_CONTEXT_PREVIEW: {}", &result[..result.len().min(500)]);
+        result
     }
 }
 
