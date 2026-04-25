@@ -1,25 +1,15 @@
 # AGENTS.md
 
-> **IMPORTANT**: Read `./MULTILINK.md` first for project context and agent behavior guidelines.
-
-This file provides guidance for coding agents working in this repository.
+> **NOTE**: This file provides repo-specific guidance for coding agents.
 
 ## Scope and Priority
 
 - Keep core behavior stable before adding new features.
 - Prefer small, verifiable changes over large rewrites.
-- Preserve architecture boundaries:
+- Architecture boundaries:
   - `core/` owns runtime, routing, providers, persistence, auth.
   - `gui/` owns presentation and user interaction.
   - C++/Qt shim stays thin; business logic belongs in Rust core.
-
-## Rules Discovery
-
-- `.cursor/rules/` -> not present
-- `.cursorrules` -> not present  
-- `.github/copilot-instructions.md` -> not present
-
-No additional repo-specific AI rule files are currently enforced.
 
 ## Repository Layout
 
@@ -240,13 +230,6 @@ After building, test these features manually:
 - Keep commits scoped by concern: `feat(core): ...`, `fix(gui): ...`, `docs: ...`
 - Do not mix major refractors with unrelated docs churn
 - Include tests when changing runtime, config, routing, or retrieval behavior
-
-## Agent Working Notes
-
-- Read current diffs before editing; do not revert unrelated user changes
-- Prefer non-destructive fixes and incremental refactors
-- If a CI/platform issue appears (Qt version differences), add compatibility fallback
-- When uncertain, choose the option that preserves runtime correctness first
 
 ## Agent Working Notes
 
