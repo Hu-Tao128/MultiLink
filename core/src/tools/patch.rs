@@ -90,7 +90,9 @@ struct ParsedDiff {
 
 struct Hunk {
     old_start: usize,
+    #[allow(dead_code)]
     old_count: usize,
+    #[allow(dead_code)]
     new_start: usize,
     #[allow(dead_code)]
     new_count: usize,
@@ -262,13 +264,7 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, String> {
             ));
         }
 
-        let new_range_start = hunk.new_start.saturating_sub(1);
-        let insert_at = if hunk.old_count == 0 && removed_in_hunk == 0 {
-            new_range_start.saturating_sub(total_added as usize)
-        } else {
-            remove_start
-        }
-        .min(lines.len());
+        let insert_at = remove_start.min(lines.len());
 
         lines.splice(insert_at..remove_end, new_lines.iter().cloned());
 
@@ -495,6 +491,80 @@ mod tests {
         assert!(content.contains("println!(\"two\")"));
         assert!(!content.contains("println!(\"1\")"));
         assert!(!content.contains("println!(\"2\")"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_pure_addition_at_end() {
+        let root = test_root();
+        write_test_file(root.path(), "pure_add.rs", "fn a() {}\nfn b() {}\n");
+        let patch = "\
+@@ -2,1 +2,4 @@\n\
+ fn b() {}\n\
++fn c() {}\n\
++fn d() {}\n\
+";
+        let tool = ApplyPatch;
+        let result = tool
+            .execute(
+                ToolInput {
+                    path: Some("pure_add.rs".to_string()),
+                    pattern: None,
+                    args: Some(
+                        vec![("patch".to_string(), Value::String(patch.to_string()))]
+                            .into_iter()
+                            .collect(),
+                    ),
+                },
+                root.path(),
+            )
+            .await;
+
+        assert!(result.success, "{:?}", result.error);
+        let content = fs::read_to_string(root.path().join("pure_add.rs")).unwrap();
+        assert!(content.contains("fn c() {}"));
+        assert!(content.contains("fn d() {}"));
+        assert!(content.contains("fn a() {}"));
+        assert!(content.contains("fn b() {}"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_pure_addition_with_prior_hunk() {
+        let root = test_root();
+        write_test_file(
+            root.path(),
+            "multi_add.rs",
+            "fn a() {}\nfn b() {}\nfn c() {}\n",
+        );
+        // Hunk 1: replace fn b, Hunk 2: add fn d after fn c
+        let patch = "\
+@@ -2,1 +2,1 @@\n\
+-fn b() {}\n\
++fn b_updated() {}\n\
+@@ -3,1 +3,2 @@\n\
+ fn c() {}\n\
++fn d() {}\n\
+";
+        let tool = ApplyPatch;
+        let result = tool
+            .execute(
+                ToolInput {
+                    path: Some("multi_add.rs".to_string()),
+                    pattern: None,
+                    args: Some(
+                        vec![("patch".to_string(), Value::String(patch.to_string()))]
+                            .into_iter()
+                            .collect(),
+                    ),
+                },
+                root.path(),
+            )
+            .await;
+
+        assert!(result.success, "{:?}", result.error);
+        let content = fs::read_to_string(root.path().join("multi_add.rs")).unwrap();
+        assert!(content.contains("fn b_updated() {}"));
+        assert!(content.contains("fn d() {}"));
+        assert!(content.contains("fn c() {}"));
     }
 
     #[test]
