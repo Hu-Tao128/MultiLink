@@ -376,14 +376,14 @@ impl LanAgentServer {
             LanPayload::ToolList => {
                 let tools = tool_executor
                     .as_ref()
-                    .map(|exec| exec.list_tools())
+                    .map(|exec| exec.list_tools_with_schemas())
                     .unwrap_or_default();
                 let descriptors: Vec<ToolDescriptor> = tools
                     .into_iter()
-                    .map(|(name, description)| ToolDescriptor {
+                    .map(|(name, description, input_schema)| ToolDescriptor {
                         name,
                         description,
-                        input_schema: serde_json::Value::Null,
+                        input_schema,
                     })
                     .collect();
                 LanPayload::ToolListResponse {

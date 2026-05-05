@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::Path;
 
+use crate::tools::backup::save_backup;
 use crate::tools::filesystem::normalize_path;
 use crate::tools::{Tool, ToolInput, ToolResult};
 
@@ -52,13 +53,24 @@ impl Tool for ApplyPatch {
         }
 
         let original_content = match std::fs::read_to_string(&target_path) {
-            Ok(c) => c,
+            Ok(c) => c.replace("\r\n", "\n"),
             Err(e) => return ToolResult::err(format!("Failed to read file: {}", e)),
         };
 
         let parsed = match parse_unified_diff(&patch_str) {
             Ok(p) => p,
             Err(e) => return ToolResult::err(format!("Failed to parse patch: {}", e)),
+        };
+
+        let backup_path = match save_backup(project_root, &path) {
+            Ok(p) => {
+                if p.as_os_str().is_empty() {
+                    None
+                } else {
+                    Some(p)
+                }
+            }
+            Err(e) => return ToolResult::err(e),
         };
 
         let new_content = match apply_hunks(&original_content, &parsed.hunks) {
@@ -70,8 +82,9 @@ impl Tool for ApplyPatch {
             return ToolResult::err(format!("Failed to write patched file: {}", e));
         }
 
-        let original_lines: Vec<&str> = original_content.lines().collect();
-        let new_lines: Vec<&str> = new_content.lines().collect();
+    let original_lines: Vec<&str> = original_content.lines().collect();
+    let new_lines: Vec<&str> = new_content.lines().collect();
+    // Both counts exclude trailing newline; fine for report.
 
         ToolResult::ok(json!({
             "path": target_path.to_string_lossy(),
@@ -80,6 +93,7 @@ impl Tool for ApplyPatch {
             "lines_after": new_lines.len(),
             "lines_added": new_lines.len().saturating_sub(original_lines.len()),
             "lines_removed": original_lines.len().saturating_sub(new_lines.len()),
+            "backup_path": backup_path.map(|p| p.to_string_lossy().to_string())
         }))
     }
 }
@@ -208,7 +222,9 @@ fn build_hunk(lines: &[String], header: Option<(usize, usize, usize, usize)>) ->
 }
 
 fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, String> {
-    let mut lines: Vec<String> = original.lines().map(|s| s.to_string()).collect();
+    // Strip trailing \r for CRLF compatibility
+    let cleaned = original.replace("\r\n", "\n");
+    let mut lines: Vec<String> = cleaned.lines().map(|s| s.to_string()).collect();
     let mut total_added: isize = 0;
 
     for hunk in hunks {

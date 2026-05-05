@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::Path;
 
+use crate::tools::backup::save_backup;
 use crate::tools::filesystem::normalize_path;
 use crate::tools::{Tool, ToolInput, ToolResult};
 
@@ -66,6 +67,15 @@ impl Tool for WriteFile {
             (None, true)
         };
 
+        let backup_path = if !is_new {
+            match save_backup(project_root, &path) {
+                Ok(p) => Some(p),
+                Err(e) => return ToolResult::err(e),
+            }
+        } else {
+            None
+        };
+
         if let Some(parent) = target_path.parent() {
             if !parent.exists() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
@@ -96,7 +106,8 @@ impl Tool for WriteFile {
             "lines_before": diff_summary.lines_before,
             "lines_after": diff_summary.lines_after,
             "lines_added": diff_summary.added,
-            "lines_removed": diff_summary.removed
+            "lines_removed": diff_summary.removed,
+            "backup_path": backup_path.map(|p| p.to_string_lossy().to_string())
         }))
     }
 }

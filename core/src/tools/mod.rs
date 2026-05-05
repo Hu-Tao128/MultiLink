@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod backup;
 pub mod command;
 pub mod filesystem;
 pub mod git;
@@ -112,6 +113,19 @@ impl ToolExecutor {
 
     pub fn list_tools(&self) -> Vec<(String, String)> {
         self.registry.list()
+    }
+
+    pub fn list_tools_with_schemas(&self) -> Vec<(String, String, serde_json::Value)> {
+        self.registry
+            .tool_schemas()
+            .into_iter()
+            .filter_map(|s| {
+                let name = s.get("name").and_then(|v| v.as_str())?.to_string();
+                let desc = s.get("description").and_then(|v| v.as_str())?.to_string();
+                let schema = s.get("input_schema").cloned().unwrap_or_default();
+                Some((name, desc, schema))
+            })
+            .collect()
     }
 
     pub fn schemas(&self) -> Vec<serde_json::Value> {
