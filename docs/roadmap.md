@@ -38,14 +38,14 @@
 
 ## 📋 Backlog
 
-### Coding Agent MVP
+### Coding Agent MVP ✅
 - [x] Read-only Git tools: `git_status`, `git_diff`
-- [ ] Internal `write_file` tool with size limits, diff/hash reporting, and tests
-- [ ] `apply_patch` tool with path guard and patch validation
-- [ ] Allowlisted `run_command` for validation commands detected by `/init`
-- [ ] Executor loop: plan, inspect, edit, validate, correct, final report
-- [ ] Live LSP symbol bridge into Context Engine
-- [ ] MCP tool exposure, read-only first, write tools behind explicit consent
+- [x] Internal `write_file` tool with size limits, diff/hash reporting, and tests
+- [x] `apply_patch` tool with path guard and patch validation
+- [x] Allowlisted `run_command` for validation commands detected by `/init`
+- [x] Executor loop: plan, inspect, edit, validate, correct, final report
+- [x] Live LSP symbol bridge into Context Engine
+- [x] MCP tool exposure, read-only first (tools.list + tools.execute)
 
 ### Product/Packaging
 - [ ] Windows installer (.msi)

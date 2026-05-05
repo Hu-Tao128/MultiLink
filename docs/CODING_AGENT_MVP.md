@@ -1,6 +1,8 @@
 # MultiLink Coding Agent MVP
 
-Estado: diseño operativo para empezar implementación real
+Estado: ✅ COMPLETADO — 2026-05-04
+
+> Las 6 tareas del MVP están implementadas. Ver `docs/roadmap.md` para el estado consolidado.
 
 ## Objetivo
 
@@ -41,15 +43,16 @@ MultiLink ya tiene piezas útiles, pero todavía no llega al estándar anterior.
 - `core/src/lan_agent.rs` y `core/src/mcp_adapter.rs`: transporte LAN y adaptador MCP delgado para `chat.dispatch`/`chat.ping`.
 - `core/src/skills.rs`: carga de skills globales/proyecto desde TOML.
 
-### Limitaciones bloqueantes
+### Limitaciones (MVP resueltas, persisten otras)
 
-- No existe herramienta de edición estructurada tipo patch/diff. `/write-file` sobrescribe archivos completos y debe tratarse como operación explícita, no como edición autónoma segura.
-- No hay shell tool general. Esto es correcto por seguridad, pero falta una herramienta de comandos allowlisted para validaciones (`cargo test`, `npm test`, etc.).
-- El planner actual es heurístico y limitado. Clasifica búsqueda/lectura/sistema, pero no construye planes robustos para bugs, refactors o features.
-- No hay bucle formal de "editar -> validar -> corregir".
-- El LSP todavía no está conectado como fuente viva del Context Engine en runtime principal.
-- MCP/LAN transporta chat básico, no una superficie completa de herramientas de código.
+- [x] ~~No existe herramienta de edición estructurada tipo patch/diff.~~ → `write_file` + `apply_patch` implementadas.
+- [x] ~~Falta herramienta de comandos allowlisted.~~ → `run_command` implementado con 23 comandos built-in + detección vía `/init`.
+- [x] ~~No hay bucle formal de "editar -> validar -> corregir".~~ → Executor auto-inserta `run_command` tras write/edit.
+- [x] ~~LSP no conectado al Context Engine.~~ → `RealContextBridge` conecta LSP con `ContextEngineV2` + `ChunkExtractor`.
+- [x] ~~MCP solo chat básico.~~ → `tools.list` y `tools.execute` expuestos via MCP/LAN.
+- El planner sigue siendo heurístico; no construye planes robustos para bugs/refactors complejos.
 - Las skills solo seleccionan manifiestos; no ejecutan workflows con pasos verificables.
+- Falta rollback explícito para write_file/apply_patch.
 
 ## Contrato de herramientas v1
 
@@ -64,9 +67,9 @@ Las herramientas deben ser pequeñas, auditables y sin efectos colaterales ocult
 | `open_file` | lectura | implementada | Lee archivo con límites, chunking y búsqueda interna opcional. |
 | `search_and_open` | lectura | implementada | Combina retrieval y apertura. |
 | `system_version` | lectura sistema | implementada | Detecta versiones de herramientas comunes. |
-| `write_file` | escritura | parcial vía `/write-file` | Solo escritura explícita de archivo relativo. Falta integración como tool con diff. |
-| `apply_patch` | escritura | pendiente | Aplica cambios por diff, con validación de path y resumen previo/posterior. |
-| `run_command` | ejecución | pendiente | Ejecuta comandos allowlisted detectados por `/init`; sin shell arbitrario. |
+| `write_file` | escritura | implementada | Tool interna con límite de 1MB, path guard y diff summary (líneas antes/después). |
+| `apply_patch` | escritura | implementada | Aplica cambios por diff unificado, con validación de hunk, path guard y resumen. |
+| `run_command` | ejecución | implementada | Ejecuta comandos allowlist (built-in + detectados por `/init` en MULTILINK.md); sin shell arbitrario. |
 | `git_status`/`git_diff` | lectura | implementada | Reporta cambios sin modificar el repo. |
 
 ## Guardrails obligatorios

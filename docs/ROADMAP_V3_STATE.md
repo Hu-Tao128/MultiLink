@@ -24,21 +24,21 @@ This file is the single source of truth for roadmap status.
 | Phase 8.5 LAN Agent + MCP adapter | complete |
 | Phase 9 Orchestrator + Skills | complete |
 | Phase 10 Benchmark/release gate | complete |
-| Coding Agent MVP | in_progress |
+| Coding Agent MVP | complete |
 | LSP Phase 6 (language extensibility) | in_progress |
 | LSP Phase 7 (manual QA/perf) | in_progress |
 
 ## Immediate Focus
 
 1. Close doc/code consistency gaps across Context Engine and LSP plans.
-2. Implement coding-agent MVP tool gaps from `docs/CODING_AGENT_MVP.md`.
+2. ✅ Coding-agent MVP completed (all 6 tasks).
 3. Finish v2plus Step 6 A/B validation and promotion criteria.
 4. Close LSP manual validation and profiling tasks.
 
 ## What is behind
 
 - Context Engine v2plus Step 6: pending validation evidence.
-- Coding Agent MVP: no structured patch tool, no allowlisted command runner, no full edit/validate/correct loop.
+- Coding Agent MVP: ✅ all 6 tasks implemented (write_file, apply_patch, run_command, executor loop, LSP bridge, MCP tools).
 - LSP Phase 6: Prisma/Dart/Bash pending by tree-sitter version compatibility.
 - LSP Phase 7: manual validation and profiling pending.
 

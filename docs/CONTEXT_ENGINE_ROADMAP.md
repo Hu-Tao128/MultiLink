@@ -53,7 +53,7 @@
 - [x] Implementar `symbol_index.rs` para el workspace activo.
 - [x] Implementar `hover`: devolver código + docstring del símbolo bajo el cursor.
 - [x] Implementar `publishDiagnostics`: errores semánticos desde el AST.
-- [ ] **Integración:** conectar LSP con `Context Engine` real (estado actual: bridge `NoOp`).
+- [x] **Integración:** conectar LSP con `Context Engine` real via `RealContextBridge` (2026-05-04).
 - [ ] Validación manual en VSCode con `languageClient`.
 - [ ] Validación manual en Neovim con `nvim-lspconfig`.
 
@@ -61,7 +61,7 @@
 
 - [x] `document_cache`: mantener texto actual de archivos abiertos en memoria.
 - [x] Re-parsear con tree-sitter en cada `didChange` (parsing incremental).
-- [ ] Exponer `symbol_table` al context engine para queries en tiempo real.
+- [x] `symbol_table` expuesto al context engine via `RealContextBridge` (2026-05-04).
 - [x] Debounce 300ms en `didChange` antes de re-indexar.
 
 ## Fase 6 — QA y Validación A/B (v2plus vs v1)
@@ -112,6 +112,6 @@
 - [x] Implementar `symbol_index.rs` para el workspace activo.
 - [x] Implementar `hover`: devolver código + docstring del símbolo bajo el cursor.
 - [x] Implementar `publishDiagnostics`: errores semánticos desde el AST.
-- [ ] **Integración:** conectar LSP con `Context Engine` real (estado actual: bridge `NoOp`).
+- [x] **Integración:** conectar LSP con `Context Engine` real via `RealContextBridge` (2026-05-04).
 - [ ] Validación manual en VSCode con `languageClient`.
 - [ ] Validación manual en Neovim con `nvim-lspconfig`.
