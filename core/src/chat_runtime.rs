@@ -162,6 +162,10 @@ impl ChatRuntime {
         }
     }
 
+    pub fn tool_executor(&self) -> Option<Arc<ToolExecutor>> {
+        Some(self.tool_executor.clone())
+    }
+
     pub async fn start_lan_agent(
         &self,
         addr: &str,
@@ -170,8 +174,15 @@ impl ChatRuntime {
         allow_remote: bool,
     ) -> Result<LanAgentServer, std::io::Error> {
         let runtime = Arc::new(self.clone());
-        let server =
-            LanAgentServer::bind(addr, runtime, shared_secret, allowed_ips, allow_remote).await?;
+        let server = LanAgentServer::bind(
+            addr,
+            runtime,
+            shared_secret,
+            allowed_ips,
+            allow_remote,
+        )
+        .await?
+        .with_tool_executor(self.tool_executor.clone());
         Ok(server)
     }
 

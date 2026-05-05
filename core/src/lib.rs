@@ -41,7 +41,7 @@ pub use intent_budget::{
 };
 pub use lan_agent::{
     decode_messagepack, encode_messagepack, ip_allowed_for_test, shared_secret_matches,
-    sign_payload, verify_hmac, LanAgentServer, LanEnvelope, LanPayload,
+    sign_payload, verify_hmac, LanAgentServer, LanEnvelope, LanPayload, ToolDescriptor,
 };
 pub use mcp_adapter::{
     McpContent, McpError, McpResult, McpToolCall, McpToolResponse, ThinMcpAdapter,

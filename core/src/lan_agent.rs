@@ -8,6 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 
 use crate::chat_runtime::ChatRuntime;
+use crate::tools::ToolExecutor;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -65,9 +66,31 @@ pub enum LanPayload {
         #[serde(default)]
         error: Option<String>,
     },
+    ToolList,
+    ToolListResponse {
+        tools: Vec<ToolDescriptor>,
+    },
+    ToolExecute {
+        tool_name: String,
+        arguments: serde_json::Value,
+    },
+    ToolExecuteResponse {
+        success: bool,
+        #[serde(default)]
+        output: Option<serde_json::Value>,
+        #[serde(default)]
+        error: Option<String>,
+    },
     Error {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDescriptor {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
 }
 
 pub fn encode_messagepack<T: Serialize>(value: &T) -> Result<Vec<u8>, rmp_serde::encode::Error> {
@@ -134,6 +157,7 @@ pub fn sign_payload(secret: &str, payload_bytes: &[u8]) -> Result<String, &'stat
 pub struct LanAgentServer {
     listener: TcpListener,
     runtime: Arc<ChatRuntime>,
+    tool_executor: Option<Arc<ToolExecutor>>,
     shared_secret: String,
     allowed_ips: Vec<IpAddr>,
     allow_remote: bool,
@@ -158,11 +182,17 @@ impl LanAgentServer {
         Ok(Self {
             listener,
             runtime,
+            tool_executor: None,
             shared_secret,
             allowed_ips: parsed_ips,
             allow_remote,
             shutdown: Arc::new(RwLock::new(false)),
         })
+    }
+
+    pub fn with_tool_executor(mut self, executor: Arc<ToolExecutor>) -> Self {
+        self.tool_executor = Some(executor);
+        self
     }
 
     pub async fn run(&self) -> Result<(), std::io::Error> {
@@ -183,14 +213,15 @@ impl LanAgentServer {
                                 continue;
                             }
 
-                            let runtime = self.runtime.clone();
-                            let secret = self.shared_secret.clone();
-                            let allow_remote = self.allow_remote;
-                            tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, runtime, secret, allow_remote).await {
-                                    eprintln!("LAN Agent connection error: {}", e);
-                                }
-                            });
+                    let runtime = self.runtime.clone();
+                    let secret = self.shared_secret.clone();
+                    let allow_remote = self.allow_remote;
+                    let tool_exec = self.tool_executor.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_connection(stream, runtime, tool_exec, secret, allow_remote).await {
+                            eprintln!("LAN Agent connection error: {}", e);
+                        }
+                    });
                         }
                         Err(e) => {
                             eprintln!("LAN Agent accept error: {}", e);
@@ -209,6 +240,7 @@ impl LanAgentServer {
     async fn handle_connection(
         mut stream: TcpStream,
         runtime: Arc<ChatRuntime>,
+        tool_executor: Option<Arc<ToolExecutor>>,
         shared_secret: String,
         _allow_remote: bool,
     ) -> Result<(), std::io::Error> {
@@ -295,7 +327,7 @@ impl LanAgentServer {
             return Ok(());
         }
 
-        let response = Self::process_request(request, &runtime, &shared_secret).await;
+        let response = Self::process_request(request, &runtime, tool_executor, &shared_secret).await;
         Self::write_response(&mut stream, &response).await?;
 
         Ok(())
@@ -304,6 +336,7 @@ impl LanAgentServer {
     async fn process_request(
         request: LanEnvelope,
         runtime: &Arc<ChatRuntime>,
+        tool_executor: Option<Arc<ToolExecutor>>,
         shared_secret: &str,
     ) -> LanEnvelope {
         if shared_secret.is_empty() {
@@ -340,8 +373,49 @@ impl LanAgentServer {
                     error: Some(e.to_string()),
                 },
             },
+            LanPayload::ToolList => {
+                let tools = tool_executor
+                    .as_ref()
+                    .map(|exec| exec.list_tools())
+                    .unwrap_or_default();
+                let descriptors: Vec<ToolDescriptor> = tools
+                    .into_iter()
+                    .map(|(name, description)| ToolDescriptor {
+                        name,
+                        description,
+                        input_schema: serde_json::Value::Null,
+                    })
+                    .collect();
+                LanPayload::ToolListResponse {
+                    tools: descriptors,
+                }
+            }
+            LanPayload::ToolExecute {
+                tool_name,
+                arguments,
+            } => {
+                let input: crate::tools::ToolInput =
+                    serde_json::from_value(arguments).unwrap_or_default();
+                match tool_executor.as_ref() {
+                    Some(exec) => {
+                        let result = exec.execute(&tool_name, input).await;
+                        LanPayload::ToolExecuteResponse {
+                            success: result.success,
+                            output: Some(result.output),
+                            error: result.error,
+                        }
+                    }
+                    None => LanPayload::ToolExecuteResponse {
+                        success: false,
+                        output: None,
+                        error: Some("tool executor not available".to_string()),
+                    },
+                }
+            }
             LanPayload::Error { message } => LanPayload::Error { message },
-            LanPayload::DispatchResponse { .. } => LanPayload::Error {
+            LanPayload::DispatchResponse { .. }
+            | LanPayload::ToolListResponse { .. }
+            | LanPayload::ToolExecuteResponse { .. } => LanPayload::Error {
                 message: "unexpected response payload in request".to_string(),
             },
         };
