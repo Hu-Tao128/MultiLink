@@ -11,16 +11,23 @@ pub fn normalize_path(base: &Path, relative: &str) -> Result<PathBuf, String> {
         return Err("Absolute paths are not allowed".to_string());
     }
 
+    if relative_path.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err("Path escape detected".to_string());
+    }
+
     let clean = relative_path
         .components()
         .filter(|c| !matches!(c, std::path::Component::CurDir))
         .collect::<PathBuf>();
 
     let full_path = base.join(&clean);
-
-    if !full_path.starts_with(base) {
-        return Err("Path escape detected".to_string());
-    }
 
     Ok(full_path)
 }

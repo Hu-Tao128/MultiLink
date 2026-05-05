@@ -4,9 +4,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod command;
 pub mod filesystem;
+pub mod git;
 pub mod hybrid;
+pub mod patch;
 pub mod system;
+pub mod write_file;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ToolInput {
@@ -134,7 +138,12 @@ pub fn create_default_registry_with_engine(
     registry.register(Arc::new(filesystem::FsLs));
     registry.register(Arc::new(filesystem::FsCat));
     registry.register(Arc::new(filesystem::FsGrep));
+    registry.register(Arc::new(git::GitStatus));
+    registry.register(Arc::new(git::GitDiff));
     registry.register(Arc::new(system::SystemVersion));
+    registry.register(Arc::new(write_file::WriteFile));
+    registry.register(Arc::new(patch::ApplyPatch));
+    registry.register(Arc::new(command::RunCommand));
     registry
 }
 

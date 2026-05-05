@@ -179,6 +179,38 @@ impl Executor {
                         metadata,
                     });
 
+                    // Auto-validate after write/edit operations
+                    if !tool_failed && (name == "write_file" || name == "apply_patch") {
+                        let val_cmds = load_validation_commands_from_multilink(
+                            &self.tool_executor,
+                        )
+                        .await;
+                        if let Some(first_cmd) = val_cmds.first().cloned() {
+                            eprintln!(
+                                "[executor] auto-validate after {}: running '{}'",
+                                name, first_cmd
+                            );
+                            steps.insert(
+                                0,
+                                Step::ToolCall {
+                                    name: "run_command".to_string(),
+                                    input: crate::tools::ToolInput {
+                                        path: None,
+                                        pattern: None,
+                                        args: Some(
+                                            vec![(
+                                                "command".to_string(),
+                                                serde_json::Value::String(first_cmd),
+                                            )]
+                                            .into_iter()
+                                            .collect(),
+                                        ),
+                                    },
+                                },
+                            );
+                        }
+                    }
+
                     if tool_failed {
                         eprintln!(
                             "[planner] tool_failure intent={:?} selected_tool={} fallback=context_engine",
@@ -498,7 +530,10 @@ fn build_tool_context_message(context: &[crate::orchestrator::planner::StepResul
             "You have access to the following real tool results. Treat them as ground truth.\n\n{}",
             blocks.join("\n\n")
         );
-        eprintln!("[executor] TOOL_CONTEXT_PREVIEW: {}", &result[..result.len().min(500)]);
+        eprintln!(
+            "[executor] TOOL_CONTEXT_PREVIEW: {}",
+            &result[..result.len().min(500)]
+        );
         result
     }
 }
@@ -558,6 +593,25 @@ fn render_open_file_result(output: &serde_json::Value) -> String {
     }
 
     format!("Path: {}\n\n{}", path, limit_tool_text(content))
+}
+
+async fn load_validation_commands_from_multilink(
+    _tool_executor: &Arc<ToolExecutor>,
+) -> Vec<String> {
+    // Try loading MULTILINK.md validation commands via the command tool's built-in
+    // parsing logic, but executed from the project root.
+    let project_root = std::env::current_dir().unwrap_or_default();
+    let multilink_path = project_root.join("MULTILINK.md");
+    if !multilink_path.exists() {
+        return Vec::new();
+    }
+    let content = std::fs::read_to_string(multilink_path).ok();
+    let Some(content) = content else {
+        return Vec::new();
+    };
+
+    // Re-use the same extraction logic from the command tool
+    crate::tools::command::extract_json_block_commands(&content).unwrap_or_default()
 }
 
 fn limit_tool_text(text: &str) -> String {

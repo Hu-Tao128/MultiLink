@@ -262,6 +262,11 @@ pub fn is_raw_file_request(prompt: &str) -> bool {
 pub enum QueryIntent {
     Search,
     ReadFile,
+    WriteFile,
+    ApplyPatch,
+    RunCommand,
+    GitStatus,
+    GitDiff,
     SystemInfo,
     General,
 }
@@ -283,13 +288,40 @@ pub fn classify_intent(prompt: &str) -> QueryIntent {
     let search_keywords = ["busca", "find", "where is", "donde está", "donde esta"];
     let system_keywords = ["version", "node", "java", "python"];
 
-    let intent = if has_file_path_pattern(prompt) || read_keywords.iter().any(|k| lower.contains(k))
+    let intent = if lower.contains("git diff") || lower.contains("diff git") {
+        QueryIntent::GitDiff
+    } else if lower.contains("git status")
+        || lower.contains("estado git")
+        || lower.contains("estado de git")
     {
+        QueryIntent::GitStatus
+    } else if lower.contains("/write-file")
+        || lower.contains("write_file")
+        || (lower.contains("crea archivo") || lower.contains("create file")
+            || lower.contains("genera archivo") || lower.contains("write file")
+            || lower.contains("escribe archivo"))
+            && has_file_path_pattern(prompt)
+    {
+        QueryIntent::WriteFile
+    } else if lower.contains("apply_patch") || lower.contains("apply patch")
+        || lower.contains("patch")
+            && (lower.contains("modifica") || lower.contains("modify")
+                || lower.contains("cambia") || lower.contains("change")
+                || lower.contains("edit") || lower.contains("edita"))
+    {
+        QueryIntent::ApplyPatch
+    } else if has_file_path_pattern(prompt) || read_keywords.iter().any(|k| lower.contains(k)) {
         QueryIntent::ReadFile
     } else if search_keywords.iter().any(|k| lower.contains(k)) {
         QueryIntent::Search
     } else if system_keywords.iter().any(|k| lower.contains(k)) {
         QueryIntent::SystemInfo
+    } else if lower.contains("run_command") || lower.contains("run command")
+        || lower.contains("validar") || lower.contains("validate")
+        || lower.contains("ejecuta test") || lower.contains("run test")
+        || lower.contains("cargo test") || lower.contains("npm test")
+    {
+        QueryIntent::RunCommand
     } else {
         QueryIntent::General
     };
@@ -324,6 +356,53 @@ fn select_tool_for_intent(intent: &QueryIntent, prompt: &str) -> Option<(String,
                 },
             )
         }),
+        QueryIntent::WriteFile => extract_file_path(prompt).map(|path| {
+            (
+                "write_file".to_string(),
+                ToolInput {
+                    path: Some(path),
+                    pattern: None,
+                    args: None,
+                },
+            )
+        }),
+        QueryIntent::ApplyPatch => extract_file_path(prompt).map(|path| {
+            (
+                "apply_patch".to_string(),
+                ToolInput {
+                    path: Some(path),
+                    pattern: None,
+                    args: None,
+                },
+            )
+        }),
+        QueryIntent::RunCommand => Some((
+            "run_command".to_string(),
+            ToolInput {
+                path: None,
+                pattern: None,
+                args: Some(HashMap::from([(
+                    "command".to_string(),
+                    serde_json::Value::String(extract_command_name(prompt)),
+                )])),
+            },
+        )),
+        QueryIntent::GitStatus => Some((
+            "git_status".to_string(),
+            ToolInput {
+                path: None,
+                pattern: None,
+                args: None,
+            },
+        )),
+        QueryIntent::GitDiff => Some((
+            "git_diff".to_string(),
+            ToolInput {
+                path: extract_file_path(prompt),
+                pattern: None,
+                args: None,
+            },
+        )),
         QueryIntent::SystemInfo => Some((
             "system_version".to_string(),
             ToolInput {
@@ -500,7 +579,11 @@ impl MinimalPlanner {
 
         if matches!(
             intent,
-            QueryIntent::Search | QueryIntent::ReadFile | QueryIntent::SystemInfo
+            QueryIntent::Search
+                | QueryIntent::ReadFile
+                | QueryIntent::GitStatus
+                | QueryIntent::GitDiff
+                | QueryIntent::SystemInfo
         ) {
             if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, input) {
                 let tool_desc = tool_name.clone();
@@ -675,6 +758,34 @@ fn extract_requested_system_tools(prompt: &str) -> Vec<String> {
     tools
 }
 
+fn extract_command_name(prompt: &str) -> String {
+    let lower = prompt.to_lowercase();
+    let known = [
+        "cargo test",
+        "cargo build",
+        "cargo clippy -- -D warnings",
+        "cargo fmt --all",
+        "cargo check",
+        "npm test",
+        "npm run build",
+        "npm run lint",
+        "npm install",
+        "pytest",
+        "make",
+        "flutter test",
+        "flutter analyze",
+        "go test",
+        "go build",
+        "python -m pytest",
+    ];
+    for cmd in &known {
+        if lower.contains(cmd) {
+            return cmd.to_string();
+        }
+    }
+    "cargo test".to_string()
+}
+
 pub fn infer_capabilities(prompt: &str) -> RequiredCapabilities {
     let lower = prompt.to_lowercase();
 
@@ -830,6 +941,11 @@ mod tests {
             QueryIntent::Search
         );
         assert_eq!(classify_intent("python version"), QueryIntent::SystemInfo);
+        assert_eq!(classify_intent("git status"), QueryIntent::GitStatus);
+        assert_eq!(
+            classify_intent("git diff core/src/lib.rs"),
+            QueryIntent::GitDiff
+        );
     }
 
     #[test]
@@ -854,6 +970,24 @@ mod tests {
         match &plan.steps[0] {
             Step::ToolCall { name, .. } => assert_eq!(name, "search_code"),
             other => panic!("expected tool call, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn multi_step_plan_uses_git_tools_for_git_queries() {
+        let status_plan = MinimalPlanner::plan_multi_step("git status");
+        match &status_plan.steps[0] {
+            Step::ToolCall { name, .. } => assert_eq!(name, "git_status"),
+            other => panic!("expected git_status tool call, got {:?}", other),
+        }
+
+        let diff_plan = MinimalPlanner::plan_multi_step("git diff core/src/lib.rs");
+        match &diff_plan.steps[0] {
+            Step::ToolCall { name, input } => {
+                assert_eq!(name, "git_diff");
+                assert_eq!(input.path.as_deref(), Some("core/src/lib.rs"));
+            }
+            other => panic!("expected git_diff tool call, got {:?}", other),
         }
     }
 
