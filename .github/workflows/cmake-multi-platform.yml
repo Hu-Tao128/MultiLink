@@ -49,7 +49,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-base-dev qt6-declarative-dev cmake build-essential libgl1-mesa-dev libxkbcommon-dev
+          sudo apt-get install -y \
+            qt6-base-dev qt6-declarative-dev \
+            qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts \
+            cmake build-essential libgl1-mesa-dev libxkbcommon-dev
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -87,6 +90,10 @@ jobs:
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -G "Visual Studio 17 2022"
           -S gui
+
+      - name: Clean stale build artifacts (macOS)
+        if: runner.os == 'macOS'
+        run: rm -rf ${{ steps.strings.outputs.build-output-dir }}/multilink
 
       - name: Build
         run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
