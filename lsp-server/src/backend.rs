@@ -8,6 +8,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
 use crate::ast_cache::{AstCache, SourceLanguage};
+use crate::bridge::BridgeState;
 use crate::document_cache::DocumentCache;
 use crate::semantic_analysis::{SemanticAnalyzer, WorkspaceSymbolIndex};
 
@@ -19,6 +20,7 @@ pub struct Backend {
     ast_cache: Arc<AstCache>,
     symbol_index: Arc<WorkspaceSymbolIndex>,
     pending_parse: Arc<Mutex<HashMap<String, bool>>>,
+    bridge: Option<Arc<BridgeState>>,
 }
 
 impl Backend {
@@ -29,6 +31,18 @@ impl Backend {
             ast_cache: Arc::new(AstCache::new()),
             symbol_index: Arc::new(WorkspaceSymbolIndex::new()),
             pending_parse: Arc::new(Mutex::new(HashMap::new())),
+            bridge: None,
+        }
+    }
+
+    pub fn with_bridge(client: Client, bridge: Arc<BridgeState>) -> Self {
+        Self {
+            client,
+            documents: Arc::new(Mutex::new(DocumentCache::new())),
+            ast_cache: Arc::new(AstCache::new()),
+            symbol_index: Arc::new(WorkspaceSymbolIndex::new()),
+            pending_parse: Arc::new(Mutex::new(HashMap::new())),
+            bridge: Some(bridge),
         }
     }
 
@@ -95,6 +109,13 @@ impl LanguageServer for Backend {
             docs.put(uri.clone(), content.clone());
         }
 
+        if let Some(ref bridge) = self.bridge {
+            let lang_name = language.display_name().to_lowercase();
+            bridge
+                .index_document(uri.as_str(), &content, &lang_name)
+                .await;
+        }
+
         if language != SourceLanguage::Unknown {
             self.ast_cache.parse(uri.as_str(), &content, language);
             self.analyze_and_update_index(&uri, &content).await;
@@ -130,6 +151,14 @@ impl LanguageServer for Backend {
             docs.put(uri.clone(), current.clone());
             current
         };
+
+        if let Some(ref bridge) = self.bridge {
+            let language = Self::get_language(&uri);
+            let lang_name = language.display_name().to_lowercase();
+            bridge
+                .index_document(uri.as_str(), &content, &lang_name)
+                .await;
+        }
 
         let language = Self::get_language(&uri);
         if language != SourceLanguage::Unknown {
@@ -193,15 +222,23 @@ impl LanguageServer for Backend {
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        
+
         let content = {
             let docs = self.documents.lock().await;
             docs.get(&uri)
         };
 
-        if let Some(content) = content {
-            self.analyze_and_update_index(&uri, &content).await;
-            self.run_diagnostics(&uri, &content).await;
+        if let Some(ref content) = content {
+            if let Some(ref bridge) = self.bridge {
+                let language = Self::get_language(&uri);
+                let lang_name = language.display_name().to_lowercase();
+                bridge
+                    .index_document(uri.as_str(), content, &lang_name)
+                    .await;
+            }
+
+            self.analyze_and_update_index(&uri, content).await;
+            self.run_diagnostics(&uri, content).await;
         }
 
         self.client
@@ -237,6 +274,22 @@ impl LanguageServer for Backend {
                 if !word.is_empty() {
                     let mut symbol_info = format!("**{}** - Symbol from MultiLink Context", word);
 
+                    if let Some(ref bridge) = self.bridge {
+                        let ctx_chunks = bridge.get_context_for_symbol(&word).await;
+                        if !ctx_chunks.is_empty() {
+                            let ctx_part: Vec<String> = ctx_chunks
+                                .iter()
+                                .take(3)
+                                .map(|c| {
+                                    format!("`{}:{}` — {}",
+                                        c.file, c.start_line, c.content)
+                                })
+                                .collect();
+                            symbol_info = format!("**{}**\n\nContext from MultiLink:\n{}\n",
+                                word, ctx_part.join("\n"));
+                        }
+                    }
+
                     if let Some(tree) = self.ast_cache.get(uri.as_str()) {
                         if let Some(symbol_detail) = find_symbol_in_tree(&tree.root_node(), &content, &word, line + 1) {
                             symbol_info = symbol_detail;
@@ -245,10 +298,10 @@ impl LanguageServer for Backend {
 
                     if let Some(symbol) = self.symbol_index.find_symbol(&word, uri.as_str(), line + 1) {
                         if let Some(doc) = &symbol.docstring {
-                            symbol_info = format!("**{}**\n\n{}\n\nLines: {}-{}", 
+                            symbol_info = format!("**{}**\n\n{}\n\nLines: {}-{}",
                                 symbol.name, doc, symbol.start_line, symbol.end_line);
                         } else {
-                            symbol_info = format!("**{}** ({:?})\nLines: {}-{}", 
+                            symbol_info = format!("**{}** ({:?})\nLines: {}-{}",
                                 symbol.name, symbol.kind, symbol.start_line, symbol.end_line);
                         }
                     }
