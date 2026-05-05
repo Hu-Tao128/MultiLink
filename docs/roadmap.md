@@ -33,9 +33,21 @@
 - [x] LSP Server (tower-lsp with tree-sitter)
 - [x] Observability metrics (context_latency_ms, hit_rate, truncation_rate)
 - [x] Benchmarks (lexical search, indexing)
+- [x] Early orchestrator/tool scaffolding
+- [x] Project `/init`, `/doctor`, and explicit `/write-file`
 
 ## 📋 Backlog
 
+### Coding Agent MVP
+- [x] Read-only Git tools: `git_status`, `git_diff`
+- [ ] Internal `write_file` tool with size limits, diff/hash reporting, and tests
+- [ ] `apply_patch` tool with path guard and patch validation
+- [ ] Allowlisted `run_command` for validation commands detected by `/init`
+- [ ] Executor loop: plan, inspect, edit, validate, correct, final report
+- [ ] Live LSP symbol bridge into Context Engine
+- [ ] MCP tool exposure, read-only first, write tools behind explicit consent
+
+### Product/Packaging
 - [ ] Windows installer (.msi)
 - [ ] macOS installer (.dmg)
 - [ ] Linux packaging (AppImage, .deb)

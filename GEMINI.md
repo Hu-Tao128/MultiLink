@@ -2,6 +2,8 @@
 
 MultiLink is a cross-platform desktop application designed for interacting with Large Language Models (LLMs). It features a native Qt/QML graphical user interface (GUI) and a robust, reusable Rust core. The architecture prioritizes performance, stability, and clear separation of concerns.
 
+Product direction: MultiLink is being turned into a practical local-first coding agent, not only a chat UI. Treat `docs/CODING_AGENT_MVP.md` as the source of truth for coding-agent behavior, current tool inventory, missing capabilities, and acceptance gates.
+
 **Key Technologies:**
 *   **Rust:** For the high-performance, memory-safe backend core.
 *   **Qt/QML:** For the cross-platform, responsive desktop user interface.
@@ -60,6 +62,15 @@ After compilation, the executable will be located in the `build/` directory (or 
 *   **Rust Core as Backbone:** All core logic for streaming, memory, and context handling resides in Rust.
 *   **Declarative QML:** UI layers focus solely on rendering state and dispatching user intent, without directly handling networking or disk operations.
 *   **Thin Qt Shim:** The C++ adapter logic is minimized, focusing exclusively on data adaptation between Rust FFI and Qt properties/signals.
+*   **Agent Work Must Be Verifiable:** Coding-agent features must use deterministic tools, path guards, explicit edits, and validation commands instead of relying on model text alone.
+
+### Coding Agent Boundaries
+
+*   Read-only tools currently include `fs_ls`, `fs_cat`, `fs_grep`, `search_code`, `open_file`, `search_and_open`, and `system_version`.
+*   Write support is currently explicit and limited through `/write-file`; structured patch editing is still pending.
+*   Do not document a feature as complete unless there is code and a test or manual validation evidence.
+*   Safe command execution must be allowlisted; avoid adding a general shell tool as the default path.
+*   Keep business logic in `core/`; QML and C++ only expose user intent and render results.
 
 ### Running Tests
 

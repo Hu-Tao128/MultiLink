@@ -566,7 +566,7 @@ fn context_files_for_type(project_type: ProjectType, chunks: &[ProjectChunk]) ->
                 .iter()
                 .filter(|c| c.path.matches('/').count() == 0)
                 .collect();
-            root_files.sort_by(|a, b| b.content.len().cmp(&a.content.len()));
+            root_files.sort_by_key(|file| std::cmp::Reverse(file.content.len()));
             root_files
                 .into_iter()
                 .take(3)

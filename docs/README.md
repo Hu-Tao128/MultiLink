@@ -5,12 +5,14 @@ This directory serves as the central repository for comprehensive documentation 
 ## 🗄️ Documentation Files
 
 *   **`architecture.md`**: Delve into the core architectural design of MultiLink. This document details the layered structure, component interactions, and includes flow diagrams to visually explain how different parts of the application communicate and operate.
+*   **`CODING_AGENT_MVP.md`**: Canonical operational plan for turning MultiLink into a real coding agent, including current tool inventory, gaps, guardrails, and acceptance gates.
 *   **`providers.md`**: Provides an in-depth look at the LLM provider interface and the expected behavior of provider implementations. It covers the contracts, design principles, and guidelines for integrating new Large Language Model services.
 *   **`auth.md`**: Explains MultiLink's authentication and security model, specifically focusing on the OAuth flow, token management, and strategies for securing user credentials and sensitive data.
 *   **`roadmap.md`**: Outlines the project's implementation timeline, key milestones, and future development plans, giving an overview of where MultiLink is headed.
 *   **`network-troubleshooting.md`**: Practical guide for remote Ollama connectivity (LAN/Tailscale), including bind mode, UFW rules, and verification commands.
 *   **`CONTEXT_AB_VALIDATION.md`**: Reproducible A/B protocol for validating context engine quality/performance (`v2` vs `v2plus`) with prompt suite and promotion/rollback criteria.
 *   **`CONTEXT_AB_RESULTS_TEMPLATE.md`**: Template for recording A/B metrics, reasons, and final release decision.
+*   **`LSP_ROADMAP.md`**: Tracks the experimental semantic LSP server, including remaining editor validation and live Context Engine bridge work.
 
 ## 🤝 Contribution Guidelines
 

@@ -7,8 +7,12 @@ This directory houses the core Rust library crate, which encapsulates all the es
 *   **`Cargo.toml`**: Defines crate dependencies, metadata, and build configurations.
 *   **`src/`**: Contains the main source code for the core logic, including:
     *   **`chat_runtime.rs`**: Manages the lifecycle of chat sessions, message processing, and interaction with providers.
+    *   **`commands/`**: Implements explicit slash commands such as `/init`, `/doctor`, and `/write-file`.
     *   **`config.rs`**: Handles application configuration loading, saving, and validation.
+    *   **`context_engine/`**: Owns project indexing, lexical/hybrid retrieval, semantic chunking, and optional embeddings.
     *   **`context_retrieval.rs`**: Implements logic for building and managing LLM context, including project-specific context injection.
+    *   **`orchestrator/`**: Coordinates planner/executor flows for tool-first coding-agent behavior.
+    *   **`tools/`**: Deterministic internal tools for reading/searching the workspace and inspecting system versions.
     *   **`lib.rs`**: The main library entry point, orchestrating various core components.
     *   **`router.rs`**: Directs requests to the appropriate LLM provider based on configuration and availability.
     *   **`model_profile.rs`**: Builds model-aware budgets from provider metadata (parameter count, context window, etc.).
@@ -46,6 +50,7 @@ This crate focuses solely on backend logic. UI concerns should remain entirely o
 *   **Accurate Health Signaling**: Ensure that provider health reporting accurately distinguishes between connection failures and prompt/content-specific errors.
 *   **Robust Streaming**: Maintain robust and reliable streaming under various network conditions, including partial frames and long-running responses from providers.
 *   **Model-Aware Context**: Use `/api/show` metadata to tune context budgets for small/medium/large models.
+*   **Coding-Agent MVP**: Turn the existing context, tools, commands, skills, and LSP pieces into a verifiable edit/validate loop. The canonical scope is `docs/CODING_AGENT_MVP.md`.
 
 ## 📝 Pull Request Guidance
 
@@ -53,3 +58,4 @@ When contributing to the `core` crate:
 
 *   **Test Coverage**: Always add new tests or update existing ones when modifying runtime behavior or provider interactions.
 *   **Separation of Concerns**: Ensure that asynchronous operations and persistence logic remain within the `core` crate, and are not introduced into the GUI layer.
+*   **Agent Safety**: Any new tool that writes files or executes commands must include path/allowlist guard tests.

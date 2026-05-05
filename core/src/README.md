@@ -9,7 +9,11 @@ This directory contains the primary Rust source code for the MultiLink core libr
 *   **`router.rs`**: Responsible for dynamically selecting and routing requests to the appropriate Large Language Model provider based on application configuration and provider availability. It also manages fallback strategies.
 *   **`session.rs`**: Defines the data structures and logic for managing individual chat sessions, including message history, metadata, and state transitions.
 *   **`config.rs`**: Provides the application's configuration model, handling default values, environment variable overrides, and deserialization/serialization of settings.
+*   **`commands/`**: Parses and executes explicit slash commands, including project initialization, diagnostics, and guarded file writing.
+*   **`context_engine/`**: Implements project indexing, semantic chunking, lexical/hybrid retrieval, optional embeddings, and context metrics.
 *   **`context_retrieval.rs`**: Implements the logic for building and managing the context provided to LLMs. This includes token budgeting and intelligent injection of project-specific context per session.
+*   **`orchestrator/`**: Implements the coding-agent planner/executor loop that decides when to use tools, Context Engine, skills, and providers.
+*   **`tools/`**: Provides deterministic workspace/system tools used by the orchestrator.
 
 ## ⚙️ Runtime Design Principles
 
@@ -20,10 +24,14 @@ This directory contains the primary Rust source code for the MultiLink core libr
 ## 📂 Subdirectories
 
 *   **`providers/`**: Contains the trait definitions for LLM providers and their concrete implementations (e.g., Ollama, Gemini). This module abstracts interactions with different model APIs.
+*   **`commands/`**: Slash-command entry points for explicit user actions.
+*   **`context_engine/`**: Retrieval subsystem for project-aware answers and agent workflows.
+*   **`orchestrator/`**: Planning and execution layer for tool/LLM workflows.
+*   **`tools/`**: Internal tool registry and tool implementations.
 *   **`auth/`**: Manages authentication flows, including OAuth, and provides secure storage solutions for authentication tokens.
 *   **`model_manager/`**: Facilitates the discovery, registration, migration, and management of various LLM models available to the application.
 *   **`system/`**: Offers utilities for interacting with the operating system, such as resolving platform-specific data directories and environment checks.
 
 ## 🎯 Guiding Principle
 
-If a component's state is designed to change over time (e.g., chat messages, streaming responses, retry logic, persistent data), its implementation logically belongs within this `core/src/` directory.
+If a component's state is designed to change over time (e.g., chat messages, streaming responses, retry logic, persistent data), its implementation logically belongs within this `core/src/` directory. If a component lets the agent inspect, edit, or validate a project, it also belongs here rather than in QML or the C++ shim.

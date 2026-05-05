@@ -24,18 +24,21 @@ This file is the single source of truth for roadmap status.
 | Phase 8.5 LAN Agent + MCP adapter | complete |
 | Phase 9 Orchestrator + Skills | complete |
 | Phase 10 Benchmark/release gate | complete |
+| Coding Agent MVP | in_progress |
 | LSP Phase 6 (language extensibility) | in_progress |
 | LSP Phase 7 (manual QA/perf) | in_progress |
 
 ## Immediate Focus
 
 1. Close doc/code consistency gaps across Context Engine and LSP plans.
-2. Finish v2plus Step 6 A/B validation and promotion criteria.
-3. Close LSP manual validation and profiling tasks.
+2. Implement coding-agent MVP tool gaps from `docs/CODING_AGENT_MVP.md`.
+3. Finish v2plus Step 6 A/B validation and promotion criteria.
+4. Close LSP manual validation and profiling tasks.
 
 ## What is behind
 
 - Context Engine v2plus Step 6: pending validation evidence.
+- Coding Agent MVP: no structured patch tool, no allowlisted command runner, no full edit/validate/correct loop.
 - LSP Phase 6: Prisma/Dart/Bash pending by tree-sitter version compatibility.
 - LSP Phase 7: manual validation and profiling pending.
 
@@ -51,6 +54,13 @@ This file is the single source of truth for roadmap status.
 - Project skills: .multilink/skills/ (never shared)
 - Sharing: opt-in between active MultiLink users (not LAN nodes)
 - Format: TOML
+
+## Coding Agent Strategy
+
+- Tools first: inspect with deterministic tools before asking the provider to synthesize.
+- Read-only before write: search, read, git status, and git diff are the baseline before patching.
+- Writes require traceability: path guard, diff/hash, validation command, and final report.
+- Command execution is allowlisted from detected project metadata, never arbitrary shell by default.
 
 ## Guardrails
 

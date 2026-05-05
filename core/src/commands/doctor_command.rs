@@ -850,7 +850,7 @@ pub fn format_doctor_report(result: &DoctorResult) -> String {
         output.push_str("\n## 🚨 Issues (by Priority)\n\n");
 
         let mut sorted_issues = result.issues.clone();
-        sorted_issues.sort_by(|a, b| b.priority.cmp(&a.priority));
+        sorted_issues.sort_by_key(|issue| std::cmp::Reverse(issue.priority));
 
         for issue in sorted_issues {
             let icon = match issue.level {

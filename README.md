@@ -7,6 +7,8 @@
 
 MultiLink is a cross-platform desktop application for interacting with Large Language Models (LLMs). It uses a native Qt/QML GUI with a reusable Rust core focused on performance, stability, and clear architecture boundaries.
 
+The next product direction is a local-first coding agent. The current codebase already includes context retrieval, a small deterministic tool registry, project initialization diagnostics, skills, LAN/MCP adapters, and an experimental LSP. It is not yet a full autonomous coding agent because safe patch editing, allowlisted command execution, validation loops, and live LSP integration still need to be completed. See `docs/CODING_AGENT_MVP.md` for the canonical implementation contract.
+
 ## 🚀 Getting Started
 
 Follow these steps to get MultiLink up and running on your local machine.
@@ -65,6 +67,7 @@ The executable will be located in the `build/` directory (or `build/Release` on 
 *   **Remote Diagnostics**: If a server test fails, MultiLink surfaces actionable hints (bind/firewall/network) instead of generic errors.
 *   **Model-Aware Context Budgets**: Context budgets are adjusted dynamically using `/api/show` model metadata to improve small-model quality.
 *   **Execution Metrics**: Runtime emits structured generation metrics (tokens, latency, top-k, fallback usage).
+*   **Early Coding Agent Runtime**: Includes project context retrieval, read-only filesystem tools, `/init`, `/doctor`, explicit `/write-file`, skills discovery, and LAN/MCP scaffolding.
 
 ## ⚙️ Configuration (V2)
 
@@ -143,6 +146,10 @@ For a detailed design overview, refer to `docs/architecture.md`.
 .
 ├── core/             # Core Rust backend logic, LLM integrations, auth, config
 │   ├── src/
+│   │   ├── commands/     # Slash commands: /init, /doctor, /write-file
+│   │   ├── context_engine/# Retrieval, indexing, chunking, embeddings
+│   │   ├── orchestrator/ # Planner/executor for tool + LLM workflows
+│   │   ├── tools/        # Deterministic internal tools
 │   │   ├── providers/    # Integrations with various LLM providers (Ollama, Gemini, etc.)
 │   │   ├── auth/         # Authentication mechanisms (OAuth, token storage)
 │   │   ├── model_manager/# Local LLM model discovery and management
@@ -153,6 +160,7 @@ For a detailed design overview, refer to `docs/architecture.md`.
 │   ├── qml/          # QML files defining the UI
 │   ├── src/          # C++ source for the Qt shim and main application
 │   └── assets/       # Static assets like images and screenshots
+├── lsp-server/       # Experimental semantic LSP server
 ├── docs/             # Project documentation (architecture, roadmap, etc.)
 ├── tests/            # High-level project tests (e.g., end-to-end if implemented)
 └── config/           # Default configuration files

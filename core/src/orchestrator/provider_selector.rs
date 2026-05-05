@@ -77,7 +77,7 @@ impl ProviderSelector {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|score| std::cmp::Reverse(score.0));
         scored.first().map(|(_, id)| *id)
     }
 

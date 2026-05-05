@@ -66,16 +66,16 @@
 
 ## Fase 6 — QA y Validación A/B (v2plus vs v1)
 
-> Estado: ✅ COMPLETADO - 2026-04-02
+> Estado: 🟡 Validación reproducible pendiente
 
-- [x] **Comparación de comportamiento:** Se ejecutaron múltiples sesiones con v2plus bajo diferentes intents (ProjectWide, FileScoped, Conversational).
+- [x] **Comparación de comportamiento:** Se ejecutaron sesiones exploratorias con v2plus bajo diferentes intents (ProjectWide, FileScoped, Conversational).
 - [x] **Métricas capturadas:**
   - `embeddings=true` en 100% de requests
   - `selected_files` siempre relevantes al proyecto
   - `embed_latency_ms` cacheado: 200-350ms después del primer request
   - `fallback=false` cuando servidor local está disponible
   - `truncation_rate` variable (0.00-1.00) según budget de contexto
-- [x] **Veredicto:** v2plus es el engine seleccionado para el MVP.
+- [ ] **Veredicto final de promoción:** pendiente hasta completar la corrida A/B reproducible definida en `docs/CONTEXT_AB_VALIDATION.md`.
 - [x] **Documentación de hallazgos:** El truncation_rate alto no es problema del engine, es del budget limitado (800 tokens para proyecto en hardware modesto).
 
 ---

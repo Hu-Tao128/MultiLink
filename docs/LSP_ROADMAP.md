@@ -7,7 +7,7 @@
 - Fase 1: Completada - servidor LSP base con handlers initialize, didOpen, didChange, didSave, didClose, hover
 - Fase 2: Implementado tree-sitter con AST cache con soporte para Rust, Python, JavaScript, TypeScript
 - Fase 3: Implementado análisis semántico con SemanticAnalyzer y WorkspaceSymbolIndex
-- Fase 4: Implementado bridge con ContextBridge trait, BridgeState, timeouts y fallback
+- Fase 4: Implementado contrato de bridge con `ContextBridge`, `BridgeState`, timeouts y fallback; falta conectar una implementación real al Context Engine.
 - Fase 4.5: Completado - document_cache, parsing incremental, debounce 300ms
 - Fase 5: Optimización implementada, falta benchmark
 - Fase 6: Infraestructura de lenguajes preparada, soportados: Rust, Python, JS/TS
@@ -49,7 +49,7 @@
 - [x] Implementar bridge.rs con ContextBridge trait y BridgeState.
 - [x] Lógica de decisión: modelo local (sugerencias rápidas) vs remoto (análisis profundo).
 - [x] Timeout y fallback si el modelo remoto no responde en < 2s.
-- [x] Conectar el LSP al Context Engine real cuando se usa dentro de MultiLink.
+- [ ] Conectar el LSP al Context Engine real cuando se usa dentro de MultiLink (estado actual: contrato listo, implementación runtime aún no conectada).
 
 ## Fase 5: Optimización de Rendimiento
 - [x] Parsing incremental: pasar el árbol anterior a `parser.parse()` en ediciones.
