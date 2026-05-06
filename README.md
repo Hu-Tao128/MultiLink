@@ -46,14 +46,26 @@ choco install cmake ninja -y
 From the repository root, execute the following commands to build MultiLink:
 
 ```bash
-# Configure the build system (creates 'build' directory)
-cmake -S gui -B build -DCMAKE_BUILD_TYPE=Release
+# Configure the build system (creates 'build/gui' directory)
+cmake -S gui -B build/gui -DCMAKE_BUILD_TYPE=Release
 
 # Compile the project
-cmake --build build --config Release
+cmake --build build/gui --config Release
 ```
 
-The executable will be located in the `build/` directory (or `build/Release` on Windows). You can run it directly from there.
+The executable will be located in `build/gui/multilink` (or `build/gui/Release/multilink` on Windows). You can run it directly from there.
+
+To run with debug logs (context, embeddings, server selection):
+
+```bash
+MULTILINK_DEBUG_CONTEXT=1 ./build/gui/multilink
+```
+
+For headless testing (no GUI, useful for CI):
+
+```bash
+MULTILINK_DEBUG_CONTEXT=1 QT_QPA_PLATFORM=offscreen timeout 8s ./build/gui/multilink
+```
 
 ## 🌟 Features
 
