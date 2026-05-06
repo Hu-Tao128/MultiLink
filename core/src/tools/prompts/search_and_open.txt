@@ -1,0 +1,25 @@
+TOOL: search_and_open
+
+DESCRIPTION:
+Combined search + open: searches for code and opens the most relevant file.
+
+WHEN TO USE:
+- User wants to find AND read relevant code
+- "find where X is and show me the file"
+- One-step find-and-open workflow
+- When you know a concept exists but not which file
+
+DO NOT USE WHEN:
+- User provides exact file path (use open_file directly)
+- Only need search results without file content (use search_code)
+- Need to search for text patterns (use fs_grep)
+
+EXAMPLES:
+User: "find the router implementation and open it"
+-> search_and_open(query: "ProviderRouter implementation")
+
+User: "show me where sessions are managed"
+-> search_and_open(query: "session management")
+
+SCHEMA:
+{"type":"object","properties":{"query":{"type":"string","description":"Search query to find and open"}},"required":["query"]}

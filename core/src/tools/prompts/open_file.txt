@@ -1,0 +1,34 @@
+TOOL: open_file
+
+DESCRIPTION:
+Read the contents of a specified file. Returns full file content with line numbers.
+
+WHEN TO USE:
+- User asks to open, read, or display a specific file
+- After search_code finds relevant files, open them to see full content
+- User provides a file path they want to examine
+- Understanding the full implementation of a function or module
+
+DO NOT USE WHEN:
+- User wants to search for code (use search_code)
+- User wants to list files in a directory (use fs_ls)
+- User wants to find a pattern in multiple files (use fs_grep)
+
+EXAMPLES:
+User: "open core/src/router.rs"
+-> open_file("core/src/router.rs")
+
+User: "show me main.rs"
+-> open_file("main.rs")
+
+SCHEMA:
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "File path relative to project root"
+    }
+  },
+  "required": ["path"]
+}

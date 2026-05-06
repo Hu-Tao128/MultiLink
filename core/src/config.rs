@@ -223,6 +223,44 @@ pub struct RuntimeProfile {
     pub max_project_files: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentConfig {
+    pub model_size: String,
+    pub max_steps: usize,
+    pub max_retries: u32,
+    pub allowed_tools: Option<Vec<String>>,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            model_size: "medium".to_string(),
+            max_steps: 10,
+            max_retries: 2,
+            allowed_tools: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ValidationConfig {
+    pub rust: Vec<String>,
+    pub typescript: Vec<String>,
+    pub python: Vec<String>,
+}
+
+impl Default for ValidationConfig {
+    fn default() -> Self {
+        Self {
+            rust: vec!["cargo check".to_string(), "cargo test".to_string()],
+            typescript: vec!["tsc --noEmit".to_string(), "npm test".to_string()],
+            python: vec!["python -m py_compile".to_string(), "pytest".to_string()],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelTier {
     Small,
@@ -251,6 +289,12 @@ pub struct AppConfig {
     pub runtime: RuntimeConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_context_dir: Option<PathBuf>,
+
+    #[serde(default)]
+    pub agent: AgentConfig,
+
+    #[serde(default)]
+    pub validation: ValidationConfig,
 
     // legacy v1 fields, kept for migration only
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -492,6 +536,8 @@ impl Default for AppConfig {
             },
             runtime: RuntimeConfig::default(),
             system_context_dir: None,
+            agent: AgentConfig::default(),
+            validation: ValidationConfig::default(),
             preferred_provider: None,
             ollama: None,
         }

@@ -1,0 +1,39 @@
+TOOL: fs_grep
+
+DESCRIPTION:
+Search file contents using regex pattern matching across the project.
+Returns matching file paths and line numbers.
+
+WHEN TO USE:
+- Finding exact patterns, symbols, or text across many files
+- "where is X declared/used/imported" for specific identifiers
+- Grep for error messages, log statements, or debug prints
+- Finding all occurrences of a function call or variable
+
+DO NOT USE WHEN:
+- Searching by concept or meaning (use search_code)
+- Reading a specific file's full content (use open_file)
+- Searching is too broad (use search_code with specific terms)
+
+EXAMPLES:
+User: "find all uses of unwrap()"
+-> fs_grep("unwrap\\(")
+
+User: "search for TODO comments"
+-> fs_grep("TODO|FIXME|HACK")
+
+SCHEMA:
+{
+  "type": "object",
+  "properties": {
+    "pattern": {
+      "type": "string",
+      "description": "Regex pattern to search for"
+    },
+    "path": {
+      "type": "string",
+      "description": "Optional file/directory to search within"
+    }
+  },
+  "required": ["pattern"]
+}

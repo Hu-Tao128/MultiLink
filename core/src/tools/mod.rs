@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 pub mod backup;
 pub mod command;
+pub mod description;
 pub mod filesystem;
 pub mod git;
 pub mod hybrid;

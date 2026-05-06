@@ -1,0 +1,25 @@
+TOOL: fs_ls
+
+DESCRIPTION:
+List files and directories at a given path within the project.
+
+WHEN TO USE:
+- User asks "list files" or "what's in this directory?"
+- Exploring project structure
+- Finding available files in a directory
+- Before reading a file, to confirm its location
+
+DO NOT USE WHEN:
+- User wants to search for specific code (use search_code or fs_grep)
+- User wants to read file content (use open_file)
+- User asks about a single known file (just open it directly)
+
+EXAMPLES:
+User: "list files in src/"
+-> fs_ls(path: "src/")
+
+User: "what's the project structure?"
+-> fs_ls(path: ".")
+
+SCHEMA:
+{"type":"object","properties":{"path":{"type":"string","description":"Directory path relative to project root (default: .)"}},"required":[]}

@@ -1,0 +1,25 @@
+TOOL: system_version
+
+DESCRIPTION:
+Check installed tool versions (node, java, python, cargo, git, etc.)
+
+WHEN TO USE:
+- User asks about installed tools or versions
+- "what version of node/python/rust is installed?"
+- Checking development environment
+- Before running commands, to verify tool availability
+
+DO NOT USE WHEN:
+- User wants project-specific info (use other tools)
+- User asks about project dependencies
+- User wants to install tools (not supported)
+
+EXAMPLES:
+User: "check node version"
+-> system_version(tools: ["node"])
+
+User: "what tools are available?"
+-> system_version(tools: ["node", "java", "python", "cargo", "git"])
+
+SCHEMA:
+{"type":"object","properties":{"tools":{"type":"array","items":{"type":"string"},"description":"List of tools to check"}},"required":[]}

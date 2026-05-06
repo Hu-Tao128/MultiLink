@@ -1,0 +1,35 @@
+TOOL: apply_patch
+
+DESCRIPTION:
+Apply a diff/patch to a file. Makes surgical edits without rewriting the whole file.
+
+WHEN TO USE:
+- Making small, targeted changes to existing files
+- Fixing bugs in specific functions
+- Adding or modifying specific code sections
+- When user says "change", "update", "modify", "fix" with specific instructions
+
+DO NOT USE WHEN:
+- Creating new files (use write_file)
+- Replacing entire file content (use write_file)
+- Without understanding the existing code first (use open_file first)
+
+EXAMPLES:
+User: "fix the off-by-one error in the loop"
+-> apply_patch("src/main.rs", "@@ ... @@")
+
+SCHEMA:
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "File path relative to project root"
+    },
+    "patch": {
+      "type": "string",
+      "description": "Unified diff format patch"
+    }
+  },
+  "required": ["path", "patch"]
+}

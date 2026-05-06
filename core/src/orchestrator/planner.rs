@@ -469,11 +469,83 @@ fn select_tool_for_intent(intent: &QueryIntent, prompt: &str) -> Option<(String,
 pub enum Step {
     ToolCall { name: String, input: ToolInput },
     LLMCall { prompt: String },
-    DecideNext,
+    DecideNext {
+        context: String,
+        available_tools: Vec<String>,
+        goal: String,
+    },
+}
+
+impl Step {
+    pub fn decide_next(goal: &str, available_tools: Vec<String>) -> Self {
+        Step::DecideNext {
+            context: format!("Goal: {}", goal),
+            available_tools,
+            goal: goal.to_string(),
+        }
+    }
 }
 
 pub const MAX_STEPS: usize = 5;
 pub const DEFAULT_MAX_STEPS: usize = 5;
+
+pub fn create_initial_steps(prompt: &str, available_tools: Vec<String>) -> Vec<Step> {
+    let features = IntentFeatures::extract(prompt);
+    let confidence = features.tool_confidence();
+
+    eprintln!(
+        "[planner] create_initial_steps confidence={:.2} is_read={} prompt={}",
+        confidence, features.is_read_operation, prompt
+    );
+
+    if confidence > 0.7 && features.is_read_operation {
+        let intent = classify_intent(prompt);
+        if let Some((tool_name, tool_input)) = select_tool_for_intent(&intent, prompt) {
+            return vec![Step::ToolCall {
+                name: tool_name,
+                input: tool_input,
+            }];
+        }
+    }
+
+    vec![Step::decide_next(prompt, available_tools)]
+}
+
+pub fn filter_tools_for_model(model_size: &str) -> Vec<String> {
+    match model_size {
+        "small" => vec![
+            "search_code".to_string(),
+            "open_file".to_string(),
+            "fs_ls".to_string(),
+            "fs_cat".to_string(),
+            "fs_grep".to_string(),
+        ],
+        "medium" => vec![
+            "search_code".to_string(),
+            "open_file".to_string(),
+            "fs_ls".to_string(),
+            "fs_cat".to_string(),
+            "fs_grep".to_string(),
+            "write_file".to_string(),
+            "apply_patch".to_string(),
+            "run_command".to_string(),
+        ],
+        _ => vec![
+            "search_code".to_string(),
+            "open_file".to_string(),
+            "search_and_open".to_string(),
+            "fs_ls".to_string(),
+            "fs_cat".to_string(),
+            "fs_grep".to_string(),
+            "write_file".to_string(),
+            "apply_patch".to_string(),
+            "run_command".to_string(),
+            "git_status".to_string(),
+            "git_diff".to_string(),
+            "system_version".to_string(),
+        ],
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DecisionResult {
@@ -733,7 +805,7 @@ fn has_file_extension(prompt: &str) -> bool {
     extensions.iter().any(|ext| lower.contains(ext))
         || lower
             .split_whitespace()
-            .any(|word| bare_extensions.iter().any(|e| word == *e))
+            .any(|word| bare_extensions.contains(&word))
 }
 
 fn extract_file_path(prompt: &str) -> Option<String> {

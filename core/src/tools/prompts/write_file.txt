@@ -1,0 +1,46 @@
+TOOL: write_file
+
+DESCRIPTION:
+Write content to a file. Creates parent directories if needed.
+
+WHEN TO USE:
+- Creating new files
+- Overwriting entire file content
+- After understanding existing code structure (search first!)
+- When user explicitly says "create", "write", "add a file"
+
+DO NOT USE WHEN:
+- Making small edits to existing files (use apply_patch)
+- Without first reading/searching the file (may overwrite important code)
+- On files outside project root (security violation)
+- On config files without user confirmation
+
+EXAMPLES:
+User: "create a new component Button.tsx"
+-> write_file("src/components/Button.tsx", "<Button component...>")
+
+User: "add a README explaining the project"
+-> write_file("README.md", "# Project\n\nDescription...")
+
+SCHEMA:
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Relative path from project root"
+    },
+    "content": {
+      "type": "string",
+      "description": "Full file content"
+    }
+  },
+  "required": ["path", "content"]
+}
+
+VALIDATION:
+After write_file, always run appropriate validation:
+- Rust: cargo check
+- TypeScript: tsc --noEmit
+- Python: python -m py_compile
+- Tests: cargo test / npm test / pytest

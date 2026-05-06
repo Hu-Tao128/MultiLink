@@ -1,0 +1,25 @@
+TOOL: git_diff
+
+DESCRIPTION:
+Show git diff of uncommitted changes, optionally for a specific file.
+
+WHEN TO USE:
+- User asks "git diff" or "show changes"
+- To review modifications before committing
+- To see what changed in a specific file
+- Understanding the impact of edits
+
+DO NOT USE WHEN:
+- User wants overall status (use git_status)
+- User asks for commit history
+- User wants to apply changes (use apply_patch)
+
+EXAMPLES:
+User: "git diff"
+-> git_diff()
+
+User: "show changes in planner.rs"
+-> git_diff(path: "core/src/orchestrator/planner.rs")
+
+SCHEMA:
+{"type":"object","properties":{"path":{"type":"string","description":"Optional specific file path to diff"}},"required":[]}

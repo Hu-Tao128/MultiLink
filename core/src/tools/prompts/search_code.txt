@@ -1,0 +1,43 @@
+TOOL: search_code
+
+DESCRIPTION:
+Search the codebase using semantic retrieval (BM25 + optional embeddings).
+Returns relevant code chunks with file paths and line numbers.
+
+WHEN TO USE:
+- User asks to "find", "search", "locate" something in code
+- User wants to understand how a feature works
+- Before modifying code (always search first)
+- Questions like "where is X implemented?" or "how does Y work?"
+
+DO NOT USE WHEN:
+- User wants to read a specific file they already know (use open_file)
+- Simple file listing (use fs_ls)
+- Looking for exact text pattern (use fs_grep instead)
+
+EXAMPLES:
+User: "find the authentication middleware"
+-> search_code("authentication middleware")
+
+User: "how are database connections handled?"
+-> search_code("database connection pool")
+
+User: "where is the User model defined?"
+-> search_code("User model struct")
+
+SCHEMA:
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Search query (keywords, function names, concepts)"
+    },
+    "top_k": {
+      "type": "integer",
+      "default": 5,
+      "description": "Number of results to return (3-10)"
+    }
+  },
+  "required": ["query"]
+}

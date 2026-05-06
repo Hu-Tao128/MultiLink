@@ -29,7 +29,7 @@ use crate::model_profile::{ModelClass, ModelProfile};
 use crate::observability::{ContextRetrievalMetrics, ExecutionMetrics};
 use crate::orchestrator::executor::Executor;
 use crate::orchestrator::planner::{
-    classify_intent as classify_orchestrator_intent, MinimalPlanner,
+    classify_intent as classify_orchestrator_intent,
     QueryIntent as OrchestratorQueryIntent,
 };
 use crate::providers::LLMError;
@@ -711,19 +711,29 @@ impl ChatRuntime {
         };
         let natural_write_target = detect_natural_write_target(&prompt);
         let planner_intent = classify_orchestrator_intent(&prompt);
+        let model_name = model.as_deref().unwrap_or("unknown");
+        let model_size =
+            crate::orchestrator::model_strategy::ModelSize::from_model_name(model_name);
         let skill_orchestrator = Arc::new(SkillOrchestrator::new(Vec::new()));
         let executor = Executor::new(
             self.router.clone(),
             skill_orchestrator,
             Arc::new(ContextEngineV1) as Arc<dyn ContextEngine>,
             self.tool_executor.clone(),
+        )
+        .with_tool_selector(self.router.clone(), model_size);
+
+        eprintln!(
+            "[planner] hybrid_mode=true model={} model_size={:?} orchestrator_enabled={}",
+            model_name,
+            model_size,
+            self.runtime_config.orchestrator_enabled
         );
-        let plan = MinimalPlanner::plan_multi_step(&prompt);
-        eprintln!("[planner] plan_created steps={}", plan.steps.len());
-        let planner_output = match executor.execute_multi_step(plan).await {
+
+        let planner_output = match executor.execute_hybrid(&prompt, model_size).await {
             Ok(output) => {
                 eprintln!("[planner] execution_complete");
-                Some(output)
+                if output.trim().is_empty() { None } else { Some(output) }
             }
             Err(err) => {
                 eprintln!("[planner] execution_complete error={}", err);

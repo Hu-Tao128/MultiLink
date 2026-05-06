@@ -1,0 +1,27 @@
+TOOL: git_status
+
+DESCRIPTION:
+Show the working tree status. Displays staged, unstaged, and untracked files.
+
+WHEN TO USE:
+- User asks "git status", "what's changed", "show modified files"
+- Before committing to check what will be included
+- Understanding current repository state
+- After making changes to verify they are tracked correctly
+
+DO NOT USE WHEN:
+- User wants to see actual diff content (use git_diff)
+- User wants to search code (use search_code or fs_grep)
+
+EXAMPLES:
+User: "git status"
+-> git_status()
+
+User: "what files have I changed?"
+-> git_status()
+
+SCHEMA:
+{
+  "type": "object",
+  "properties": {}
+}

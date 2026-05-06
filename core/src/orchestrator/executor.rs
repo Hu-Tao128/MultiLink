@@ -1,19 +1,27 @@
+use std::sync::Arc;
+
 use crate::context_engine::parser::chunk_extractor::CodeChunk;
 use crate::context_engine::ContextEngine;
+use crate::orchestrator::llm_tool_selector::LlmToolSelector;
+use crate::orchestrator::model_strategy::{ExecutionConfig, ModelSize};
 use crate::orchestrator::old_tools;
-use crate::orchestrator::planner::{Action, MultiStepPlan, Plan, Step};
+use crate::orchestrator::planner::{Action, MinimalPlanner, MultiStepPlan, Plan, Step};
 use crate::orchestrator::provider_selector::ProviderSelector;
 use crate::providers::{PromptOptions, ProviderId};
 use crate::router::ProviderRouter;
 use crate::skills::SkillOrchestrator;
+use crate::tools::description::ToolDescription;
 use crate::tools::ToolExecutor;
-use std::sync::Arc;
 
 const MAX_TOOL_RESULT_LINES: usize = 500;
 
 pub struct ExecutionContext {
     pub context: Option<Vec<CodeChunk>>,
     pub intermediate_results: Vec<String>,
+    pub max_steps: usize,
+    pub model_size: ModelSize,
+    pub available_tools: Vec<String>,
+    pub tool_selector: Option<Arc<LlmToolSelector>>,
 }
 
 impl ExecutionContext {
@@ -21,6 +29,29 @@ impl ExecutionContext {
         Self {
             context: None,
             intermediate_results: Vec::new(),
+            max_steps: 10,
+            model_size: ModelSize::Medium,
+            available_tools: ModelSize::Medium
+                .allowed_tools()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            tool_selector: None,
+        }
+    }
+
+    pub fn with_config(model_size: ModelSize, config: &ExecutionConfig) -> Self {
+        Self {
+            context: None,
+            intermediate_results: Vec::new(),
+            max_steps: config.max_steps,
+            model_size,
+            available_tools: model_size
+                .allowed_tools()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            tool_selector: None,
         }
     }
 }
@@ -36,6 +67,8 @@ pub struct Executor {
     skill_orchestrator: Arc<SkillOrchestrator>,
     context_engine: Arc<dyn ContextEngine>,
     tool_executor: Arc<ToolExecutor>,
+    tool_selector: Option<Arc<LlmToolSelector>>,
+    tool_descriptions: Vec<ToolDescription>,
 }
 
 impl Executor {
@@ -45,12 +78,32 @@ impl Executor {
         context_engine: Arc<dyn ContextEngine>,
         tool_executor: Arc<ToolExecutor>,
     ) -> Self {
+        let tool_descriptions = crate::tools::description::load_all_descriptions()
+            .values()
+            .cloned()
+            .collect();
         Self {
             router,
             skill_orchestrator,
             context_engine,
             tool_executor,
+            tool_selector: None,
+            tool_descriptions,
         }
+    }
+
+    pub fn with_tool_selector(
+        mut self,
+        router: Arc<ProviderRouter>,
+        model_size: ModelSize,
+    ) -> Self {
+        let tool_selector = Arc::new(LlmToolSelector::new(
+            router,
+            self.tool_descriptions.clone(),
+            model_size,
+        ));
+        self.tool_selector = Some(tool_selector);
+        self
     }
 
     pub async fn execute(&self, plan: Plan) -> Result<String, String> {
@@ -316,8 +369,14 @@ impl Executor {
                     });
                     step_index += 1;
                 }
-                Step::DecideNext => {
-                    let decision = self.execute_decision_step(&plan.goal, &context).await?;
+                Step::DecideNext {
+                    ref goal,
+                    ref available_tools,
+                    ..
+                } => {
+                    let decision = self
+                        .execute_decision_step(goal, &context, available_tools)
+                        .await?;
                     let decision_json = serde_json::to_string(&decision).unwrap_or_default();
 
                     match decision.next_action.as_str() {
@@ -361,10 +420,165 @@ impl Executor {
         Ok(last_output)
     }
 
+    pub async fn execute_with_dynamic_loop(
+        &self,
+        initial_goal: &str,
+        exec_context: &mut ExecutionContext,
+    ) -> Result<String, String> {
+        let mut step_results: Vec<crate::orchestrator::planner::StepResult> = vec![];
+        let mut iterations = 0;
+        let max_steps = exec_context.max_steps;
+        let available_tools = exec_context.available_tools.clone();
+
+        let tool_selector = exec_context
+            .tool_selector
+            .as_ref()
+            .cloned()
+            .or_else(|| self.tool_selector.clone());
+
+        loop {
+            if iterations >= max_steps {
+                return Err(format!("Max steps ({}) reached", max_steps));
+            }
+
+            if let Some(ref selector) = tool_selector {
+                let tool_call = selector
+                    .select_next_tool(initial_goal, &step_results, &available_tools)
+                    .await?;
+
+                if tool_call.tool.is_empty() {
+                    return Ok(format!("Goal achieved: {}", tool_call.reasoning));
+                }
+
+                let tool_input = self.json_to_tool_input(&tool_call.args);
+                let result = self.tool_executor.execute(&tool_call.tool, tool_input).await;
+                let output = serde_json::to_string(&result).unwrap_or_default();
+
+                step_results.push(crate::orchestrator::planner::StepResult {
+                    step_index: iterations,
+                    step_id: format!("step_{}", iterations),
+                    output: output.clone(),
+                    tool_name: Some(format!("Tool: {}", tool_call.tool)),
+                    metadata: None,
+                });
+
+                if result.success {
+                    eprintln!(
+                        "[executor] dynamic_step tool={} success=true reasoning={}",
+                        tool_call.tool, tool_call.reasoning
+                    );
+                } else {
+                    eprintln!(
+                        "[executor] dynamic_step tool={} success=false error={:?} — adding failure to context for LLM to retry",
+                        tool_call.tool, result.error
+                    );
+                    iterations += 1;
+                    continue;
+                }
+
+                iterations += 1;
+
+                if iterations >= max_steps {
+                    let last_output = step_results
+                        .last()
+                        .map(|r| r.output.clone())
+                        .unwrap_or_default();
+                    return Ok(last_output);
+                }
+            } else {
+                return Err(
+                    "No LlmToolSelector configured; cannot run dynamic loop".to_string(),
+                );
+            }
+        }
+    }
+
+    pub async fn execute_hybrid(
+        &self,
+        prompt: &str,
+        model_size: ModelSize,
+    ) -> Result<String, String> {
+        let features = crate::orchestrator::planner::IntentFeatures::extract(prompt);
+        let confidence = features.tool_confidence();
+        let available_tools = model_size
+            .allowed_tools()
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+
+        eprintln!(
+            "[executor] execute_hybrid model_size={:?} confidence={:.2} is_read={} is_write={} needs_llm={} tools={}",
+            model_size,
+            confidence,
+            features.is_read_operation,
+            features.is_write_operation,
+            features.requires_llm(),
+            available_tools.len()
+        );
+
+        if confidence > 0.7 && !features.requires_llm() {
+            let initial = crate::orchestrator::planner::create_initial_steps(
+                prompt,
+                available_tools.clone(),
+            );
+            eprintln!(
+                "[executor] fast_path: heuristic match with confidence={:.2} steps={}",
+                confidence,
+                initial.len()
+            );
+            let plan = crate::orchestrator::planner::MultiStepPlan::new(
+                initial,
+                prompt.to_string(),
+                true,
+            );
+            return self.execute_multi_step(plan).await;
+        }
+
+        eprintln!(
+            "[executor] dynamic_path: low confidence={:.2}, using LLM tool selection",
+            confidence
+        );
+
+        let tool_selector = self.tool_selector.clone();
+        if let Some(selector) = tool_selector {
+            let mut exec_ctx = crate::orchestrator::executor::ExecutionContext::new();
+            exec_ctx.tool_selector = Some(selector);
+            exec_ctx.available_tools = available_tools;
+            self.execute_with_dynamic_loop(prompt, &mut exec_ctx).await
+        } else {
+            let plan = MinimalPlanner::plan_multi_step(prompt);
+            self.execute_multi_step(plan).await
+        }
+    }
+
+    fn json_to_tool_input(&self, args: &serde_json::Value) -> crate::tools::ToolInput {
+        use std::collections::HashMap;
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let pattern = args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let args_map: Option<HashMap<String, serde_json::Value>> = args.as_object().map(|obj| {
+            obj.iter()
+                .filter(|(k, _)| *k != "path" && *k != "pattern")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        });
+        crate::tools::ToolInput {
+            path,
+            pattern,
+            args: args_map.filter(|m| !m.is_empty()),
+        }
+    }
+
     async fn execute_decision_step(
         &self,
         goal: &str,
         context: &[crate::orchestrator::planner::StepResult],
+        available_tools: &[String],
     ) -> Result<crate::orchestrator::planner::DecisionResult, String> {
         let available_providers = self.router.get_available_providers().await;
         let selected_provider = ProviderSelector::select(
@@ -389,10 +603,18 @@ impl Executor {
             String::new()
         };
 
+        let tools_list = if available_tools.is_empty() {
+            "No tools available.".to_string()
+        } else {
+            available_tools.join(", ")
+        };
+
         let decision_prompt = format!(
             r#"You are a decision engine. Based on the goal and previous tool results, decide what to do next.
 
 Goal: {}
+
+AVAILABLE TOOLS: {}
 
 Previous tool results (JSON):
 {}
@@ -406,11 +628,12 @@ Your response must be a JSON object with this structure:
 }}
 
 - If task is complete, set next_action to "done"
-- If need more info, set next_action to "tool" and specify tool name and input
+- If need more info, and the needed tool is in the AVAILABLE TOOLS list, set next_action to "tool" and specify the tool name and input
 - If need analysis, set next_action to "llm" and provide prompt
+- DO NOT invent tool names — only use tools from the AVAILABLE TOOLS list
 
 Respond ONLY with valid JSON, no other text."#,
-            goal, structured_context
+            goal, tools_list, structured_context
         );
 
         let options = PromptOptions::default();

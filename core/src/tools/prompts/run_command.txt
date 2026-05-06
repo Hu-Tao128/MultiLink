@@ -1,0 +1,37 @@
+TOOL: run_command
+
+DESCRIPTION:
+Execute a shell command in the project root directory.
+Returns stdout and stderr output.
+
+WHEN TO USE:
+- Running tests (cargo test, npm test, pytest)
+- Building/checking code (cargo check, tsc --noEmit)
+- Running linters/formatters (cargo fmt, npm run lint)
+- After write operations to validate changes
+- User asks to "run", "execute", "test", "build", "check"
+
+DO NOT USE WHEN:
+- Reading file contents (use open_file)
+- Searching code (use search_code or fs_grep)
+- The command could modify system state without user confirmation
+- Running interactive commands that require input
+
+EXAMPLES:
+User: "run the tests"
+-> run_command("cargo test")
+
+User: "check if the code compiles"
+-> run_command("cargo check")
+
+SCHEMA:
+{
+  "type": "object",
+  "properties": {
+    "command": {
+      "type": "string",
+      "description": "Shell command to execute"
+    }
+  },
+  "required": ["command"]
+}

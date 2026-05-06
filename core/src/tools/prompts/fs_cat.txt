@@ -1,0 +1,25 @@
+TOOL: fs_cat
+
+DESCRIPTION:
+Read and display the contents of one or more files. Pure file reading without semantic analysis.
+
+WHEN TO USE:
+- User asks to "cat" or "show" file content
+- Reading configuration files
+- Quick file content lookup
+- User specifies exact filenames
+
+DO NOT USE WHEN:
+- User needs semantic search (use search_code)
+- File is very large (consider open_file with limit)
+- User wants to search within files (use fs_grep)
+
+EXAMPLES:
+User: "cat Cargo.toml"
+-> fs_cat(path: "Cargo.toml")
+
+User: "show me the .env file"
+-> fs_cat(path: ".env")
+
+SCHEMA:
+{"type":"object","properties":{"path":{"type":"string","description":"File path relative to project root"}},"required":["path"]}
