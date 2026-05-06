@@ -286,7 +286,7 @@ pub fn classify_intent(prompt: &str) -> QueryIntent {
         "view",
     ];
     let search_keywords = ["busca", "find", "where is", "donde está", "donde esta"];
-    let system_keywords = ["version", "node", "java", "python"];
+    let system_keywords = ["version", " node ", " node\"", " node'", " node.", "java ", " java", "python "];
 
     let intent = if lower.contains("git diff") || lower.contains("diff git") {
         QueryIntent::GitDiff

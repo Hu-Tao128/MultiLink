@@ -875,62 +875,18 @@ impl ChatRuntime {
             );
         }
 
-        let messages = match tokio::time::timeout(
-            Duration::from_secs(30),
-            self.build_messages(
+        let messages = match self
+            .build_messages(
                 session_id,
                 final_prompt.clone(),
                 include_project_context_for_request,
                 &effective_runtime,
                 model_profile.as_ref(),
-            ),
-        )
-        .await
+            )
+            .await
         {
-            Ok(Ok(msgs)) => msgs,
-            Ok(Err(err)) => return Err(err),
-            Err(_) => {
-                let mut lexical_runtime = effective_runtime.clone();
-                lexical_runtime.context_embeddings_enabled = false;
-                if context_debug_enabled(&self.runtime_config) {
-                    eprintln!(
-                        "[context] session={} build_messages timeout (>30s), retrying with project context (embeddings disabled)",
-                        session_id
-                    );
-                }
-
-                match tokio::time::timeout(
-                    Duration::from_secs(20),
-                    self.build_messages(
-                        session_id,
-                        final_prompt.clone(),
-                        include_project_context_for_request,
-                        &lexical_runtime,
-                        model_profile.as_ref(),
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok(msgs)) => msgs,
-                    Ok(Err(err)) => return Err(err),
-                    Err(_) => {
-                        if context_debug_enabled(&self.runtime_config) {
-                            eprintln!(
-                                "[context] session={} build_messages fallback timeout (>20s), retrying without project context",
-                                session_id
-                            );
-                        }
-                        self.build_messages(
-                            session_id,
-                            final_prompt.clone(),
-                            false,
-                            &lexical_runtime,
-                            model_profile.as_ref(),
-                        )
-                        .await?
-                    }
-                }
-            }
+            Ok(msgs) => msgs,
+            Err(err) => return Err(err),
         };
         if context_debug_enabled(&self.runtime_config) {
             eprintln!(
