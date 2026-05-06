@@ -3046,7 +3046,20 @@ fn detect_natural_write_target(prompt: &str) -> Option<String> {
             return Some(cleaned.to_string());
         }
     }
-    None
+
+    // Fallback: si no se encontró ruta explícita, buscar extensiones conocidas
+    let bare_extensions = [
+        "html", "htm", "css", "js", "ts", "jsx", "tsx",
+        "rs", "py", "go", "java", "kt", "rb", "php",
+        "json", "toml", "yaml", "yml", "md", "txt",
+        "sh", "sql", "xml", "svg",
+    ];
+    let found = bare_extensions.iter().find(|ext| {
+        lower
+            .split_whitespace()
+            .any(|word| word.trim_matches(|c: char| c == ',' || c == ';' || c == '.' || c == ':') == **ext)
+    });
+    found.map(|ext| format!("output.{}", ext))
 }
 
 fn strip_thinking_tags(text: &str) -> String {
