@@ -3,8 +3,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const CLUSTER_EMBED_SERVER_TIMEOUT_SECS: u64 = 8;
-
 #[derive(Debug, Clone)]
 pub struct RetrievalConfig {
     pub embeddings_enabled: bool,
@@ -48,29 +46,55 @@ pub async fn resolve_cluster_embedding_server(
     }
 
     if !config.embed_model.trim().is_empty() {
-        for server in &servers {
-            let found = tokio::time::timeout(
-                Duration::from_secs(CLUSTER_EMBED_SERVER_TIMEOUT_SECS),
-                model_exists_on_server(server, &config.embed_model, config),
-            )
-            .await
-            .ok()
-            .unwrap_or(false);
-            if found {
+        let model = config.embed_model.clone();
+        let futs: Vec<_> = servers
+            .iter()
+            .map(|server| {
+                let server = server.clone();
+                let model = model.clone();
+                let config = config.clone();
+                async move {
+                    let found = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        model_exists_on_server(&server, &model, &config),
+                    )
+                    .await
+                    .ok()
+                    .unwrap_or(false);
+                    (server, found)
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(futs).await;
+        for (server, found) in &results {
+            if *found {
                 return Some(server.clone());
             }
         }
     }
 
-    for server in &servers {
-        let capable = tokio::time::timeout(
-            Duration::from_secs(CLUSTER_EMBED_SERVER_TIMEOUT_SECS),
-            server_has_embedding_capability(server, config),
-        )
-        .await
-        .ok()
-        .unwrap_or(false);
-        if capable {
+    let futs: Vec<_> = servers
+        .iter()
+        .map(|server| {
+            let server = server.clone();
+            let config = config.clone();
+            async move {
+                let capable = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    server_has_embedding_capability(&server, &config),
+                )
+                .await
+                .ok()
+                .unwrap_or(false);
+                (server, capable)
+            }
+        })
+        .collect();
+
+    let results = futures::future::join_all(futs).await;
+    for (server, capable) in &results {
+        if *capable {
             return Some(server.clone());
         }
     }
