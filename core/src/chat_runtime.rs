@@ -1573,18 +1573,34 @@ impl ChatRuntime {
                 resolved_embed_base_url = cached_embed_url;
             } else {
                 let local_embed_url = effective_runtime.context_ollama_base_url.clone();
-                let remotes: Vec<String> = effective_runtime
-                    .execution_servers
-                    .iter()
-                    .filter(|s| s.enabled)
-                    .map(|s| s.base_url.clone())
-                    .filter(|url| {
-                        url.trim_end_matches('/') != local_embed_url.trim_end_matches('/')
-                    })
-                    .collect();
 
-                let mut cluster_servers: Vec<String> = vec![local_embed_url.clone()];
-                cluster_servers.extend(remotes);
+                // Construir lista con prioridad:
+                // 1. Servidor del modelo elegido por el usuario (si es Ollama)
+                // 2. Servidor local
+                // 3. Resto de servidores remotos
+                let mut cluster_servers: Vec<String> = Vec::new();
+
+                // El servidor del modelo elegido va primero
+                if let Some(ref model_url) = session.model_server_url {
+                    let normalized = model_url.trim_end_matches('/').to_string();
+                    if !normalized.is_empty() {
+                        cluster_servers.push(normalized);
+                    }
+                }
+
+                // Local siempre disponible como fallback
+                let local_normalized = local_embed_url.trim_end_matches('/').to_string();
+                if !cluster_servers.iter().any(|s| s == &local_normalized) {
+                    cluster_servers.push(local_normalized.clone());
+                }
+
+                // Resto de remotos configurados
+                for s in effective_runtime.execution_servers.iter().filter(|s| s.enabled) {
+                    let url = s.base_url.trim_end_matches('/').to_string();
+                    if !cluster_servers.iter().any(|existing| existing == &url) {
+                        cluster_servers.push(url);
+                    }
+                }
 
                 let probe_config = RetrievalConfig {
                     embeddings_enabled: effective_runtime.context_embeddings_enabled,
