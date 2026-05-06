@@ -297,10 +297,12 @@ pub fn classify_intent(prompt: &str) -> QueryIntent {
         QueryIntent::GitStatus
     } else if lower.contains("/write-file")
         || lower.contains("write_file")
-        || (lower.contains("crea archivo") || lower.contains("create file")
-            || lower.contains("genera archivo") || lower.contains("write file")
+        || ((lower.contains("crea archivo")
+            || lower.contains("create file")
+            || lower.contains("genera archivo")
+            || lower.contains("write file")
             || lower.contains("escribe archivo"))
-            && has_file_path_pattern(prompt)
+            && (has_file_path_pattern(prompt) || has_file_extension(prompt)))
     {
         QueryIntent::WriteFile
     } else if lower.contains("apply_patch") || lower.contains("apply patch")
@@ -356,16 +358,42 @@ fn select_tool_for_intent(intent: &QueryIntent, prompt: &str) -> Option<(String,
                 },
             )
         }),
-        QueryIntent::WriteFile => extract_file_path(prompt).map(|path| {
-            (
-                "write_file".to_string(),
-                ToolInput {
-                    path: Some(path),
-                    pattern: None,
-                    args: None,
-                },
-            )
-        }),
+        QueryIntent::WriteFile => {
+            let path = extract_file_path(prompt).or_else(|| {
+                let extensions_dotted = [
+                    ".html", ".htm", ".css", ".js", ".ts", ".jsx", ".tsx",
+                    ".rs", ".py", ".go", ".java", ".kt", ".rb", ".php",
+                    ".json", ".toml", ".yaml", ".yml", ".md", ".txt",
+                    ".sh", ".sql", ".xml", ".svg",
+                ];
+                let extensions_bare = [
+                    "html", "htm", "css", "js", "ts", "jsx", "tsx",
+                    "rs", "py", "go", "java", "kt", "rb", "php",
+                    "json", "toml", "yaml", "yml", "md", "txt",
+                    "sh", "sql", "xml", "svg",
+                ];
+                let lower = prompt.to_ascii_lowercase();
+                extensions_dotted
+                    .iter()
+                    .find(|ext| lower.contains(*ext))
+                    .map(|ext| format!("output{}", ext))
+                    .or_else(|| {
+                        lower.split_whitespace().find_map(|word| {
+                            extensions_bare.iter().find(|&&ext| word == ext)
+                        }).map(|ext| format!("output.{}", ext))
+                    })
+            });
+            path.map(|path| {
+                (
+                    "write_file".to_string(),
+                    ToolInput {
+                        path: Some(path),
+                        pattern: None,
+                        args: None,
+                    },
+                )
+            })
+        }
         QueryIntent::ApplyPatch => extract_file_path(prompt).map(|path| {
             (
                 "apply_patch".to_string(),
@@ -686,6 +714,26 @@ fn has_file_path_pattern(prompt: &str) -> bool {
     prompt
         .split_whitespace()
         .any(|token| extract_path_candidate(token).is_some())
+}
+
+fn has_file_extension(prompt: &str) -> bool {
+    let extensions = [
+        ".html", ".htm", ".css", ".js", ".ts", ".jsx", ".tsx",
+        ".rs", ".py", ".go", ".java", ".kt", ".rb", ".php",
+        ".json", ".toml", ".yaml", ".yml", ".md", ".txt",
+        ".sh", ".sql", ".xml", ".svg",
+    ];
+    let bare_extensions = [
+        "html", "htm", "css", "js", "ts", "jsx", "tsx",
+        "rs", "py", "go", "java", "kt", "rb", "php",
+        "json", "toml", "yaml", "yml", "md", "txt",
+        "sh", "sql", "xml", "svg",
+    ];
+    let lower = prompt.to_ascii_lowercase();
+    extensions.iter().any(|ext| lower.contains(ext))
+        || lower
+            .split_whitespace()
+            .any(|word| bare_extensions.iter().any(|e| word == *e))
 }
 
 fn extract_file_path(prompt: &str) -> Option<String> {
