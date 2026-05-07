@@ -33,6 +33,7 @@ pub struct LlmToolSelector {
     router: Arc<ProviderRouter>,
     tool_descriptions: Vec<ToolDescription>,
     model_size: ModelSize,
+    current_model: Option<String>,
 }
 
 impl LlmToolSelector {
@@ -40,11 +41,13 @@ impl LlmToolSelector {
         router: Arc<ProviderRouter>,
         tool_descriptions: Vec<ToolDescription>,
         model_size: ModelSize,
+        current_model: Option<String>,
     ) -> Self {
         Self {
             router,
             tool_descriptions,
             model_size,
+            current_model,
         }
     }
 
@@ -56,12 +59,17 @@ impl LlmToolSelector {
     ) -> Result<ToolCall, String> {
         let prompt = self.build_tool_selection_prompt(goal, context, available_tools);
         let system = self.system_prompt();
-
+        
+        eprintln!("[llm_tool_selector] selecting_provider...");
         let provider = self.select_provider().await?;
 
+        eprintln!("[llm_tool_selector] provider_selected={:?}", provider);
+        eprintln!("[llm_tool_selector] sending_prompt chars={}", prompt.len());
         let decision = self
             .send_and_parse(&provider, &prompt, &system, 0.1)
             .await;
+
+        eprintln!("[llm_tool_selector] first_attempt result={}", decision.is_ok());
 
         match decision {
             Ok(call) => Ok(call),
@@ -95,6 +103,7 @@ impl LlmToolSelector {
         let options = PromptOptions {
             system_prompt: Some(system.to_string()),
             temperature: Some(temperature),
+            model: self.current_model.clone(),
             ..PromptOptions::default()
         };
 
@@ -302,6 +311,7 @@ Respond ONLY with valid JSON."
 
     async fn select_provider(&self) -> Result<ProviderId, String> {
         let available = self.router.get_available_providers().await;
+        eprintln!("[llm_tool_selector] available_providers={:?}", available);
         if available.is_empty() {
             return Err("No providers available for tool selection".to_string());
         }
@@ -370,6 +380,7 @@ mod tests {
             router: Arc::new(ProviderRouter::new()),
             tool_descriptions: vec![],
             model_size: ModelSize::Medium,
+            current_model: None,
         };
         let text = "```json\n{\"tool\": \"open_file\", \"args\": {\"path\": \"main.rs\"}, \"reasoning\": \"test\"}\n```";
         let result = selector.parse_response(text);
@@ -384,6 +395,7 @@ mod tests {
             router: Arc::new(ProviderRouter::new()),
             tool_descriptions: vec![],
             model_size: ModelSize::Medium,
+            current_model: None,
         };
         let text = r#"{"tool": "search_code", "args": {"query": "test"}, "reasoning": "need to search"}"#;
         let result = selector.parse_response(text);
@@ -398,6 +410,7 @@ mod tests {
             router: Arc::new(ProviderRouter::new()),
             tool_descriptions: vec![],
             model_size: ModelSize::Medium,
+            current_model: None,
         };
         let text = "I think we should search first: {\"tool\": \"search_code\", \"args\": {\"query\": \"test\"}, \"reasoning\": \"need context\"}";
         let result = selector.parse_response(text);
@@ -410,6 +423,7 @@ mod tests {
             router: Arc::new(ProviderRouter::new()),
             tool_descriptions: vec![],
             model_size: ModelSize::Medium,
+            current_model: None,
         };
         let text = r#"{"tool": null, "args": null, "reasoning": "goal achieved"}"#;
         let result = selector.parse_response(text);
@@ -423,6 +437,7 @@ mod tests {
             router: Arc::new(ProviderRouter::new()),
             tool_descriptions: vec![],
             model_size: ModelSize::Medium,
+            current_model: None,
         };
         let result = selector.heuristic_fallback("find the router implementation").unwrap();
         assert_eq!(result.tool, "search_code");
@@ -434,6 +449,7 @@ mod tests {
             router: Arc::new(ProviderRouter::new()),
             tool_descriptions: vec![],
             model_size: ModelSize::Medium,
+            current_model: None,
         };
         let result = selector.heuristic_fallback("open main.rs").unwrap();
         assert_eq!(result.tool, "open_file");

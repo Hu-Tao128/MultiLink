@@ -96,11 +96,13 @@ impl Executor {
         mut self,
         router: Arc<ProviderRouter>,
         model_size: ModelSize,
+        model_name: Option<String>,
     ) -> Self {
         let tool_selector = Arc::new(LlmToolSelector::new(
             router,
             self.tool_descriptions.clone(),
             model_size,
+            model_name,
         ));
         self.tool_selector = Some(tool_selector);
         self
