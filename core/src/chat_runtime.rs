@@ -733,7 +733,15 @@ impl ChatRuntime {
         let planner_output = match executor.execute_hybrid(&prompt, model_size).await {
             Ok(output) => {
                 eprintln!("[planner] execution_complete");
-                if output.trim().is_empty() { None } else { Some(output) }
+                if output.trim().is_empty()
+                    || output.starts_with("Goal achieved: heuristic fallback")
+                    || output.starts_with("Doom loop detected")
+                    || output.contains("DOOM LOOP detected")
+                {
+                    None
+                } else {
+                    Some(output)
+                }
             }
             Err(err) => {
                 eprintln!("[planner] execution_complete error={}", err);

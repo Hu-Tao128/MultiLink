@@ -478,12 +478,24 @@ impl Executor {
 
                 let tool_input = self.json_to_tool_input(&tool_call.args);
                 let result = self.tool_executor.execute(&tool_call.tool, tool_input).await;
-                let output = serde_json::to_string(&result).unwrap_or_default();
+                let raw_output = serde_json::to_string(&result).unwrap_or_default();
+
+                let is_search = matches!(tool_call.tool.as_str(), "search_code" | "search_and_open" | "fs_grep");
+                let is_empty = raw_output.contains("\"results\":[]") || raw_output.contains("\"files\":[]")
+                    || raw_output.trim().is_empty() || raw_output.contains("No results");
+                let augmented_output = if result.success && is_search && is_empty {
+                    format!(
+                        "Tool {} returned NO RESULTS. Do not call this tool again with similar args. Proceed to a different tool.",
+                        tool_call.tool
+                    )
+                } else {
+                    raw_output.clone()
+                };
 
                 step_results.push(crate::orchestrator::planner::StepResult {
                     step_index: iterations,
                     step_id: format!("step_{}", iterations),
-                    output: output.clone(),
+                    output: augmented_output.clone(),
                     tool_name: Some(format!("Tool: {}", tool_call.tool)),
                     metadata: None,
                 });

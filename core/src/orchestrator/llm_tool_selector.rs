@@ -293,8 +293,9 @@ IF NO MORE TOOLS NEEDED (goal achieved or blocked):\n\
         r"You are a coding assistant that selects tools to accomplish tasks.
 
 RULES:
-- Always use search_code before write_file to understand context
-- Never call the same tool twice with identical arguments
+- Use search_code before write_file ONLY if the project has existing files to examine
+- If search_code returns empty results, proceed directly to write_file
+- Never call the same tool more than once with similar arguments
 - Prefer read operations before write operations
 - If a tool fails, try a different approach or ask for clarification
 - Use run_command after write_file to validate changes (cargo check, npm test, etc.)
