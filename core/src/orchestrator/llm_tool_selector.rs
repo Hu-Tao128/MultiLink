@@ -138,8 +138,9 @@ impl LlmToolSelector {
             Some(tool_name) if !tool_name.is_empty() => {
                 let args = decision.args.unwrap_or_default();
                 let reasoning = decision.reasoning.unwrap_or_default();
+                let normalized = tool_name.to_lowercase().replace(" ", "_");
                 Ok(ToolCall {
-                    tool: tool_name,
+                    tool: normalized,
                     args,
                     reasoning,
                 })

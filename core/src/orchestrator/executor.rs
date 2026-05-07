@@ -429,6 +429,7 @@ impl Executor {
         let mut iterations = 0;
         let max_steps = exec_context.max_steps;
         let available_tools = exec_context.available_tools.clone();
+        let doom_window: usize = 3;
 
         let tool_selector = exec_context
             .tool_selector
@@ -448,6 +449,29 @@ impl Executor {
 
                 if tool_call.tool.is_empty() {
                     return Ok(format!("Goal achieved: {}", tool_call.reasoning));
+                }
+
+                let recent: Vec<&str> = step_results
+                    .iter()
+                    .rev()
+                    .take(doom_window)
+                    .filter_map(|r| {
+                        r.tool_name
+                            .as_deref()
+                            .and_then(|n| n.strip_prefix("Tool: "))
+                    })
+                    .collect();
+                if recent.len() >= doom_window
+                    && recent.iter().all(|&t| t == tool_call.tool)
+                {
+                    eprintln!(
+                        "[executor] DOOM LOOP detected: tool={} called {} times consecutively, breaking",
+                        tool_call.tool, doom_window
+                    );
+                    return Ok(format!(
+                        "Doom loop detected: {} called {} times. Goal may be blocked or ambiguous.",
+                        tool_call.tool, doom_window
+                    ));
                 }
 
                 let tool_input = self.json_to_tool_input(&tool_call.args);

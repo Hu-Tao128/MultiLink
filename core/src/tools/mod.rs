@@ -11,6 +11,7 @@ pub mod filesystem;
 pub mod git;
 pub mod hybrid;
 pub mod patch;
+pub mod permissions;
 pub mod system;
 pub mod write_file;
 
@@ -72,7 +73,10 @@ impl ToolRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.get(name).cloned()
+        self.tools
+            .get(name)
+            .cloned()
+            .or_else(|| self.tools.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone()))
     }
 
     pub fn list(&self) -> Vec<(String, String)> {
@@ -106,6 +110,17 @@ impl ToolExecutor {
     }
 
     pub async fn execute(&self, tool_name: &str, input: ToolInput) -> ToolResult {
+        let check = permissions::check_tool_allowed(
+            tool_name,
+            &input,
+            &self.registry.project_root,
+        );
+        if !check.allowed {
+            let reason = check.reason.unwrap_or_else(|| "Blocked by permissions".to_string());
+            eprintln!("[permissions] DENIED: tool={} input={:?} reason={}", tool_name, input, reason);
+            return ToolResult::err(reason);
+        }
+
         match self.registry.get(tool_name) {
             Some(tool) => tool.execute(input, &self.registry.project_root).await,
             None => ToolResult::err(format!("Tool not found: {}", tool_name)),
