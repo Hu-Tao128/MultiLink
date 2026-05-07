@@ -453,7 +453,7 @@ impl Executor {
                     return Ok(format!("Goal achieved: {}", tool_call.reasoning));
                 }
 
-                let recent: Vec<&str> = step_results
+                let recent_tools: Vec<&str> = step_results
                     .iter()
                     .rev()
                     .take(doom_window)
@@ -463,8 +463,21 @@ impl Executor {
                             .and_then(|n| n.strip_prefix("Tool: "))
                     })
                     .collect();
-                if recent.len() >= doom_window
-                    && recent.iter().all(|&t| t == tool_call.tool)
+                let recent_errors: Vec<&str> = step_results
+                    .iter()
+                    .rev()
+                    .take(doom_window)
+                    .filter_map(|r| {
+                        if r.output.contains("TOOL FAILED:") {
+                            Some(r.output.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if recent_tools.len() >= doom_window
+                    && recent_tools.iter().all(|&t| t == tool_call.tool)
                 {
                     eprintln!(
                         "[executor] DOOM LOOP detected: tool={} called {} times consecutively, breaking",
@@ -475,6 +488,16 @@ impl Executor {
                         tool_call.tool, doom_window
                     ));
                 }
+                if recent_errors.len() >= 2 && recent_errors.iter().all(|&e| e == recent_errors[0]) {
+                    eprintln!(
+                        "[executor] DOOM LOOP detected: same error repeated twice, breaking. error={}",
+                        recent_errors[0]
+                    );
+                    return Ok(format!(
+                        "Doom loop detected: same error repeated. {}",
+                        recent_errors[0]
+                    ));
+                }
 
                 let tool_input = self.json_to_tool_input(&tool_call.args);
                 let result = self.tool_executor.execute(&tool_call.tool, tool_input).await;
@@ -483,7 +506,23 @@ impl Executor {
                 let is_search = matches!(tool_call.tool.as_str(), "search_code" | "search_and_open" | "fs_grep");
                 let is_empty = raw_output.contains("\"results\":[]") || raw_output.contains("\"files\":[]")
                     || raw_output.trim().is_empty() || raw_output.contains("No results");
-                let augmented_output = if result.success && is_search && is_empty {
+
+                let augmented_output = if !result.success {
+                    let err_msg = result.error.as_deref().unwrap_or("unknown error");
+                    if err_msg.contains("Absolute paths") {
+                        format!(
+                            "TOOL FAILED: {} — Use ONLY relative paths like 'index.html' or 'src/main.rs'. Never use paths starting with '/'.",
+                            err_msg
+                        )
+                    } else if err_msg.contains("not found") || err_msg.contains("does not exist") {
+                        format!(
+                            "TOOL FAILED: {} — Try a different file path or search for the correct path first.",
+                            err_msg
+                        )
+                    } else {
+                        format!("TOOL FAILED: {} — Try a different approach.", err_msg)
+                    }
+                } else if is_search && is_empty {
                     format!(
                         "Tool {} returned NO RESULTS. Do not call this tool again with similar args. Proceed to a different tool.",
                         tool_call.tool
@@ -507,7 +546,7 @@ impl Executor {
                     );
                 } else {
                     eprintln!(
-                        "[executor] dynamic_step tool={} success=false error={:?} — adding failure to context for LLM to retry",
+                        "[executor] dynamic_step tool={} success=false error={:?} — added corrective message to context",
                         tool_call.tool, result.error
                     );
                     iterations += 1;

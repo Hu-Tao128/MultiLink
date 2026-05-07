@@ -14,13 +14,23 @@ DO NOT USE WHEN:
 - Without first reading/searching the file (may overwrite important code)
 - On files outside project root (security violation)
 - On config files without user confirmation
+- Path is absolute (starts with /) — ALWAYS use relative paths
 
 EXAMPLES:
 User: "create a new component Button.tsx"
--> write_file("src/components/Button.tsx", "<Button component...>")
+-> write_file({"path": "src/components/Button.tsx", "content": "<Button component...>"})
 
 User: "add a README explaining the project"
--> write_file("README.md", "# Project\n\nDescription...")
+-> write_file({"path": "README.md", "content": "# Project\n\nDescription..."})
+
+User: "crea index.html"
+-> write_file({"path": "index.html", "content": "<!DOCTYPE html>..."})
+
+User: "crea landing page en carpeta medicina"
+-> write_file({"path": "medicina/index.html", "content": "<!DOCTYPE html>..."})
+
+User: "crea carpeta src con main.js"
+-> write_file({"path": "src/main.js", "content": "console.log('hello');"})
 
 SCHEMA:
 {
