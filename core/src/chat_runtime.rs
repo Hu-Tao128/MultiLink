@@ -721,7 +721,13 @@ impl ChatRuntime {
             Arc::new(ContextEngineV1) as Arc<dyn ContextEngine>,
             self.tool_executor.clone(),
         )
-        .with_tool_selector(self.router.clone(), model_size, model.clone());
+        .with_tool_selector(self.router.clone(), model_size, model.clone())
+        .with_working_dir(
+            session_project_root
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
+        );
 
         eprintln!(
             "[planner] hybrid_mode=true model={} model_size={:?} orchestrator_enabled={}",

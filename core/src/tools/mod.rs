@@ -110,10 +110,20 @@ impl ToolExecutor {
     }
 
     pub async fn execute(&self, tool_name: &str, input: ToolInput) -> ToolResult {
+        self.execute_with_root(tool_name, input, &self.registry.project_root)
+            .await
+    }
+
+    pub async fn execute_with_root(
+        &self,
+        tool_name: &str,
+        input: ToolInput,
+        project_root: &Path,
+    ) -> ToolResult {
         let check = permissions::check_tool_allowed(
             tool_name,
             &input,
-            &self.registry.project_root,
+            project_root,
         );
         if !check.allowed {
             let reason = check.reason.unwrap_or_else(|| "Blocked by permissions".to_string());
@@ -122,7 +132,7 @@ impl ToolExecutor {
         }
 
         match self.registry.get(tool_name) {
-            Some(tool) => tool.execute(input, &self.registry.project_root).await,
+            Some(tool) => tool.execute(input, project_root).await,
             None => ToolResult::err(format!("Tool not found: {}", tool_name)),
         }
     }

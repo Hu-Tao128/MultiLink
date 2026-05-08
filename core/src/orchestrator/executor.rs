@@ -69,6 +69,7 @@ pub struct Executor {
     tool_executor: Arc<ToolExecutor>,
     tool_selector: Option<Arc<LlmToolSelector>>,
     tool_descriptions: Vec<ToolDescription>,
+    working_dir: Option<std::path::PathBuf>,
 }
 
 impl Executor {
@@ -89,6 +90,7 @@ impl Executor {
             tool_executor,
             tool_selector: None,
             tool_descriptions,
+            working_dir: None,
         }
     }
 
@@ -105,6 +107,11 @@ impl Executor {
             model_name,
         ));
         self.tool_selector = Some(tool_selector);
+        self
+    }
+
+    pub fn with_working_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.working_dir = Some(dir);
         self
     }
 
@@ -500,7 +507,13 @@ impl Executor {
                 }
 
                 let tool_input = self.json_to_tool_input(&tool_call.args);
-                let result = self.tool_executor.execute(&tool_call.tool, tool_input).await;
+                let result = if let Some(ref dir) = self.working_dir {
+                    self.tool_executor
+                        .execute_with_root(&tool_call.tool, tool_input, dir)
+                        .await
+                } else {
+                    self.tool_executor.execute(&tool_call.tool, tool_input).await
+                };
                 let raw_output = serde_json::to_string(&result).unwrap_or_default();
 
                 let is_search = matches!(tool_call.tool.as_str(), "search_code" | "search_and_open" | "fs_grep");
