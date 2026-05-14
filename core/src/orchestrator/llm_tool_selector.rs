@@ -9,7 +9,9 @@ use crate::providers::{PromptOptions, ProviderId};
 use crate::router::ProviderRouter;
 use crate::tools::description::ToolDescription;
 
-const TARGET_PROMPT_TOKENS: usize = 2048;
+const SMALL_TARGET_PROMPT_TOKENS: usize = 900;
+const MEDIUM_TARGET_PROMPT_TOKENS: usize = 1200;
+const LARGE_TARGET_PROMPT_TOKENS: usize = 2048;
 const ESTIMATED_TOKENS_PER_CHAR: f64 = 0.25;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,17 +61,18 @@ impl LlmToolSelector {
     ) -> Result<ToolCall, String> {
         let prompt = self.build_tool_selection_prompt(goal, context, available_tools);
         let system = self.system_prompt();
-        
+
         eprintln!("[llm_tool_selector] selecting_provider...");
         let provider = self.select_provider().await?;
 
         eprintln!("[llm_tool_selector] provider_selected={:?}", provider);
         eprintln!("[llm_tool_selector] sending_prompt chars={}", prompt.len());
-        let decision = self
-            .send_and_parse(&provider, &prompt, &system, 0.1)
-            .await;
+        let decision = self.send_and_parse(&provider, &prompt, &system, 0.1).await;
 
-        eprintln!("[llm_tool_selector] first_attempt result={}", decision.is_ok());
+        eprintln!(
+            "[llm_tool_selector] first_attempt result={}",
+            decision.is_ok()
+        );
 
         match decision {
             Ok(call) => Ok(call),
@@ -77,9 +80,7 @@ impl LlmToolSelector {
                 eprintln!(
                     "[llm_tool_selector] first parse failed, retrying with lower temperature"
                 );
-                let decision = self
-                    .send_and_parse(&provider, &prompt, &system, 0.01)
-                    .await;
+                let decision = self.send_and_parse(&provider, &prompt, &system, 0.01).await;
                 match decision {
                     Ok(call) => Ok(call),
                     Err(_e) => {
@@ -139,7 +140,10 @@ impl LlmToolSelector {
             }
         }
 
-        Err(format!("Could not parse tool selection from: {}", truncate(text, 300)))
+        Err(format!(
+            "Could not parse tool selection from: {}",
+            truncate(text, 300)
+        ))
     }
 
     fn decision_to_call(&self, decision: ToolSelectionResponse) -> Result<ToolCall, String> {
@@ -219,8 +223,9 @@ impl LlmToolSelector {
             .collect::<Vec<_>>()
             .join("\n\n");
 
+        let target_prompt_tokens = self.target_prompt_tokens();
         let estimated_tokens = (tools_desc.len() as f64 * ESTIMATED_TOKENS_PER_CHAR) as usize;
-        let tools_desc = if estimated_tokens > TARGET_PROMPT_TOKENS {
+        let tools_desc = if estimated_tokens > target_prompt_tokens {
             self.truncate_tool_descriptions(&filtered_descriptions)
         } else {
             tools_desc
@@ -233,10 +238,17 @@ impl LlmToolSelector {
             let mut parts: Vec<String> = context
                 .iter()
                 .map(|r| {
+                    let input = r
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.input.as_deref())
+                        .map(|i| format!(" input={}", truncate(i, 220)))
+                        .unwrap_or_default();
                     format!(
-                        "- {} -> {}: {}",
+                        "- {} -> {}{}: {}",
                         r.step_id,
                         r.tool_name.as_deref().unwrap_or("llm"),
+                        input,
                         truncate(&r.output, 200)
                     )
                 })
@@ -259,6 +271,10 @@ INSTRUCTIONS:\n\
 2. Choose the NEXT tool to call (only ONE)\n\
 3. Provide valid arguments matching the tool's schema\n\
 4. Explain your reasoning briefly\n\n\
+COMPLETION RULES:\n\
+- Do not repeat write_file/apply_patch for the same path.\n\
+- For requests that ask for HTML, CSS and JS, create the missing files before returning null.\n\
+- If the needed files were already written successfully, return null.\n\n\
 RESPOND IN JSON FORMAT:\n\
 {{\n  \"tool\": \"tool_name\",\n  \"args\": {{ ... }},\n  \"reasoning\": \"why this tool next\"\n}}\n\n\
 IF NO MORE TOOLS NEEDED (goal achieved or blocked):\n\
@@ -267,13 +283,19 @@ IF NO MORE TOOLS NEEDED (goal achieved or blocked):\n\
         )
     }
 
-    fn truncate_tool_descriptions(
-        &self,
-        descriptions: &[&ToolDescription],
-    ) -> String {
-        let max_per_tool_chars =
-            (TARGET_PROMPT_TOKENS as f64 / ESTIMATED_TOKENS_PER_CHAR / descriptions.len().max(1) as f64)
-                as usize;
+    fn target_prompt_tokens(&self) -> usize {
+        match self.model_size {
+            ModelSize::Small => SMALL_TARGET_PROMPT_TOKENS,
+            ModelSize::Medium => MEDIUM_TARGET_PROMPT_TOKENS,
+            ModelSize::Large => LARGE_TARGET_PROMPT_TOKENS,
+        }
+    }
+
+    fn truncate_tool_descriptions(&self, descriptions: &[&ToolDescription]) -> String {
+        let target_prompt_tokens = self.target_prompt_tokens();
+        let max_per_tool_chars = (target_prompt_tokens as f64
+            / ESTIMATED_TOKENS_PER_CHAR
+            / descriptions.len().max(1) as f64) as usize;
         descriptions
             .iter()
             .map(|t| {
@@ -311,12 +333,12 @@ Respond ONLY with valid JSON."
     }
 
     async fn select_provider(&self) -> Result<ProviderId, String> {
-        let available = self.router.get_available_providers().await;
+        let available = self.router.available();
         eprintln!("[llm_tool_selector] available_providers={:?}", available);
         if available.is_empty() {
             return Err("No providers available for tool selection".to_string());
         }
-        Ok(available[0].id)
+        Ok(available[0])
     }
 }
 
@@ -398,7 +420,8 @@ mod tests {
             model_size: ModelSize::Medium,
             current_model: None,
         };
-        let text = r#"{"tool": "search_code", "args": {"query": "test"}, "reasoning": "need to search"}"#;
+        let text =
+            r#"{"tool": "search_code", "args": {"query": "test"}, "reasoning": "need to search"}"#;
         let result = selector.parse_response(text);
         assert!(result.is_ok());
         let call = result.unwrap();
@@ -440,7 +463,9 @@ mod tests {
             model_size: ModelSize::Medium,
             current_model: None,
         };
-        let result = selector.heuristic_fallback("find the router implementation").unwrap();
+        let result = selector
+            .heuristic_fallback("find the router implementation")
+            .unwrap();
         assert_eq!(result.tool, "search_code");
     }
 
@@ -458,7 +483,8 @@ mod tests {
 
     #[test]
     fn test_extract_json_with_nested_braces() {
-        let text = r#"Some text {"tool": "write_file", "args": {"content": "fn main() {}"}} trailing"#;
+        let text =
+            r#"Some text {"tool": "write_file", "args": {"content": "fn main() {}"}} trailing"#;
         let result = extract_json_object(text);
         assert!(result.is_some());
         let parsed: ToolSelectionResponse =
