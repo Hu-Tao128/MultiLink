@@ -29,8 +29,7 @@ use crate::model_profile::{ModelClass, ModelProfile};
 use crate::observability::{ContextRetrievalMetrics, ExecutionMetrics};
 use crate::orchestrator::executor::Executor;
 use crate::orchestrator::planner::{
-    classify_intent as classify_orchestrator_intent,
-    QueryIntent as OrchestratorQueryIntent,
+    classify_intent as classify_orchestrator_intent, QueryIntent as OrchestratorQueryIntent,
 };
 use crate::providers::LLMError;
 use crate::providers::{PromptOptions, ProviderCapabilities, ProviderId};
@@ -174,15 +173,9 @@ impl ChatRuntime {
         allow_remote: bool,
     ) -> Result<LanAgentServer, std::io::Error> {
         let runtime = Arc::new(self.clone());
-        let server = LanAgentServer::bind(
-            addr,
-            runtime,
-            shared_secret,
-            allowed_ips,
-            allow_remote,
-        )
-        .await?
-        .with_tool_executor(self.tool_executor.clone());
+        let server = LanAgentServer::bind(addr, runtime, shared_secret, allowed_ips, allow_remote)
+            .await?
+            .with_tool_executor(self.tool_executor.clone());
         Ok(server)
     }
 
@@ -709,6 +702,27 @@ impl ChatRuntime {
             persist_session(&self.storage_dir, &snapshot).await?;
             (provider, model, model_server_url, project_root)
         };
+
+        if let Some(web_edit) =
+            try_apply_web_landing_edit(session_project_root.as_deref(), &prompt).await?
+        {
+            let response_text = render_web_edit_response(&web_edit);
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let _ = event_tx.send(StreamEvent::Started).await;
+            let _ = event_tx
+                .send(StreamEvent::Chunk(response_text.clone()))
+                .await;
+            let _ = finalize_success(
+                &self.sessions,
+                &self.storage_dir,
+                session_id,
+                &response_text,
+            )
+            .await;
+            let _ = event_tx.send(StreamEvent::Finished).await;
+            return Ok(ChatResponse { events: event_rx });
+        }
+
         let natural_write_target = detect_natural_write_target(&prompt);
         let planner_intent = classify_orchestrator_intent(&prompt);
         let model_name = model.as_deref().unwrap_or("unknown");
@@ -731,9 +745,7 @@ impl ChatRuntime {
 
         eprintln!(
             "[planner] hybrid_mode=true model={} model_size={:?} orchestrator_enabled={}",
-            model_name,
-            model_size,
-            self.runtime_config.orchestrator_enabled
+            model_name, model_size, self.runtime_config.orchestrator_enabled
         );
 
         let planner_output = match executor.execute_hybrid(&prompt, model_size).await {
@@ -754,6 +766,27 @@ impl ChatRuntime {
                 None
             }
         };
+
+        if let Some(output) = planner_output
+            .as_deref()
+            .filter(|output| output.starts_with("[tools_complete]"))
+        {
+            let response_text = render_tools_complete_response(output);
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let _ = event_tx.send(StreamEvent::Started).await;
+            let _ = event_tx
+                .send(StreamEvent::Chunk(response_text.clone()))
+                .await;
+            let _ = finalize_success(
+                &self.sessions,
+                &self.storage_dir,
+                session_id,
+                &response_text,
+            )
+            .await;
+            let _ = event_tx.send(StreamEvent::Finished).await;
+            return Ok(ChatResponse { events: event_rx });
+        }
 
         let final_prompt = planner_output
             .as_ref()
@@ -1575,7 +1608,11 @@ impl ChatRuntime {
                 }
 
                 // Resto de remotos configurados
-                for s in effective_runtime.execution_servers.iter().filter(|s| s.enabled) {
+                for s in effective_runtime
+                    .execution_servers
+                    .iter()
+                    .filter(|s| s.enabled)
+                {
                     let url = s.base_url.trim_end_matches('/').to_string();
                     if !cluster_servers.iter().any(|existing| existing == &url) {
                         cluster_servers.push(url);
@@ -3073,15 +3110,13 @@ fn detect_natural_write_target(prompt: &str) -> Option<String> {
 
     // Fallback: si no se encontró ruta explícita, buscar extensiones conocidas
     let bare_extensions = [
-        "html", "htm", "css", "js", "ts", "jsx", "tsx",
-        "rs", "py", "go", "java", "kt", "rb", "php",
-        "json", "toml", "yaml", "yml", "md", "txt",
-        "sh", "sql", "xml", "svg",
+        "html", "htm", "css", "js", "ts", "jsx", "tsx", "rs", "py", "go", "java", "kt", "rb",
+        "php", "json", "toml", "yaml", "yml", "md", "txt", "sh", "sql", "xml", "svg",
     ];
     let found = bare_extensions.iter().find(|ext| {
-        lower
-            .split_whitespace()
-            .any(|word| word.trim_matches(|c: char| c == ',' || c == ';' || c == '.' || c == ':') == **ext)
+        lower.split_whitespace().any(|word| {
+            word.trim_matches(|c: char| c == ',' || c == ';' || c == '.' || c == ':') == **ext
+        })
     });
     found.map(|ext| format!("output.{}", ext))
 }
@@ -3170,6 +3205,219 @@ async fn execute_write_file_command(
     Ok(target)
 }
 
+struct WebLandingEditResult {
+    files: Vec<String>,
+}
+
+async fn try_apply_web_landing_edit(
+    project_root: Option<&str>,
+    prompt: &str,
+) -> Result<Option<WebLandingEditResult>, ChatRuntimeError> {
+    if !looks_like_web_landing_edit(prompt) {
+        return Ok(None);
+    }
+
+    let Some(root) = project_root else {
+        return Ok(None);
+    };
+    let root = PathBuf::from(root);
+    let Some(html_rel) = detect_html_target(prompt, &root) else {
+        return Ok(None);
+    };
+    let html_path = root.join(&html_rel);
+    if !html_path.exists() {
+        return Ok(None);
+    }
+
+    let html = fs::read_to_string(&html_path)
+        .await
+        .map_err(ChatRuntimeError::Io)?;
+    let css_rel = infer_css_target_from_html(&html_rel, &html);
+    let css_path = root.join(&css_rel);
+    let mut css = if css_path.exists() {
+        fs::read_to_string(&css_path)
+            .await
+            .map_err(ChatRuntimeError::Io)?
+    } else {
+        String::new()
+    };
+
+    let block = web_landing_edit_css_block(prompt);
+    upsert_marked_block(&mut css, "multilink-landing-edit", &block);
+
+    if let Some(parent) = css_path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(ChatRuntimeError::Io)?;
+    }
+    fs::write(&css_path, css.as_bytes())
+        .await
+        .map_err(ChatRuntimeError::Io)?;
+
+    eprintln!(
+        "[executor] web_edit shortcut applied css_path={}",
+        css_rel.display()
+    );
+
+    Ok(Some(WebLandingEditResult {
+        files: vec![css_rel.to_string_lossy().to_string()],
+    }))
+}
+
+fn looks_like_web_landing_edit(prompt: &str) -> bool {
+    let p = prompt.to_ascii_lowercase();
+    let edit_intent = p.contains("mejora")
+        || p.contains("improve")
+        || p.contains("agrega")
+        || p.contains("agregale")
+        || p.contains("agrégale")
+        || p.contains("añade")
+        || p.contains("mas color")
+        || p.contains("más color")
+        || p.contains("color")
+        || p.contains("cambia")
+        || p.contains("actualiza");
+    let create_intent = p.contains("crea ") || p.contains("create ") || p.contains("genera ");
+
+    edit_intent && !create_intent
+}
+
+fn detect_html_target(prompt: &str, root: &Path) -> Option<PathBuf> {
+    for token in prompt.split_whitespace() {
+        let cleaned = token
+            .trim_matches(|c: char| {
+                c == '`'
+                    || c == '"'
+                    || c == '\''
+                    || c == ','
+                    || c == ':'
+                    || c == ';'
+                    || c == ')'
+                    || c == '('
+            })
+            .trim();
+        if cleaned.ends_with(".html") {
+            let rel = PathBuf::from(cleaned);
+            if crate::web_assets::is_safe_relative_path(&rel) {
+                return Some(rel);
+            }
+        }
+    }
+
+    let candidates = ["index.html", "landing.html", "home.html"];
+    candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|candidate| root.join(candidate).exists())
+}
+
+fn infer_css_target_from_html(html_rel: &Path, html: &str) -> PathBuf {
+    let css_ref = crate::web_assets::extract_attr_value(html, "href")
+        .into_iter()
+        .find(|value| value.ends_with(".css"))
+        .unwrap_or_else(|| "styles.css".to_string());
+    let resolved =
+        crate::web_assets::resolve_html_asset_path(&html_rel.to_string_lossy(), &css_ref);
+    PathBuf::from(resolved)
+}
+
+fn web_landing_edit_css_block(prompt: &str) -> String {
+    let p = prompt.to_ascii_lowercase();
+    if p.contains("color") {
+        return r#"/* multilink-landing-edit:start */
+:root {
+    --ml-accent-a: #00a6a6;
+    --ml-accent-b: #ff6b4a;
+    --ml-accent-c: #ffd166;
+    --ml-ink: #16323f;
+}
+
+body {
+    background:
+        radial-gradient(circle at 12% 18%, rgba(0, 166, 166, 0.18), transparent 28rem),
+        radial-gradient(circle at 88% 8%, rgba(255, 107, 74, 0.18), transparent 26rem),
+        linear-gradient(180deg, #f7fffd 0%, #fff8ef 100%);
+}
+
+header, .hero {
+    background:
+        linear-gradient(135deg, rgba(0, 166, 166, 0.96), rgba(22, 50, 63, 0.92)),
+        linear-gradient(45deg, var(--ml-accent-b), var(--ml-accent-c));
+    color: white;
+}
+
+.btn, button, input[type="submit"] {
+    background: linear-gradient(135deg, var(--ml-accent-b), var(--ml-accent-c));
+    color: var(--ml-ink);
+    box-shadow: 0 12px 26px rgba(255, 107, 74, 0.28);
+}
+
+.service-item, .card, section {
+    border-color: rgba(0, 166, 166, 0.22);
+}
+
+.service-item:nth-child(odd), .card:nth-child(odd) {
+    background: linear-gradient(180deg, #ffffff, #ecfffb);
+}
+
+.service-item:nth-child(even), .card:nth-child(even) {
+    background: linear-gradient(180deg, #ffffff, #fff4df);
+}
+/* multilink-landing-edit:end */"#.to_string();
+    }
+
+    r#"/* multilink-landing-edit:start */
+body {
+    background: linear-gradient(180deg, #ffffff 0%, #eefaf8 100%);
+}
+
+section {
+    scroll-margin-top: 24px;
+}
+
+.service-item, .card {
+    transition: transform 180ms ease, box-shadow 180ms ease;
+}
+
+.service-item:hover, .card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 18px 34px rgba(22, 50, 63, 0.14);
+}
+/* multilink-landing-edit:end */"#.to_string()
+}
+
+fn upsert_marked_block(content: &mut String, marker: &str, block: &str) {
+    let start = format!("/* {}:start */", marker);
+    let end = format!("/* {}:end */", marker);
+    if let Some(start_idx) = content.find(&start) {
+        if let Some(end_offset) = content[start_idx..].find(&end) {
+            let end_idx = start_idx + end_offset + end.len();
+            content.replace_range(start_idx..end_idx, block);
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+            return;
+        }
+    }
+
+    if !content.ends_with('\n') && !content.is_empty() {
+        content.push('\n');
+    }
+    content.push('\n');
+    content.push_str(block);
+    content.push('\n');
+}
+
+fn render_web_edit_response(result: &WebLandingEditResult) -> String {
+    let files = result
+        .files
+        .iter()
+        .map(|file| format!("- `{}`", file))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("Cambios aplicados en:\n{}", files)
+}
+
 fn looks_like_project_overview_prompt(prompt: &str) -> bool {
     let p = prompt.to_ascii_lowercase();
     p.contains("what is this project")
@@ -3186,6 +3434,27 @@ fn looks_like_project_overview_prompt(prompt: &str) -> bool {
         || p.contains("de que va este proyecto")
         || p.contains("de qué va este proyecto")
         || p.contains("resumen del proyecto")
+}
+
+fn render_tools_complete_response(output: &str) -> String {
+    let files_line = output
+        .lines()
+        .find_map(|line| line.strip_prefix("files: "))
+        .unwrap_or("none");
+
+    if files_line == "none" || files_line.trim().is_empty() {
+        return "Herramientas ejecutadas. No se registraron archivos creados.".to_string();
+    }
+
+    let files = files_line
+        .split(',')
+        .map(str::trim)
+        .filter(|file| !file.is_empty())
+        .map(|file| format!("- `{}`", file))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!("Archivos creados o actualizados:\n{}", files)
 }
 
 fn cached_hardware_caps() -> HardwareCaps {
@@ -3446,7 +3715,7 @@ mod tests {
     use super::{
         execute_write_file_command, extract_nonempty_file_payload_from_assistant,
         parse_write_file_command, sanitize_model_init_analysis, sanitize_model_markdown,
-        WriteFileCommand,
+        try_apply_web_landing_edit, WriteFileCommand,
     };
     use crate::commands::{InitAction, InitResult, ProjectInfo};
     use std::collections::HashSet;
@@ -3580,6 +3849,49 @@ mod tests {
         assert!(written.exists(), "el archivo debe existir");
         let read_back = std::fs::read_to_string(&written).expect("read file");
         assert_eq!(read_back, "hola mundo");
+    }
+
+    #[tokio::test]
+    async fn web_landing_edit_adds_color_to_linked_css() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("index.html"),
+            r#"<html><head><link rel="stylesheet" href="styles.css"></head><body></body></html>"#,
+        )
+        .expect("write html");
+        std::fs::write(tmp.path().join("styles.css"), "body { color: #111; }\n")
+            .expect("write css");
+        let root = tmp.path().to_string_lossy().to_string();
+
+        let result = try_apply_web_landing_edit(Some(root.as_str()), "Agregale mas color")
+            .await
+            .expect("web edit")
+            .expect("should apply");
+
+        assert_eq!(result.files, vec!["styles.css".to_string()]);
+        let css = std::fs::read_to_string(tmp.path().join("styles.css")).expect("read css");
+        assert!(css.contains("multilink-landing-edit:start"));
+        assert!(css.contains("--ml-accent-a"));
+    }
+
+    #[tokio::test]
+    async fn web_landing_edit_ignores_create_requests() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("index.html"),
+            r#"<html><head><link rel="stylesheet" href="styles.css"></head></html>"#,
+        )
+        .expect("write html");
+        let root = tmp.path().to_string_lossy().to_string();
+
+        let result = try_apply_web_landing_edit(
+            Some(root.as_str()),
+            "Crea una landing page dinamica usando html css y js",
+        )
+        .await
+        .expect("web edit");
+
+        assert!(result.is_none());
     }
 }
 
