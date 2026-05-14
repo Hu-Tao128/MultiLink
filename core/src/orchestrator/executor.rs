@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::context_engine::parser::chunk_extractor::CodeChunk;
@@ -11,7 +12,7 @@ use crate::providers::{PromptOptions, ProviderId};
 use crate::router::ProviderRouter;
 use crate::skills::SkillOrchestrator;
 use crate::tools::description::ToolDescription;
-use crate::tools::ToolExecutor;
+use crate::tools::{ToolExecutor, ToolInput};
 
 const MAX_TOOL_RESULT_LINES: usize = 500;
 
@@ -243,10 +244,8 @@ impl Executor {
 
                     // Auto-validate after write/edit operations
                     if !tool_failed && (name == "write_file" || name == "apply_patch") {
-                        let val_cmds = load_validation_commands_from_multilink(
-                            &self.tool_executor,
-                        )
-                        .await;
+                        let val_cmds =
+                            load_validation_commands_from_multilink(&self.tool_executor).await;
                         if let Some(first_cmd) = val_cmds.first().cloned() {
                             eprintln!(
                                 "[executor] auto-validate after {}: running '{}'",
@@ -439,6 +438,10 @@ impl Executor {
         let max_steps = exec_context.max_steps;
         let available_tools = exec_context.available_tools.clone();
         let doom_window: usize = 3;
+        let mut successful_write_paths: Vec<String> = Vec::new();
+        let mut successful_write_signatures: HashSet<String> = HashSet::new();
+        let mut written_contents: HashMap<String, String> = HashMap::new();
+        let mut duplicate_write_skips = 0usize;
 
         let tool_selector = exec_context
             .tool_selector
@@ -457,7 +460,79 @@ impl Executor {
                     .await?;
 
                 if tool_call.tool.is_empty() {
+                    if !successful_write_paths.is_empty()
+                        && missing_required_assets(initial_goal, &successful_write_paths).is_empty()
+                    {
+                        return Ok(tools_complete_summary(
+                            "files written",
+                            &successful_write_paths,
+                        ));
+                    }
+
+                    let missing = missing_required_assets(initial_goal, &successful_write_paths);
+                    if !missing.is_empty() && iterations + 1 < max_steps {
+                        step_results.push(crate::orchestrator::planner::StepResult {
+                            step_index: iterations,
+                            step_id: format!("step_{}", iterations),
+                            output: format!(
+                                "Task is not complete yet. Missing required files: {}. Continue with write_file for the missing files.",
+                                missing.join(", ")
+                            ),
+                            tool_name: None,
+                            metadata: None,
+                        });
+                        iterations += 1;
+                        continue;
+                    }
+
                     return Ok(format!("Goal achieved: {}", tool_call.reasoning));
+                }
+
+                let tool_signature = write_tool_signature(&tool_call.tool, &tool_call.args);
+                if let Some(signature) = tool_signature.as_ref() {
+                    if successful_write_signatures.contains(signature) {
+                        duplicate_write_skips += 1;
+                        let path =
+                            tool_path(&tool_call.args).unwrap_or_else(|| "unknown".to_string());
+                        step_results.push(crate::orchestrator::planner::StepResult {
+                            step_index: iterations,
+                            step_id: format!("step_{}", iterations),
+                            output: format!(
+                                "Skipped duplicate {} for path '{}'. Do not write this path again; choose a missing file or return null if complete.",
+                                tool_call.tool, path
+                            ),
+                            tool_name: Some(format!("Tool: {}", tool_call.tool)),
+                            metadata: Some(crate::orchestrator::planner::StepMetadata::new(
+                                iterations,
+                                Some(&tool_call.tool),
+                                Some(serde_json::to_string(&tool_call.args).unwrap_or_default()),
+                            )),
+                        });
+
+                        if duplicate_write_skips >= 2 {
+                            if self
+                                .auto_write_missing_web_assets(
+                                    initial_goal,
+                                    &mut successful_write_paths,
+                                    &mut successful_write_signatures,
+                                    &mut written_contents,
+                                )
+                                .await?
+                            {
+                                return Ok(tools_complete_summary(
+                                    "files written",
+                                    &successful_write_paths,
+                                ));
+                            }
+                            return Ok(tools_complete_summary(
+                                "stopped after duplicate write selections",
+                                &successful_write_paths,
+                            ));
+                        }
+
+                        iterations += 1;
+                        continue;
+                    }
                 }
 
                 let recent_tools: Vec<&str> = step_results
@@ -495,7 +570,8 @@ impl Executor {
                         tool_call.tool, doom_window
                     ));
                 }
-                if recent_errors.len() >= 2 && recent_errors.iter().all(|&e| e == recent_errors[0]) {
+                if recent_errors.len() >= 2 && recent_errors.iter().all(|&e| e == recent_errors[0])
+                {
                     eprintln!(
                         "[executor] DOOM LOOP detected: same error repeated twice, breaking. error={}",
                         recent_errors[0]
@@ -512,13 +588,20 @@ impl Executor {
                         .execute_with_root(&tool_call.tool, tool_input, dir)
                         .await
                 } else {
-                    self.tool_executor.execute(&tool_call.tool, tool_input).await
+                    self.tool_executor
+                        .execute(&tool_call.tool, tool_input)
+                        .await
                 };
                 let raw_output = serde_json::to_string(&result).unwrap_or_default();
 
-                let is_search = matches!(tool_call.tool.as_str(), "search_code" | "search_and_open" | "fs_grep");
-                let is_empty = raw_output.contains("\"results\":[]") || raw_output.contains("\"files\":[]")
-                    || raw_output.trim().is_empty() || raw_output.contains("No results");
+                let is_search = matches!(
+                    tool_call.tool.as_str(),
+                    "search_code" | "search_and_open" | "fs_grep"
+                );
+                let is_empty = raw_output.contains("\"results\":[]")
+                    || raw_output.contains("\"files\":[]")
+                    || raw_output.trim().is_empty()
+                    || raw_output.contains("No results");
 
                 let augmented_output = if !result.success {
                     let err_msg = result.error.as_deref().unwrap_or("unknown error");
@@ -549,7 +632,11 @@ impl Executor {
                     step_id: format!("step_{}", iterations),
                     output: augmented_output.clone(),
                     tool_name: Some(format!("Tool: {}", tool_call.tool)),
-                    metadata: None,
+                    metadata: Some(crate::orchestrator::planner::StepMetadata::new(
+                        iterations,
+                        Some(&tool_call.tool),
+                        Some(serde_json::to_string(&tool_call.args).unwrap_or_default()),
+                    )),
                 });
 
                 if result.success {
@@ -562,8 +649,62 @@ impl Executor {
                         "[executor] dynamic_step tool={} success=false error={:?} — added corrective message to context",
                         tool_call.tool, result.error
                     );
+                    if is_write_tool(&tool_call.tool)
+                        && self
+                            .auto_write_missing_web_assets(
+                                initial_goal,
+                                &mut successful_write_paths,
+                                &mut successful_write_signatures,
+                                &mut written_contents,
+                            )
+                            .await?
+                    {
+                        return Ok(tools_complete_summary(
+                            "files written",
+                            &successful_write_paths,
+                        ));
+                    }
                     iterations += 1;
                     continue;
+                }
+
+                if is_write_tool(&tool_call.tool) {
+                    if let Some(path) = tool_path(&tool_call.args) {
+                        if !successful_write_paths.contains(&path) {
+                            successful_write_paths.push(path.clone());
+                        }
+                        if let Some(content) = tool_content(&tool_call.args) {
+                            written_contents.insert(path, content);
+                        }
+                    }
+                    if let Some(signature) = tool_signature {
+                        successful_write_signatures.insert(signature);
+                    }
+                    duplicate_write_skips = 0;
+
+                    if goal_requires_web_triplet(initial_goal)
+                        && missing_required_assets(initial_goal, &successful_write_paths).is_empty()
+                    {
+                        return Ok(tools_complete_summary(
+                            "files written",
+                            &successful_write_paths,
+                        ));
+                    }
+
+                    if self
+                        .auto_write_missing_web_assets(
+                            initial_goal,
+                            &mut successful_write_paths,
+                            &mut successful_write_signatures,
+                            &mut written_contents,
+                        )
+                        .await?
+                    {
+                        return Ok(tools_complete_summary(
+                            "files written",
+                            &successful_write_paths,
+                        ));
+                    }
                 }
 
                 iterations += 1;
@@ -576,9 +717,7 @@ impl Executor {
                     return Ok(last_output);
                 }
             } else {
-                return Err(
-                    "No LlmToolSelector configured; cannot run dynamic loop".to_string(),
-                );
+                return Err("No LlmToolSelector configured; cannot run dynamic loop".to_string());
             }
         }
     }
@@ -607,20 +746,15 @@ impl Executor {
         );
 
         if confidence > 0.7 && !features.requires_llm() {
-            let initial = crate::orchestrator::planner::create_initial_steps(
-                prompt,
-                available_tools.clone(),
-            );
+            let initial =
+                crate::orchestrator::planner::create_initial_steps(prompt, available_tools.clone());
             eprintln!(
                 "[executor] fast_path: heuristic match with confidence={:.2} steps={}",
                 confidence,
                 initial.len()
             );
-            let plan = crate::orchestrator::planner::MultiStepPlan::new(
-                initial,
-                prompt.to_string(),
-                true,
-            );
+            let plan =
+                crate::orchestrator::planner::MultiStepPlan::new(initial, prompt.to_string(), true);
             return self.execute_multi_step(plan).await;
         }
 
@@ -662,6 +796,78 @@ impl Executor {
             pattern,
             args: args_map.filter(|m| !m.is_empty()),
         }
+    }
+
+    async fn auto_write_missing_web_assets(
+        &self,
+        goal: &str,
+        successful_write_paths: &mut Vec<String>,
+        successful_write_signatures: &mut HashSet<String>,
+        written_contents: &mut HashMap<String, String>,
+    ) -> Result<bool, String> {
+        if !goal_requires_web_triplet(goal)
+            || missing_required_assets(goal, successful_write_paths).is_empty()
+        {
+            return Ok(false);
+        }
+
+        let Some(html_path) = successful_write_paths
+            .iter()
+            .find(|path| path.ends_with(".html"))
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let Some(html_content) = written_contents.get(&html_path).cloned() else {
+            return Ok(false);
+        };
+
+        let companions = infer_web_companion_paths(&html_path, &html_content);
+        let mut wrote_any = false;
+        for (path, content) in [
+            (companions.css, default_css_asset(goal)),
+            (companions.js, default_js_asset(goal)),
+        ] {
+            if successful_write_paths.contains(&path) {
+                continue;
+            }
+
+            let mut args = HashMap::new();
+            args.insert(
+                "content".to_string(),
+                serde_json::Value::String(content.clone()),
+            );
+            let input = ToolInput {
+                path: Some(path.clone()),
+                pattern: None,
+                args: Some(args),
+            };
+
+            let result = if let Some(ref dir) = self.working_dir {
+                self.tool_executor
+                    .execute_with_root("write_file", input, dir)
+                    .await
+            } else {
+                self.tool_executor.execute("write_file", input).await
+            };
+
+            if !result.success {
+                return Err(result
+                    .error
+                    .unwrap_or_else(|| format!("failed to auto-write {}", path)));
+            }
+
+            eprintln!(
+                "[executor] dynamic_step tool=write_file success=true reasoning=auto-created missing web companion asset path={}",
+                path
+            );
+            successful_write_paths.push(path.clone());
+            successful_write_signatures.insert(format!("write_file:{}", path));
+            written_contents.insert(path, content);
+            wrote_any = true;
+        }
+
+        Ok(wrote_any && missing_required_assets(goal, successful_write_paths).is_empty())
     }
 
     async fn execute_decision_step(
@@ -908,6 +1114,253 @@ fn render_open_file_result(output: &serde_json::Value) -> String {
     format!("Path: {}\n\n{}", path, limit_tool_text(content))
 }
 
+fn is_write_tool(tool: &str) -> bool {
+    matches!(tool, "write_file" | "apply_patch")
+}
+
+fn tool_path(args: &serde_json::Value) -> Option<String> {
+    args.get("path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn tool_content(args: &serde_json::Value) -> Option<String> {
+    args.get("content")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+fn write_tool_signature(tool: &str, args: &serde_json::Value) -> Option<String> {
+    if !is_write_tool(tool) {
+        return None;
+    }
+
+    tool_path(args).map(|path| format!("{}:{}", tool, path))
+}
+
+fn missing_required_assets(goal: &str, written_paths: &[String]) -> Vec<&'static str> {
+    if !goal_requires_web_triplet(goal) {
+        return Vec::new();
+    }
+
+    let has_html = written_paths.iter().any(|p| p.ends_with(".html"));
+    let has_css = written_paths.iter().any(|p| p.ends_with(".css"));
+    let has_js = written_paths.iter().any(|p| p.ends_with(".js"));
+
+    let mut missing = Vec::new();
+    if !has_html {
+        missing.push("html");
+    }
+    if !has_css {
+        missing.push("css");
+    }
+    if !has_js {
+        missing.push("js");
+    }
+    missing
+}
+
+fn goal_requires_web_triplet(goal: &str) -> bool {
+    let lower = goal.to_ascii_lowercase();
+    lower.contains("html")
+        && lower.contains("css")
+        && (lower.contains("js") || lower.contains("javascript"))
+}
+
+fn tools_complete_summary(reason: &str, written_paths: &[String]) -> String {
+    let files = if written_paths.is_empty() {
+        "none".to_string()
+    } else {
+        written_paths.join(", ")
+    };
+    format!("[tools_complete]\nreason: {}\nfiles: {}", reason, files)
+}
+
+struct WebCompanionPaths {
+    css: String,
+    js: String,
+}
+
+fn infer_web_companion_paths(html_path: &str, html_content: &str) -> WebCompanionPaths {
+    let css = crate::web_assets::extract_attr_value(html_content, "href")
+        .into_iter()
+        .find(|value| value.ends_with(".css"))
+        .unwrap_or_else(|| "styles.css".to_string());
+    let js = crate::web_assets::extract_attr_value(html_content, "src")
+        .into_iter()
+        .find(|value| value.ends_with(".js"))
+        .unwrap_or_else(|| "scripts.js".to_string());
+
+    WebCompanionPaths {
+        css: crate::web_assets::resolve_html_asset_path(html_path, &css),
+        js: crate::web_assets::resolve_html_asset_path(html_path, &js),
+    }
+}
+
+fn default_css_asset(goal: &str) -> String {
+    let specialty = landing_specialty(goal);
+    format!(
+        r#":root {{
+    --ink: #17313b;
+    --muted: #5d7280;
+    --surface: #f4fbfa;
+    --accent: #0f8b8d;
+    --accent-strong: #0a5f64;
+    --warm: #f7c873;
+}}
+
+* {{
+    box-sizing: border-box;
+}}
+
+body {{
+    margin: 0;
+    font-family: Georgia, "Times New Roman", serif;
+    color: var(--ink);
+    background: linear-gradient(180deg, #ffffff 0%, var(--surface) 100%);
+}}
+
+header, main, footer {{
+    width: min(1120px, calc(100% - 32px));
+    margin: 0 auto;
+}}
+
+header {{
+    padding: 28px 0;
+}}
+
+.hero, header {{
+    min-height: 52vh;
+    display: grid;
+    align-content: center;
+    gap: 18px;
+}}
+
+h1 {{
+    max-width: 760px;
+    margin: 0;
+    font-size: clamp(2.2rem, 6vw, 5.5rem);
+    line-height: 0.95;
+}}
+
+h2 {{
+    font-size: 2rem;
+    margin: 0 0 18px;
+}}
+
+p, li {{
+    color: var(--muted);
+    font-size: 1.05rem;
+    line-height: 1.7;
+}}
+
+a, button {{
+    background: var(--accent);
+    color: white;
+    border: 0;
+    border-radius: 8px;
+    padding: 12px 18px;
+    text-decoration: none;
+    cursor: pointer;
+}}
+
+a:hover, button:hover {{
+    background: var(--accent-strong);
+}}
+
+section {{
+    padding: 48px 0;
+    border-top: 1px solid rgba(15, 139, 141, 0.18);
+}}
+
+.services, .cards {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+}}
+
+.service-item, .card {{
+    background: white;
+    border: 1px solid rgba(23, 49, 59, 0.12);
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 12px 30px rgba(23, 49, 59, 0.08);
+}}
+
+form {{
+    display: grid;
+    gap: 12px;
+    max-width: 560px;
+}}
+
+input, textarea {{
+    width: 100%;
+    border: 1px solid rgba(23, 49, 59, 0.2);
+    border-radius: 8px;
+    padding: 12px 14px;
+    font: inherit;
+}}
+
+footer {{
+    padding: 32px 0;
+    color: var(--muted);
+}}
+
+.is-visible {{
+    animation: rise 420ms ease both;
+}}
+
+@keyframes rise {{
+    from {{ opacity: 0; transform: translateY(14px); }}
+    to {{ opacity: 1; transform: translateY(0); }}
+}}
+
+/* Auto-generated companion stylesheet for a {specialty} landing page. */
+"#
+    )
+}
+
+fn default_js_asset(goal: &str) -> String {
+    let specialty = landing_specialty(goal);
+    format!(
+        r#"const sections = document.querySelectorAll('section, .service-item, .card');
+
+const reveal = new IntersectionObserver((entries) => {{
+    entries.forEach((entry) => {{
+        if (entry.isIntersecting) {{
+            entry.target.classList.add('is-visible');
+            reveal.unobserve(entry.target);
+        }}
+    }});
+}}, {{ threshold: 0.16 }});
+
+sections.forEach((section) => reveal.observe(section));
+
+const form = document.querySelector('form');
+if (form) {{
+    form.addEventListener('submit', (event) => {{
+        event.preventDefault();
+        const name = form.querySelector('[name="name"], #name')?.value || 'paciente';
+        alert(`Gracias, ${{name}}. Hemos recibido tu solicitud de {specialty}.`);
+        form.reset();
+    }});
+}}
+"#
+    )
+}
+
+fn landing_specialty(goal: &str) -> &'static str {
+    let lower = goal.to_ascii_lowercase();
+    if lower.contains("medicina") {
+        "medicina"
+    } else if lower.contains("nutricion") || lower.contains("nutrición") {
+        "nutricion"
+    } else {
+        "salud"
+    }
+}
+
 async fn load_validation_commands_from_multilink(
     _tool_executor: &Arc<ToolExecutor>,
 ) -> Vec<String> {
@@ -1011,5 +1464,47 @@ mod tests {
         assert!(limited.contains(&format!("line {}", MAX_TOOL_RESULT_LINES - 1)));
         assert!(!limited.contains(&format!("line {}", MAX_TOOL_RESULT_LINES)));
         assert!(limited.contains("truncated to first"));
+    }
+
+    #[test]
+    fn write_tool_signature_tracks_duplicate_write_paths() {
+        let args = serde_json::json!({
+            "path": "index.html",
+            "content": "<!doctype html>"
+        });
+
+        assert_eq!(
+            write_tool_signature("write_file", &args),
+            Some("write_file:index.html".to_string())
+        );
+        assert_eq!(write_tool_signature("fs_ls", &args), None);
+    }
+
+    #[test]
+    fn missing_required_assets_detects_html_css_js_triplet() {
+        let goal = "Crea una landing page usando html, css y js";
+        let written = vec!["index.html".to_string()];
+
+        assert_eq!(missing_required_assets(goal, &written), vec!["css", "js"]);
+
+        let complete = vec![
+            "index.html".to_string(),
+            "styles.css".to_string(),
+            "scripts.js".to_string(),
+        ];
+        assert!(missing_required_assets(goal, &complete).is_empty());
+    }
+
+    #[test]
+    fn infer_web_companion_paths_uses_html_references() {
+        let html = r#"
+            <link rel="stylesheet" href="assets/site.css">
+            <script src="js/app.js"></script>
+        "#;
+
+        let paths = infer_web_companion_paths("pages/index.html", html);
+
+        assert_eq!(paths.css, "pages/assets/site.css");
+        assert_eq!(paths.js, "pages/js/app.js");
     }
 }
