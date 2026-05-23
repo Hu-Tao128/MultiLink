@@ -1185,16 +1185,16 @@ struct WebCompanionPaths {
 fn infer_web_companion_paths(html_path: &str, html_content: &str) -> WebCompanionPaths {
     let css = crate::web_assets::extract_attr_value(html_content, "href")
         .into_iter()
-        .find(|value| value.ends_with(".css"))
+        .find(|value| value.ends_with(".css") && crate::web_assets::is_safe_html_asset_ref(value))
         .unwrap_or_else(|| "styles.css".to_string());
     let js = crate::web_assets::extract_attr_value(html_content, "src")
         .into_iter()
-        .find(|value| value.ends_with(".js"))
+        .find(|value| value.ends_with(".js") && crate::web_assets::is_safe_html_asset_ref(value))
         .unwrap_or_else(|| "scripts.js".to_string());
 
     WebCompanionPaths {
-        css: crate::web_assets::resolve_html_asset_path(html_path, &css),
-        js: crate::web_assets::resolve_html_asset_path(html_path, &js),
+        css: crate::web_assets::resolve_html_asset_path_or(html_path, &css, "styles.css"),
+        js: crate::web_assets::resolve_html_asset_path_or(html_path, &js, "scripts.js"),
     }
 }
 
@@ -1506,5 +1506,18 @@ mod tests {
 
         assert_eq!(paths.css, "pages/assets/site.css");
         assert_eq!(paths.js, "pages/js/app.js");
+    }
+
+    #[test]
+    fn infer_web_companion_paths_ignores_external_cdn_scripts() {
+        let html = r#"
+            <link rel="stylesheet" href="styles.css">
+            <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+        "#;
+
+        let paths = infer_web_companion_paths("index.html", html);
+
+        assert_eq!(paths.css, "styles.css");
+        assert_eq!(paths.js, "scripts.js");
     }
 }

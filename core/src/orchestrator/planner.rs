@@ -69,7 +69,20 @@ impl IntentFeatures {
         features.asks_for_analysis = analysis_keywords.iter().any(|k| p.contains(k));
 
         let creation_keywords = [
-            "crea", "create", "nuevo", "new", "escribe", "write", "genera", "generate", "add",
+            "crea",
+            "create",
+            "nuevo",
+            "new",
+            "escribe",
+            "escribir",
+            "write",
+            "genera",
+            "generate",
+            "desarrolla",
+            "desarrollar",
+            "develop",
+            "build",
+            "add",
         ];
         features.asks_for_creation = creation_keywords.iter().any(|k| p.contains(k));
 
@@ -128,7 +141,14 @@ impl IntentFeatures {
             "crea",
             "create",
             "escribe",
+            "escribir",
             "write",
+            "genera",
+            "generate",
+            "desarrolla",
+            "desarrollar",
+            "develop",
+            "build",
             "modifica",
             "modify",
             "actualiza",
@@ -156,7 +176,7 @@ impl IntentFeatures {
         if self.has_file_path && self.asks_for_content && !self.asks_for_analysis {
             score += 0.90;
         }
-        if self.asks_for_search && !self.asks_for_analysis {
+        if self.asks_for_search && !self.asks_for_analysis && !self.asks_for_creation {
             score += 0.85;
         }
         if self.is_system_query && !self.wants_explanation {
@@ -273,6 +293,7 @@ pub enum QueryIntent {
 
 pub fn classify_intent(prompt: &str) -> QueryIntent {
     let lower = prompt.to_lowercase();
+    let features = IntentFeatures::extract(prompt);
 
     let read_keywords = [
         "abre",
@@ -286,7 +307,17 @@ pub fn classify_intent(prompt: &str) -> QueryIntent {
         "view",
     ];
     let search_keywords = ["busca", "find", "where is", "donde está", "donde esta"];
-    let system_keywords = ["version", " node ", " node\"", " node'", " node.", "java ", " java", "python "];
+    let system_keywords = [
+        "version", " node ", " node\"", " node'", " node.", "java ", " java", "python ",
+    ];
+
+    let is_web_creation = features.asks_for_creation
+        && (lower.contains("landing page")
+            || lower.contains("pagina de inicio")
+            || lower.contains("página de inicio")
+            || lower.contains("html")
+            || lower.contains("css")
+            || lower.contains("javascript"));
 
     let intent = if lower.contains("git diff") || lower.contains("diff git") {
         QueryIntent::GitDiff
@@ -295,6 +326,8 @@ pub fn classify_intent(prompt: &str) -> QueryIntent {
         || lower.contains("estado de git")
     {
         QueryIntent::GitStatus
+    } else if is_web_creation {
+        QueryIntent::WriteFile
     } else if lower.contains("/write-file")
         || lower.contains("write_file")
         || ((lower.contains("crea archivo")
@@ -305,11 +338,15 @@ pub fn classify_intent(prompt: &str) -> QueryIntent {
             && (has_file_path_pattern(prompt) || has_file_extension(prompt)))
     {
         QueryIntent::WriteFile
-    } else if lower.contains("apply_patch") || lower.contains("apply patch")
+    } else if lower.contains("apply_patch")
+        || lower.contains("apply patch")
         || lower.contains("patch")
-            && (lower.contains("modifica") || lower.contains("modify")
-                || lower.contains("cambia") || lower.contains("change")
-                || lower.contains("edit") || lower.contains("edita"))
+            && (lower.contains("modifica")
+                || lower.contains("modify")
+                || lower.contains("cambia")
+                || lower.contains("change")
+                || lower.contains("edit")
+                || lower.contains("edita"))
     {
         QueryIntent::ApplyPatch
     } else if has_file_path_pattern(prompt) || read_keywords.iter().any(|k| lower.contains(k)) {
@@ -318,10 +355,14 @@ pub fn classify_intent(prompt: &str) -> QueryIntent {
         QueryIntent::Search
     } else if system_keywords.iter().any(|k| lower.contains(k)) {
         QueryIntent::SystemInfo
-    } else if lower.contains("run_command") || lower.contains("run command")
-        || lower.contains("validar") || lower.contains("validate")
-        || lower.contains("ejecuta test") || lower.contains("run test")
-        || lower.contains("cargo test") || lower.contains("npm test")
+    } else if lower.contains("run_command")
+        || lower.contains("run command")
+        || lower.contains("validar")
+        || lower.contains("validate")
+        || lower.contains("ejecuta test")
+        || lower.contains("run test")
+        || lower.contains("cargo test")
+        || lower.contains("npm test")
     {
         QueryIntent::RunCommand
     } else {
@@ -361,16 +402,14 @@ fn select_tool_for_intent(intent: &QueryIntent, prompt: &str) -> Option<(String,
         QueryIntent::WriteFile => {
             let path = extract_file_path(prompt).or_else(|| {
                 let extensions_dotted = [
-                    ".html", ".htm", ".css", ".js", ".ts", ".jsx", ".tsx",
-                    ".rs", ".py", ".go", ".java", ".kt", ".rb", ".php",
-                    ".json", ".toml", ".yaml", ".yml", ".md", ".txt",
-                    ".sh", ".sql", ".xml", ".svg",
+                    ".html", ".htm", ".css", ".js", ".ts", ".jsx", ".tsx", ".rs", ".py", ".go",
+                    ".java", ".kt", ".rb", ".php", ".json", ".toml", ".yaml", ".yml", ".md",
+                    ".txt", ".sh", ".sql", ".xml", ".svg",
                 ];
                 let extensions_bare = [
-                    "html", "htm", "css", "js", "ts", "jsx", "tsx",
-                    "rs", "py", "go", "java", "kt", "rb", "php",
-                    "json", "toml", "yaml", "yml", "md", "txt",
-                    "sh", "sql", "xml", "svg",
+                    "html", "htm", "css", "js", "ts", "jsx", "tsx", "rs", "py", "go", "java", "kt",
+                    "rb", "php", "json", "toml", "yaml", "yml", "md", "txt", "sh", "sql", "xml",
+                    "svg",
                 ];
                 let lower = prompt.to_ascii_lowercase();
                 extensions_dotted
@@ -378,9 +417,10 @@ fn select_tool_for_intent(intent: &QueryIntent, prompt: &str) -> Option<(String,
                     .find(|ext| lower.contains(*ext))
                     .map(|ext| format!("output{}", ext))
                     .or_else(|| {
-                        lower.split_whitespace().find_map(|word| {
-                            extensions_bare.iter().find(|&&ext| word == ext)
-                        }).map(|ext| format!("output.{}", ext))
+                        lower
+                            .split_whitespace()
+                            .find_map(|word| extensions_bare.iter().find(|&&ext| word == ext))
+                            .map(|ext| format!("output.{}", ext))
                     })
             });
             path.map(|path| {
@@ -467,8 +507,13 @@ fn select_tool_for_intent(intent: &QueryIntent, prompt: &str) -> Option<(String,
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Step {
-    ToolCall { name: String, input: ToolInput },
-    LLMCall { prompt: String },
+    ToolCall {
+        name: String,
+        input: ToolInput,
+    },
+    LLMCall {
+        prompt: String,
+    },
     DecideNext {
         context: String,
         available_tools: Vec<String>,
@@ -494,8 +539,8 @@ pub fn create_initial_steps(prompt: &str, available_tools: Vec<String>) -> Vec<S
     let confidence = features.tool_confidence();
 
     eprintln!(
-        "[planner] create_initial_steps confidence={:.2} is_read={} prompt={}",
-        confidence, features.is_read_operation, prompt
+        "[planner] create_initial_steps confidence={:.2} is_read={} is_write={} prompt={}",
+        confidence, features.is_read_operation, features.is_write_operation, prompt
     );
 
     if confidence > 0.7 && features.is_read_operation {
@@ -790,16 +835,13 @@ fn has_file_path_pattern(prompt: &str) -> bool {
 
 fn has_file_extension(prompt: &str) -> bool {
     let extensions = [
-        ".html", ".htm", ".css", ".js", ".ts", ".jsx", ".tsx",
-        ".rs", ".py", ".go", ".java", ".kt", ".rb", ".php",
-        ".json", ".toml", ".yaml", ".yml", ".md", ".txt",
-        ".sh", ".sql", ".xml", ".svg",
+        ".html", ".htm", ".css", ".js", ".ts", ".jsx", ".tsx", ".rs", ".py", ".go", ".java", ".kt",
+        ".rb", ".php", ".json", ".toml", ".yaml", ".yml", ".md", ".txt", ".sh", ".sql", ".xml",
+        ".svg",
     ];
     let bare_extensions = [
-        "html", "htm", "css", "js", "ts", "jsx", "tsx",
-        "rs", "py", "go", "java", "kt", "rb", "php",
-        "json", "toml", "yaml", "yml", "md", "txt",
-        "sh", "sql", "xml", "svg",
+        "html", "htm", "css", "js", "ts", "jsx", "tsx", "rs", "py", "go", "java", "kt", "rb",
+        "php", "json", "toml", "yaml", "yml", "md", "txt", "sh", "sql", "xml", "svg",
     ];
     let lower = prompt.to_ascii_lowercase();
     extensions.iter().any(|ext| lower.contains(ext))
@@ -1066,6 +1108,17 @@ mod tests {
             classify_intent("git diff core/src/lib.rs"),
             QueryIntent::GitDiff
         );
+    }
+
+    #[test]
+    fn classify_landing_page_creation_as_write_even_when_goal_mentions_search() {
+        let prompt = "Actúa como un desarrollador y desarrolla la página de inicio para trabajadores freelance, donde trabajadores pueden postularse y clientes puedan buscar a quien contratar, utiliza HTML, CSS y JavaScript";
+
+        let features = IntentFeatures::extract(prompt);
+
+        assert!(features.asks_for_creation);
+        assert!(features.is_write_operation);
+        assert_eq!(classify_intent(prompt), QueryIntent::WriteFile);
     }
 
     #[test]
