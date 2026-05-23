@@ -729,6 +729,7 @@ impl Executor {
     ) -> Result<String, String> {
         let features = crate::orchestrator::planner::IntentFeatures::extract(prompt);
         let confidence = features.tool_confidence();
+        let no_custom_session_root = self.working_dir.is_none();
         let available_tools = model_size
             .allowed_tools()
             .into_iter()
@@ -736,14 +737,23 @@ impl Executor {
             .collect::<Vec<_>>();
 
         eprintln!(
-            "[executor] execute_hybrid model_size={:?} confidence={:.2} is_read={} is_write={} needs_llm={} tools={}",
+            "[executor] execute_hybrid model_size={:?} confidence={:.2} is_read={} is_write={} needs_llm={} tools={} no_custom_session_root={}",
             model_size,
             confidence,
             features.is_read_operation,
             features.is_write_operation,
             features.requires_llm(),
-            available_tools.len()
+            available_tools.len(),
+            no_custom_session_root
         );
+
+        if no_custom_session_root {
+            eprintln!(
+                "[executor] personal_chat_mode: skipping dynamic tool loop (no session root)"
+            );
+            let plan = MinimalPlanner::plan_multi_step(prompt);
+            return self.execute_multi_step(plan).await;
+        }
 
         if confidence > 0.7 && !features.requires_llm() {
             let initial =

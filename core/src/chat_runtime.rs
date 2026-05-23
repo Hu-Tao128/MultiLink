@@ -729,19 +729,17 @@ impl ChatRuntime {
         let model_size =
             crate::orchestrator::model_strategy::ModelSize::from_model_name(model_name);
         let skill_orchestrator = Arc::new(SkillOrchestrator::new(Vec::new()));
-        let executor = Executor::new(
+        let mut executor = Executor::new(
             self.router.clone(),
             skill_orchestrator,
             Arc::new(ContextEngineV1) as Arc<dyn ContextEngine>,
             self.tool_executor.clone(),
         )
-        .with_tool_selector(self.router.clone(), model_size, model.clone())
-        .with_working_dir(
-            session_project_root
-                .as_deref()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
-        );
+        .with_tool_selector(self.router.clone(), model_size, model.clone());
+
+        if let Some(project_root) = session_project_root.as_deref() {
+            executor = executor.with_working_dir(std::path::PathBuf::from(project_root));
+        }
 
         eprintln!(
             "[planner] hybrid_mode=true model={} model_size={:?} orchestrator_enabled={}",
@@ -3363,7 +3361,8 @@ header, .hero {
 .service-item:nth-child(even), .card:nth-child(even) {
     background: linear-gradient(180deg, #ffffff, #fff4df);
 }
-/* multilink-landing-edit:end */"#.to_string();
+/* multilink-landing-edit:end */"#
+            .to_string();
     }
 
     r#"/* multilink-landing-edit:start */
@@ -3383,7 +3382,8 @@ section {
     transform: translateY(-4px);
     box-shadow: 0 18px 34px rgba(22, 50, 63, 0.14);
 }
-/* multilink-landing-edit:end */"#.to_string()
+/* multilink-landing-edit:end */"#
+        .to_string()
 }
 
 fn upsert_marked_block(content: &mut String, marker: &str, block: &str) {
