@@ -17,6 +17,7 @@ Page {
     property int currentTotalTokens: 0
     property bool currentUsageIsEstimated: false
     property int contextMaxTokens: 4096
+    property bool suppressStartupWarning: false
 
     readonly property color colorBackground: "#F5F6F7"
     readonly property color colorSurface: "#FFFFFF"
@@ -309,7 +310,15 @@ Page {
     Component.onCompleted: {
         hydrateCurrentSession()
         if (controller && controller.startupNotice.length > 0) {
-            configErrorDialog.open()
+            const notice = controller.startupNotice.toLowerCase()
+            const isOllamaMissingNotice = notice.indexOf("ollama") >= 0
+                && (notice.indexOf("no tienes ollama") >= 0
+                    || notice.indexOf("no se detecto respuesta de ollama") >= 0)
+            if (isOllamaMissingNotice) {
+                startupWarningDialog.open()
+            } else {
+                configErrorDialog.open()
+            }
         }
     }
 
@@ -354,11 +363,50 @@ Page {
         }
     }
 
+    Dialog {
+        id: startupWarningDialog
+        title: "Configura tu proveedor"
+        modal: true
+        standardButtons: Dialog.Ok
+        closePolicy: Popup.NoAutoClose
+        width: Math.min(chatPage.width - 40, 620)
+        onAccepted: {
+            if (controller && suppressStartupWarning) {
+                controller.setMissingOllamaNoticeSuppressed(true)
+            }
+            if (controller) {
+                controller.clearStartupNotice()
+            }
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 10
+            Label {
+                Layout.fillWidth: true
+                text: controller ? controller.startupNotice : ""
+                wrapMode: Text.Wrap
+            }
+            CheckBox {
+                text: "No mostrar de nuevo"
+                checked: suppressStartupWarning
+                onToggled: suppressStartupWarning = checked
+            }
+        }
+    }
+
     Connections {
         target: controller
         function onStartupNoticeChanged() {
             if (controller && controller.startupNotice.length > 0) {
-                configErrorDialog.open()
+                const notice = controller.startupNotice.toLowerCase()
+                const isOllamaMissingNotice = notice.indexOf("ollama") >= 0
+                    && (notice.indexOf("no tienes ollama") >= 0
+                        || notice.indexOf("no se detecto respuesta de ollama") >= 0)
+                if (isOllamaMissingNotice) {
+                    startupWarningDialog.open()
+                } else {
+                    configErrorDialog.open()
+                }
             }
         }
     }

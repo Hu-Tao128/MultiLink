@@ -105,6 +105,8 @@ pub extern "C" fn chat_backend_create(
 
     let config_path = AppConfig::default_user_config_path();
     let (config, startup_notice) = load_config_with_recovery(&runtime, &config_path);
+    let connectivity_notice = detect_missing_ollama_notice(&runtime, &config);
+    let startup_notice = merge_startup_notices(&startup_notice, &connectivity_notice);
 
     let mut selected_server =
         config
@@ -1068,6 +1070,31 @@ pub unsafe extern "C" fn chat_backend_clear_startup_notice(handle: *mut BackendH
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_set_missing_ollama_notice_suppressed(
+    handle: *mut BackendHandle,
+    suppressed: bool,
+) -> bool {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return false;
+    };
+
+    let mut cfg = match backend
+        .runtime
+        .block_on(AppConfig::load_or_create(&backend.config_path))
+    {
+        Ok(cfg) => cfg,
+        Err(_) => return false,
+    };
+
+    cfg.ui.suppress_missing_ollama_notice = suppressed;
+
+    match toml::to_string_pretty(&cfg) {
+        Ok(content) => std::fs::write(&backend.config_path, content).is_ok(),
+        Err(_) => false,
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn chat_backend_delete_empty_sessions(handle: *mut BackendHandle) {
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return;
@@ -1357,7 +1384,10 @@ fn load_enabled_ollama_servers(config_path: &PathBuf) -> Vec<(String, String)> {
             let mut servers = cfg
                 .servers
                 .into_iter()
-                .filter(|s| s.enabled && s.provider == ProviderKind::Ollama)
+                .filter(|s| {
+                    s.enabled
+                        && matches!(s.provider, ProviderKind::Ollama | ProviderKind::OllamaCloud)
+                })
                 .collect::<Vec<_>>();
             servers.sort_by_key(|s| s.priority);
             for server in servers {
@@ -1366,6 +1396,94 @@ fn load_enabled_ollama_servers(config_path: &PathBuf) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+fn merge_startup_notices(primary: &str, secondary: &str) -> String {
+    match (primary.trim().is_empty(), secondary.trim().is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => primary.to_string(),
+        (true, false) => secondary.to_string(),
+        (false, false) => format!("{}\n\n{}", primary.trim(), secondary.trim()),
+    }
+}
+
+fn detect_missing_ollama_notice(runtime: &Runtime, config: &AppConfig) -> String {
+    if config.ui.suppress_missing_ollama_notice {
+        return String::new();
+    }
+
+    let Some(server) = config.primary_server() else {
+        return String::new();
+    };
+
+    if !matches!(server.provider, ProviderKind::Ollama) {
+        return String::new();
+    }
+
+    let base_url = normalize_base_url(&server.base_url);
+    if !is_local_ollama_url(&base_url) {
+        return String::new();
+    }
+
+    let has_any_remote = config.servers.iter().any(|s| {
+        s.enabled
+            && matches!(s.provider, ProviderKind::OllamaCloud)
+            && !is_local_ollama_url(&normalize_base_url(&s.base_url))
+    });
+    if has_any_remote {
+        return String::new();
+    }
+
+    let ollama_installed = std::process::Command::new("ollama")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let ollama_ok = runtime.block_on(async { probe_ollama_tags(&base_url).await });
+
+    if ollama_ok {
+        return String::new();
+    }
+
+    if ollama_installed {
+        format!(
+            "No se detecto respuesta de Ollama local en {}.\n\nPrueba iniciar Ollama y verificar el puerto 11434, o agrega un servidor remoto en Opciones > Servidores.\n\nPuedes marcar \"No mostrar de nuevo\" para ocultar este aviso.",
+            base_url
+        )
+    } else {
+        "No tienes Ollama instalado en esta computadora.\n\nPrueba descargarlo en https://ollama.com/download o agrega un servidor remoto en Opciones > Servidores.\n\nPuedes marcar \"No mostrar de nuevo\" para ocultar este aviso.".to_string()
+    }
+}
+
+fn is_local_ollama_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .map(|h| {
+            h.eq_ignore_ascii_case("localhost")
+                || h == "127.0.0.1"
+                || h == "::1"
+                || h == "[::1]"
+        })
+        .unwrap_or(false)
+}
+
+async fn probe_ollama_tags(base_url: &str) -> bool {
+    let client = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(4))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    client
+        .get(format!("{}/api/tags", base_url.trim_end_matches('/')))
+        .send()
+        .await
+        .map(|resp| resp.status().is_success())
+        .unwrap_or(false)
 }
 
 async fn fetch_models_for_server(server_name: &str, base_url: &str) -> Vec<serde_json::Value> {

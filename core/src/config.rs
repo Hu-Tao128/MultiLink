@@ -70,6 +70,7 @@ fn is_port_open(host: &str, port: u16) -> bool {
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     Ollama,
+    OllamaCloud,
     Gemini,
     Codex,
 }
@@ -130,6 +131,7 @@ pub struct NetworkConfig {
 pub struct UiConfig {
     pub streaming: bool,
     pub json_logs: bool,
+    pub suppress_missing_ollama_notice: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,6 +434,7 @@ impl Default for UiConfig {
         Self {
             streaming: true,
             json_logs: false,
+            suppress_missing_ollama_notice: false,
         }
     }
 }
@@ -621,7 +624,7 @@ impl AppConfig {
             if let Some(server) = self
                 .servers
                 .iter_mut()
-                .find(|s| s.provider == ProviderKind::Ollama)
+                .find(|s| matches!(s.provider, ProviderKind::Ollama | ProviderKind::OllamaCloud))
             {
                 server.base_url = value;
             }
@@ -631,7 +634,7 @@ impl AppConfig {
             if let Some(server) = self
                 .servers
                 .iter_mut()
-                .find(|s| s.provider == ProviderKind::Ollama)
+                .find(|s| matches!(s.provider, ProviderKind::Ollama | ProviderKind::OllamaCloud))
             {
                 server.default_model = value;
             }
@@ -770,7 +773,10 @@ impl AppConfig {
         let mut execution_servers: Vec<ExecutionServerRuntime> = self
             .servers
             .iter()
-            .filter(|s| s.enabled && s.provider == ProviderKind::Ollama)
+            .filter(|s| {
+                s.enabled
+                    && matches!(s.provider, ProviderKind::Ollama | ProviderKind::OllamaCloud)
+            })
             .map(|s| ExecutionServerRuntime {
                 name: s.name.clone(),
                 base_url: s.base_url.clone(),

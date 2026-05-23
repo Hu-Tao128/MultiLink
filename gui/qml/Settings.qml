@@ -133,8 +133,8 @@ Page {
                                 onTextChanged: serversModel.setProperty(index, "name", text)
                             }
                             ComboBox {
-                                model: ["ollama", "gemini", "codex"]
-                                currentIndex: Math.max(0, ["ollama", "gemini", "codex"].indexOf(model.provider))
+                                model: ["ollama", "ollama_cloud", "gemini", "codex"]
+                                currentIndex: Math.max(0, ["ollama", "ollama_cloud", "gemini", "codex"].indexOf(model.provider))
                                 onActivated: serversModel.setProperty(index, "provider", currentText)
                             }
 
