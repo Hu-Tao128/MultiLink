@@ -18,16 +18,16 @@ int main(int argc, char *argv[]) {
     ChatController controller;
     engine.rootContext()->setContextProperty("chatController", &controller);
 
-    QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app,
-                     []() { QCoreApplication::exit(-1); }, Qt::QueuedConnection);
-
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     engine.loadFromModule("MultiLink", "Main");
 #else
-    engine.load(QUrl(QStringLiteral("qrc:/qt/qml/MultiLink/Main.qml")));
-    if (engine.rootObjects().isEmpty()) {
-        engine.load(QUrl(QStringLiteral("qrc:/qt/qml/MultiLink/qml/Main.qml")));
-    }
+    QUrl base(QStringLiteral("qrc:/qt/qml/MultiLink/qml/Main.qml"));
+    engine.load(base);
 #endif
+
+    if (engine.rootObjects().isEmpty()) {
+        return -1;
+    }
+
     return app.exec();
 }
