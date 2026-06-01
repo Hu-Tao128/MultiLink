@@ -1,5 +1,6 @@
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use tokio::fs;
 pub const CURRENT_CONFIG_VERSION: u32 = 2;
 
 const OLLAMA_COMMON_PORTS: &[u16] = &[11434, 10101];
+static DETECTED_OLLAMA_BASE_URL: OnceLock<String> = OnceLock::new();
 
 pub fn detect_ollama_base_url() -> String {
     if let Ok(env_url) = std::env::var("OLLAMA_HOST") {
@@ -22,6 +24,12 @@ pub fn detect_ollama_base_url() -> String {
         }
     }
 
+    DETECTED_OLLAMA_BASE_URL
+        .get_or_init(detect_ollama_base_url_once)
+        .clone()
+}
+
+fn detect_ollama_base_url_once() -> String {
     for &port in OLLAMA_COMMON_PORTS {
         let url = format!("http://127.0.0.1:{}", port);
         if is_port_open("127.0.0.1", port) {
@@ -57,10 +65,9 @@ fn normalize_ollama_url(url: &str) -> String {
 
 fn is_port_open(host: &str, port: u16) -> bool {
     let addr = format!("{}:{}", host, port);
+    let fallback = SocketAddr::from(([127, 0, 0, 1], 0));
     TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
+        &addr.parse().unwrap_or(fallback),
         Duration::from_millis(500),
     )
     .is_ok()
