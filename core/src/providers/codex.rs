@@ -182,10 +182,9 @@ impl LLMProvider for CodexProvider {
     }
 
     async fn health_check(&self) -> Result<bool, LLMError> {
-        if self.access_token.is_none() {
+        let Some(token) = self.access_token.as_deref() else {
             return Ok(false);
-        }
-        let token = self.access_token.as_deref().unwrap();
+        };
         let test_url = self.endpoint.replace("/completions", "/models");
         match self.client.get(&test_url).bearer_auth(token).send().await {
             Ok(resp) => Ok(resp.status().is_success()),

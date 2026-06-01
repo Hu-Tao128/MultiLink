@@ -457,6 +457,13 @@ static LEXICAL_INDEX_CACHE: std::sync::LazyLock<
     std::sync::Mutex<Option<(u64, Arc<LexicalIndex>)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
+fn lock_lexical_index_cache() -> std::sync::MutexGuard<'static, Option<(u64, Arc<LexicalIndex>)>> {
+    match LEXICAL_INDEX_CACHE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 fn compute_bm25_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
     if chunks.is_empty() {
         return Vec::new();
@@ -465,7 +472,7 @@ fn compute_bm25_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
     let current_hash = compute_chunk_hash(chunks);
 
     let index = {
-        let guard = LEXICAL_INDEX_CACHE.lock().unwrap();
+        let guard = lock_lexical_index_cache();
         if let Some((hash, idx)) = guard.as_ref() {
             if *hash == current_hash {
                 idx.clone()
@@ -476,7 +483,7 @@ fn compute_bm25_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
                     new_index.add_document(format!("chunk_{i}"), chunk.content.clone());
                 }
                 let new_arc = Arc::new(new_index);
-                let mut lock = LEXICAL_INDEX_CACHE.lock().unwrap();
+                let mut lock = lock_lexical_index_cache();
                 *lock = Some((current_hash, new_arc.clone()));
                 new_arc
             }
@@ -487,7 +494,7 @@ fn compute_bm25_scores(prompt: &str, chunks: &[SemanticChunk]) -> Vec<f32> {
                 new_index.add_document(format!("chunk_{i}"), chunk.content.clone());
             }
             let new_arc = Arc::new(new_index);
-            let mut lock = LEXICAL_INDEX_CACHE.lock().unwrap();
+            let mut lock = lock_lexical_index_cache();
             *lock = Some((current_hash, new_arc.clone()));
             new_arc
         }

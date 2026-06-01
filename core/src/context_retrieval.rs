@@ -1026,6 +1026,15 @@ struct OllamaShowResponse {
 
 static EMBED_MODEL_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
+fn lock_embed_model_cache(
+    cache: &Mutex<HashMap<String, String>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+    match cache.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 async fn resolve_embed_model(
     base_url: &str,
     configured: &str,
@@ -1045,7 +1054,7 @@ async fn resolve_embed_model(
 
     // Check cache
     {
-        let lock = cache.lock().unwrap();
+        let lock = lock_embed_model_cache(cache);
         if let Some(cached) = lock.get(base_url) {
             return cached.clone();
         }
@@ -1056,7 +1065,7 @@ async fn resolve_embed_model(
 
     // Save to cache
     {
-        let mut lock = cache.lock().unwrap();
+        let mut lock = lock_embed_model_cache(cache);
         lock.insert(base_url.to_string(), detected.clone());
     }
 
