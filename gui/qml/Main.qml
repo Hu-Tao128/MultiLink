@@ -7,17 +7,21 @@ ApplicationWindow {
     visible: true
     width: 1040
     height: 760
+    minimumWidth: 480
+    minimumHeight: 400
     title: "MultiLink"
 
     header: ToolBar {
+        implicitHeight: Math.max(40, tabLayout.implicitHeight + 12)
         RowLayout {
+            id: tabLayout
             anchors.fill: parent
             anchors.margins: 6
 
             Label {
                 text: "MultiLink"
                 font.bold: true
-                font.pixelSize: 18
+                font.pixelSize: Math.max(12, Math.min(18, root.width * 0.018))
             }
 
             Item { Layout.fillWidth: true }
