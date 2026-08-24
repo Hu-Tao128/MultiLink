@@ -11,6 +11,8 @@ Page {
     property string statusText: ""
     property bool statusOk: false
 
+    readonly property real narrowThreshold: 600
+
     function loadServers() {
         serversModel.clear()
         const raw = controller ? controller.serversConfigJson() : "[]"
@@ -68,13 +70,11 @@ Page {
 
     ScrollView {
         anchors.fill: parent
-        contentWidth: availableWidth
+        contentWidth: settingsPage.width
 
         ColumnLayout {
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.margins: 16
+            width: settingsPage.width
+            anchors.margins: Math.min(16, settingsPage.width * 0.03)
             spacing: 12
 
             Label {
@@ -121,7 +121,7 @@ Page {
                         }
 
                         GridLayout {
-                            columns: 2
+                            columns: settingsPage.width > settingsPage.narrowThreshold ? 2 : 1
                             columnSpacing: 8
                             rowSpacing: 8
                             Layout.fillWidth: true
@@ -157,12 +157,14 @@ Page {
                                 to: 255
                                 value: model.priority
                                 editable: true
+                                Layout.fillWidth: true
                                 onValueChanged: serversModel.setProperty(index, "priority", value)
                             }
 
                             Button {
                                 text: model.testing ? "Cargando..." : "Probar conexion"
                                 enabled: !model.testing
+                                Layout.fillWidth: true
                                 onClicked: {
                                     serversModel.setProperty(index, "test_result", "Cargando modelos...")
                                     serversModel.setProperty(index, "testing", true)
@@ -194,8 +196,10 @@ Page {
 
             RowLayout {
                 Layout.fillWidth: true
+                spacing: 6
                 Button {
-                    text: "Agregar servidor"
+                    text: settingsPage.width > settingsPage.narrowThreshold ? "Agregar servidor" : "Agregar"
+                    Layout.fillWidth: true
                     onClicked: {
                         serversModel.append({
                             name: "Nuevo servidor",
@@ -211,11 +215,12 @@ Page {
                 }
                 Button {
                     text: "Recargar"
+                    Layout.fillWidth: true
                     onClicked: loadServers()
                 }
-                Item { Layout.fillWidth: true }
                 Button {
                     text: "Guardar"
+                    Layout.fillWidth: true
                     highlighted: true
                     onClicked: saveServers()
                 }

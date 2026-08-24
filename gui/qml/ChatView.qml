@@ -459,20 +459,22 @@ Page {
                 id: sessionBox
                 textRole: "title"
                 model: controller ? controller.sessions : []
-                Layout.preferredWidth: 280
+                Layout.fillWidth: true
+                Layout.maximumWidth: 340
+                Layout.minimumWidth: 120
                 onActivated: function(index) {
                     selectSessionIndex(index)
                 }
             }
             Button {
-                text: "Nueva sesion"
+                text: "Nueva"
                 onClicked: {
                     pendingSelectNewestSession = true
                     controller.newSession()
                 }
             }
             Button {
-                text: "Eliminar sesion"
+                text: "Eliminar"
                 enabled: currentViewSessionId().length > 0
                 onClicked: {
                     pendingDeleteSessionId = currentViewSessionId()
@@ -482,7 +484,7 @@ Page {
                 }
             }
             Button {
-                text: "Limpiar vacías"
+                text: "Limpiar"
                 onClicked: controller.deleteEmptySessions()
             }
             Button {
@@ -491,21 +493,21 @@ Page {
                 onClicked: projectFolderDialog.open()
             }
             Label {
-                Layout.preferredWidth: 320
+                Layout.fillWidth: true
+                Layout.maximumWidth: 320
                 elide: Label.ElideMiddle
                 color: colorTextSecondary
                 text: (controller && controller.selectedProjectRoot.length > 0)
                       ? controller.selectedProjectRoot
                       : "Sin carpeta de proyecto"
             }
-            Item { Layout.fillWidth: true }
         }
 
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.alignment: Qt.AlignHCenter
-            Layout.maximumWidth: 980
+            Layout.maximumWidth: Math.min(980, chatPage.width - 40)
             color: colorSurface
             border.color: colorBorder
             radius: 8
@@ -772,7 +774,9 @@ Page {
                 id: providerModelBox
                 model: controller ? controller.availableModelsDetailed : []
                 textRole: "label"
-                Layout.preferredWidth: 340
+                Layout.fillWidth: true
+                Layout.maximumWidth: 380
+                Layout.minimumWidth: 120
                 delegate: ItemDelegate {
                     width: providerModelBox.width
                     text: modelData.provider + " - " + modelData.label
@@ -792,7 +796,7 @@ Page {
             TextField {
                 id: promptInput
                 Layout.fillWidth: true
-                Layout.preferredHeight: 40
+                Layout.minimumWidth: 80
                 placeholderText: "Escribe tu mensaje..."
                 enabled: !isStreamingActiveScope()
                 onAccepted: sendButton.clicked()
