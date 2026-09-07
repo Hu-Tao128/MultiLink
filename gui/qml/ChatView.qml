@@ -504,10 +504,11 @@ Page {
         }
 
         Rectangle {
+            id: chatArea
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.alignment: Qt.AlignHCenter
-            Layout.maximumWidth: Math.min(980, chatPage.width - 40)
+            Layout.maximumWidth: 980
             color: colorSurface
             border.color: colorBorder
             radius: 8
@@ -529,11 +530,13 @@ Page {
                 delegate: Item {
                     width: ListView.view.width
                     height: bubble.implicitHeight + 6
-                    property var segments: parseMessageSegments(model.text)
+
+                    property bool isStreaming: model.isStreaming === true
+                    property var segments: isStreaming ? [{ kind: "text", value: model.text }] : parseMessageSegments(model.text)
 
                     Rectangle {
                         id: bubble
-                        width: parent.width * 0.86
+                        width: Math.min(chatArea.width * 0.86, chatArea.width - 20)
                         implicitHeight: bubbleContent.implicitHeight + 14
                         anchors.right: model.role === "user" ? parent.right : undefined
                         anchors.left: model.role === "assistant" ? parent.left : undefined
@@ -851,7 +854,9 @@ Page {
             }
             pendingAssistantText = ""
             if (currentAssistantDraftIndex() < 0) {
-                messageModel.append({ role: "assistant", text: "" })
+                messageModel.append({ role: "assistant", text: "", isStreaming: true })
+            } else {
+                messageModel.setProperty(currentAssistantDraftIndex(), "isStreaming", true)
             }
             scrollToBottom()
         }
@@ -861,7 +866,7 @@ Page {
             }
             let draftIndex = currentAssistantDraftIndex()
             if (draftIndex < 0) {
-                messageModel.append({ role: "assistant", text: "" })
+                messageModel.append({ role: "assistant", text: "", isStreaming: true })
                 draftIndex = currentAssistantDraftIndex()
                 pendingAssistantText = ""
             }
@@ -874,13 +879,17 @@ Page {
             }
             pendingAssistantText += text
             messageModel.setProperty(draftIndex, "text", pendingAssistantText)
-            chatList.positionViewAtEnd()
         }
         function onStreamFinished(sessionId) {
             if (sessionId !== currentViewSessionId()) {
                 return
             }
+            let draftIndex = currentAssistantDraftIndex()
+            if (draftIndex >= 0) {
+                messageModel.setProperty(draftIndex, "isStreaming", false)
+            }
             pendingAssistantText = ""
+            scrollToBottom()
         }
         function onStreamError(sessionId, message) {
             if (sessionId !== currentViewSessionId()) {

@@ -70,10 +70,8 @@ Page {
 
     ScrollView {
         anchors.fill: parent
-        contentWidth: settingsPage.width
 
         ColumnLayout {
-            width: settingsPage.width
             anchors.margins: Math.min(16, settingsPage.width * 0.03)
             spacing: 12
 
@@ -121,7 +119,8 @@ Page {
                         }
 
                         GridLayout {
-                            columns: settingsPage.width > settingsPage.narrowThreshold ? 2 : 1
+                            id: serverFormGrid
+                            columns: width > settingsPage.narrowThreshold ? 2 : 1
                             columnSpacing: 8
                             rowSpacing: 8
                             Layout.fillWidth: true

@@ -44,8 +44,11 @@ ApplicationWindow {
             controller: chatController
         }
 
-        Settings {
-            controller: chatController
+        Loader {
+            active: topTabs.currentIndex === 1
+            sourceComponent: Settings {
+                controller: chatController
+            }
         }
     }
 }
