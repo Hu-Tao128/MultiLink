@@ -600,6 +600,7 @@ impl LLMProvider for OllamaProvider {
     }
 
     fn is_available(&self) -> bool {
+        // Sync fallback — uses blocking TCP. Prefer is_available_async() in async contexts.
         let Some(addr) = self.healthcheck_socket_addr() else {
             return false;
         };
@@ -613,6 +614,25 @@ impl LLMProvider for OllamaProvider {
         };
 
         TcpStream::connect_timeout(&socket_addr, Duration::from_millis(700)).is_ok()
+    }
+
+    async fn is_available_async(&self) -> bool {
+        let Some(addr) = self.healthcheck_socket_addr() else {
+            return false;
+        };
+
+        let mut iter = match addr.to_socket_addrs() {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        let Some(socket_addr) = iter.next() else {
+            return false;
+        };
+
+        match tokio::net::TcpStream::connect(socket_addr).await {
+            Ok(_stream) => true,
+            Err(_) => false,
+        }
     }
 
     async fn send(&self, prompt: String, options: PromptOptions) -> Result<LLMResponse, LLMError> {
@@ -788,6 +808,8 @@ impl LLMProvider for OllamaProvider {
                                         }
                                         pending.extend_from_slice(&bytes);
 
+                                        // Process lines with yield points to avoid monopolizing the thread
+                                        let mut lines_processed = 0usize;
                                         while let Some(newline_pos) = pending.iter().position(|b| *b == b'\n') {
                                             let line_bytes: Vec<u8> = pending.drain(..=newline_pos).collect();
                                             let line = String::from_utf8_lossy(&line_bytes);
@@ -839,6 +861,12 @@ impl LLMProvider for OllamaProvider {
                                                     let _ = tx.send(Err(err)).await;
                                                     return;
                                                 }
+                                            }
+
+                                            // Yield periodically to avoid monopolizing the thread
+                                            lines_processed += 1;
+                                            if lines_processed % 8 == 0 {
+                                                tokio::task::yield_now().await;
                                             }
                                         }
 

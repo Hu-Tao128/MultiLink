@@ -397,7 +397,7 @@ impl ProviderRouter {
         }
 
         if let Some(provider) = self.providers.get(&preferred) {
-            if provider.is_available() && self.check_circuit_breaker(preferred).await {
+            if provider.is_available_async().await && self.check_circuit_breaker(preferred).await {
                 match provider.send(prompt.clone(), options.clone()).await {
                     Ok(response) => {
                         self.record_success(preferred).await;
@@ -419,7 +419,7 @@ impl ProviderRouter {
             }
 
             if let Some(provider) = self.providers.get(provider_id) {
-                if provider.is_available() && self.check_circuit_breaker(*provider_id).await {
+                if provider.is_available_async().await && self.check_circuit_breaker(*provider_id).await {
                     match self
                         .send_with_retry(provider, prompt.clone(), options.clone())
                         .await
@@ -488,7 +488,7 @@ impl ProviderRouter {
         }
 
         if let Some(provider) = self.providers.get(&preferred) {
-            if provider.is_available() && self.check_circuit_breaker(preferred).await {
+            if provider.is_available_async().await && self.check_circuit_breaker(preferred).await {
                 return provider.stream_send(prompt.clone(), options.clone()).await;
             }
         }
@@ -499,7 +499,7 @@ impl ProviderRouter {
             }
 
             if let Some(provider) = self.providers.get(provider_id) {
-                if provider.is_available() && self.check_circuit_breaker(*provider_id).await {
+                if provider.is_available_async().await && self.check_circuit_breaker(*provider_id).await {
                     return provider.stream_send(prompt.clone(), options.clone()).await;
                 }
             }
@@ -520,7 +520,7 @@ impl ProviderRouter {
         }
 
         if let Some(provider) = self.providers.get(&preferred) {
-            if provider.is_available() {
+            if provider.is_available_async().await {
                 return provider.get_model_info(model).await;
             }
         }
@@ -530,7 +530,7 @@ impl ProviderRouter {
                 continue;
             }
             if let Some(provider) = self.providers.get(provider_id) {
-                if provider.is_available() {
+                if provider.is_available_async().await {
                     return provider.get_model_info(model).await;
                 }
             }

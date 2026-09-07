@@ -1188,8 +1188,7 @@ impl ChatRuntime {
 
                                 if last_emit.elapsed() >= EMIT_INTERVAL {
                                     if !pending_emit.is_empty() {
-                                        let out = pending_emit.clone();
-                                        pending_emit.clear();
+                                        let out = std::mem::take(&mut pending_emit);
                                         let _ = event_tx.send(StreamEvent::Chunk(out)).await;
                                     }
                                     last_emit = Instant::now();
@@ -1223,8 +1222,7 @@ impl ChatRuntime {
                                     }
                                 }
                                 if !pending_emit.is_empty() {
-                                    let out = pending_emit.clone();
-                                    pending_emit.clear();
+                                    let out = std::mem::take(&mut pending_emit);
                                     let _ = event_tx.send(StreamEvent::Chunk(out)).await;
                                 }
                                 let _ = finalize_success(&sessions, &storage_dir, &session_id_owned, &full_output).await;
@@ -1305,8 +1303,7 @@ impl ChatRuntime {
                                 }
 
                                 if !pending_emit.is_empty() {
-                                    let out = pending_emit.clone();
-                                    pending_emit.clear();
+                                    let out = std::mem::take(&mut pending_emit);
                                     let _ = event_tx.send(StreamEvent::Chunk(out)).await;
                                 }
                                 if let Some(target_path) = natural_write_target.as_ref() {
@@ -1366,8 +1363,7 @@ impl ChatRuntime {
                                     }
                                 }
                                 if !pending_emit.is_empty() {
-                                    let out = pending_emit.clone();
-                                    pending_emit.clear();
+                                    let out = std::mem::take(&mut pending_emit);
                                     let _ = event_tx.send(StreamEvent::Chunk(out)).await;
                                 }
                                 let _ = finalize_success(&sessions, &storage_dir, &session_id_owned, &full_output).await;
