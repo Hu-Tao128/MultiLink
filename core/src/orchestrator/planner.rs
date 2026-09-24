@@ -326,9 +326,8 @@ pub fn classify_intent(prompt: &str) -> QueryIntent {
         || lower.contains("estado de git")
     {
         QueryIntent::GitStatus
-    } else if is_web_creation {
-        QueryIntent::WriteFile
-    } else if lower.contains("/write-file")
+    } else if is_web_creation
+        || lower.contains("/write-file")
         || lower.contains("write_file")
         || ((lower.contains("crea archivo")
             || lower.contains("create file")

@@ -375,6 +375,11 @@ impl OllamaProvider {
         self.fetch_model_info(&model_name).await
     }
 
+    // RETRY POLICY — Layer 1 (provider, non-streaming):
+    // Handles transient HTTP errors from the local Ollama daemon (connection
+    // refused, 503, etc). 3 attempts, 200ms base exponential backoff.
+    // Scope: single provider instance, single request. Does NOT apply to
+    // streaming requests (those are retried in stream_send / Layer 2).
     async fn post_chat_with_retry<T: Serialize>(
         &self,
         body: &T,
@@ -632,15 +637,14 @@ impl LLMProvider for OllamaProvider {
         // Límite de 700ms igual que la variante síncrona; sin timeout el OS puede
         // bloquear hasta ~75s en loopback filtrado, disparando el circuit-breaker
         // de forma prematura.
-        match tokio::time::timeout(
-            Duration::from_millis(700),
-            tokio::net::TcpStream::connect(socket_addr),
+        matches!(
+            tokio::time::timeout(
+                Duration::from_millis(700),
+                tokio::net::TcpStream::connect(socket_addr),
+            )
+            .await,
+            Ok(Ok(_stream))
         )
-        .await
-        {
-            Ok(Ok(_stream)) => true,
-            _ => false,
-        }
     }
 
     async fn send(&self, prompt: String, options: PromptOptions) -> Result<LLMResponse, LLMError> {
@@ -746,6 +750,13 @@ impl LLMProvider for OllamaProvider {
             })
             .collect();
 
+        // RETRY POLICY — Layer 2 (provider, streaming):
+        // Retries the full stream request when a streaming connection is
+        // interrupted mid-stream (idle timeout, dropped connection). Default
+        // 4+1 = 5 attempts, 500ms base exponential backoff.
+        // Scope: single provider instance, single stream request.
+        // NOTE: router.stream_send() does NOT wrap this in send_with_retry()
+        // — stream retries are owned exclusively at this layer.
         let stream_retries = Self::stream_retries();
         let stream_timeout_secs = Self::stream_idle_timeout_secs();
         const MAX_PENDING_STREAM_BYTES: usize = 512 * 1024;
@@ -873,7 +884,7 @@ impl LLMProvider for OllamaProvider {
 
                                             // Yield periodically to avoid monopolizing the thread
                                             lines_processed += 1;
-                                            if lines_processed % 8 == 0 {
+                                            if lines_processed.is_multiple_of(8) {
                                                 tokio::task::yield_now().await;
                                             }
                                         }
