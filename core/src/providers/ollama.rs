@@ -629,9 +629,17 @@ impl LLMProvider for OllamaProvider {
             return false;
         };
 
-        match tokio::net::TcpStream::connect(socket_addr).await {
-            Ok(_stream) => true,
-            Err(_) => false,
+        // Límite de 700ms igual que la variante síncrona; sin timeout el OS puede
+        // bloquear hasta ~75s en loopback filtrado, disparando el circuit-breaker
+        // de forma prematura.
+        match tokio::time::timeout(
+            Duration::from_millis(700),
+            tokio::net::TcpStream::connect(socket_addr),
+        )
+        .await
+        {
+            Ok(Ok(_stream)) => true,
+            _ => false,
         }
     }
 
