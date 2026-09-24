@@ -171,11 +171,13 @@ impl ChatRuntime {
         shared_secret: String,
         allowed_ips: Vec<String>,
         allow_remote: bool,
+        rate_limit_per_sec: u32,
     ) -> Result<LanAgentServer, std::io::Error> {
         let runtime = Arc::new(self.clone());
         let server = LanAgentServer::bind(addr, runtime, shared_secret, allowed_ips, allow_remote)
             .await?
-            .with_tool_executor(self.tool_executor.clone());
+            .with_tool_executor(self.tool_executor.clone())
+            .with_rate_limit(rate_limit_per_sec);
         Ok(server)
     }
 

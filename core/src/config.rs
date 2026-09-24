@@ -56,14 +56,21 @@ fn normalize_ollama_url(url: &str) -> String {
 }
 
 fn is_port_open(host: &str, port: u16) -> bool {
-    let addr = format!("{}:{}", host, port);
-    TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
-        Duration::from_millis(500),
-    )
-    .is_ok()
+    // Las direcciones IPv6 (p.ej. "::1") deben ir entre corchetes para que
+    // SocketAddr las parsee correctamente: "[::1]:11434".
+    let addr_str = if host.contains(':') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    };
+
+    // Si la dirección no parsea, no pánico — simplemente reportamos el puerto
+    // como cerrado.
+    let Ok(socket_addr) = addr_str.parse() else {
+        return false;
+    };
+
+    TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500)).is_ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +131,24 @@ pub struct NetworkConfig {
     pub allow_remote: bool,
     pub shared_secret: String,
     pub allowed_ips: Vec<String>,
+    /// Maximum new connections per second accepted from a single source IP.
+    /// Excess connections are dropped at the accept stage. Default: 20.
+    #[serde(default = "default_lan_rate_limit")]
+    pub lan_rate_limit_per_sec: u32,
+}
+
+fn default_lan_rate_limit() -> u32 {
+    20
+}
+
+impl NetworkConfig {
+    pub fn lan_rate_limit(&self) -> u32 {
+        if self.lan_rate_limit_per_sec == 0 {
+            default_lan_rate_limit()
+        } else {
+            self.lan_rate_limit_per_sec
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
