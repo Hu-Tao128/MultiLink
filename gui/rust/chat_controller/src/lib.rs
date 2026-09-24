@@ -123,6 +123,7 @@ pub extern "C" fn chat_backend_create(
     selected_server.base_url = normalize_base_url(&selected_server.base_url);
 
     let mut router = ProviderRouter::new();
+    router.set_ollama_base_url(&selected_server.base_url);
     router.register(Arc::new(OllamaProvider::new(
         selected_server.base_url.clone(),
         selected_server.default_model.clone(),
