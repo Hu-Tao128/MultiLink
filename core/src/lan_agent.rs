@@ -1,11 +1,13 @@
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::chat_runtime::ChatRuntime;
 use crate::tools::ToolExecutor;
@@ -45,6 +47,12 @@ impl LanEnvelope {
             .unwrap_or(0);
         if self.timestamp_ms > now.saturating_add(Self::MAX_CLOCK_SKEW_MS) {
             return Err("timestamp too far in future");
+        }
+        // Reject replayed messages: a captured signed envelope must not be
+        // re-usable indefinitely. Messages older than MAX_CLOCK_SKEW_MS are
+        // outside the valid window and must be rejected.
+        if now.saturating_sub(self.timestamp_ms) > Self::MAX_CLOCK_SKEW_MS {
+            return Err("message expired: replay attack window exceeded");
         }
         Ok(())
     }
@@ -162,6 +170,10 @@ pub struct LanAgentServer {
     allowed_ips: Vec<IpAddr>,
     allow_remote: bool,
     shutdown: Arc<RwLock<bool>>,
+    /// Per-IP connection rate limiter: (count_in_window, window_start).
+    rate_limiter: Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>,
+    /// Maximum accepted connections per second per source IP.
+    rate_limit_per_sec: u32,
 }
 
 impl LanAgentServer {
@@ -187,11 +199,19 @@ impl LanAgentServer {
             allowed_ips: parsed_ips,
             allow_remote,
             shutdown: Arc::new(RwLock::new(false)),
+            rate_limiter: Arc::new(Mutex::new(HashMap::new())),
+            rate_limit_per_sec: 20,
         })
     }
 
     pub fn with_tool_executor(mut self, executor: Arc<ToolExecutor>) -> Self {
         self.tool_executor = Some(executor);
+        self
+    }
+
+    /// Override the per-IP connection rate limit (connections/sec). Default: 20.
+    pub fn with_rate_limit(mut self, limit: u32) -> Self {
+        self.rate_limit_per_sec = limit;
         self
     }
 
@@ -208,8 +228,19 @@ impl LanAgentServer {
                 result = self.listener.accept() => {
                     match result {
                         Ok((stream, client_addr)) => {
-                            if !self.is_ip_allowed(&client_addr.ip()) {
-                                eprintln!("LAN Agent: connection rejected from {}", client_addr.ip());
+                            let client_ip = client_addr.ip();
+
+                            if !self.is_ip_allowed(&client_ip) {
+                                eprintln!("LAN Agent: connection rejected from {}", client_ip);
+                                continue;
+                            }
+
+                            // Rate-limit: drop excess connections per source IP.
+                            if self.is_rate_limited(client_ip).await {
+                                eprintln!(
+                                    "LAN Agent: rate limit exceeded for {}, dropping connection",
+                                    client_ip
+                                );
                                 continue;
                             }
 
@@ -231,6 +262,24 @@ impl LanAgentServer {
             }
         }
         Ok(())
+    }
+
+    /// Returns true if `ip` has exceeded the per-second connection limit.
+    /// Uses a simple sliding 1-second window per IP address.
+    async fn is_rate_limited(&self, ip: IpAddr) -> bool {
+        let mut guard = self.rate_limiter.lock().await;
+        let now = Instant::now();
+        let window = std::time::Duration::from_secs(1);
+
+        let entry = guard.entry(ip).or_insert((0, now));
+        if now.duration_since(entry.1) >= window {
+            // Window has expired — reset counter.
+            *entry = (1, now);
+            false
+        } else {
+            entry.0 += 1;
+            entry.0 > self.rate_limit_per_sec
+        }
     }
 
     fn is_ip_allowed(&self, client_ip: &IpAddr) -> bool {
@@ -560,5 +609,49 @@ mod tests {
         let stranger: IpAddr = "192.168.1.99".parse().expect("parse ip");
         let list = vec![allowed];
         assert!(!is_ip_allowed(&list, true, &stranger));
+    }
+
+    #[test]
+    fn envelope_with_stale_timestamp_is_rejected() {
+        // A timestamp more than MAX_CLOCK_SKEW_MS in the past must be rejected
+        // to close the replay-attack window.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let stale = LanEnvelope {
+            protocol_version: 1,
+            request_id: "stale-req".to_string(),
+            // 6 minutes in the past (exceeds 5-minute window)
+            timestamp_ms: now_ms.saturating_sub(LanEnvelope::MAX_CLOCK_SKEW_MS + 60_000),
+            hmac_signature: String::new(),
+            payload: LanPayload::Ping,
+        };
+
+        let result = stale.validate();
+        assert!(
+            result.is_err(),
+            "stale timestamp should be rejected as potential replay"
+        );
+        assert_eq!(result.unwrap_err(), "message expired: replay attack window exceeded");
+    }
+
+    #[test]
+    fn envelope_with_fresh_timestamp_is_accepted() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let fresh = LanEnvelope {
+            protocol_version: 1,
+            request_id: "fresh-req".to_string(),
+            timestamp_ms: now_ms,
+            hmac_signature: String::new(),
+            payload: LanPayload::Ping,
+        };
+
+        assert!(fresh.validate().is_ok(), "fresh timestamp should be accepted");
     }
 }
