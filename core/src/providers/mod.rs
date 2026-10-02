@@ -156,6 +156,14 @@ pub trait LLMProvider: Send + Sync {
     fn name(&self) -> &str;
     fn is_available(&self) -> bool;
 
+    /// Async version of is_available — uses non-blocking I/O.
+    /// Default: delegates to sync `is_available()` (safe for providers that
+    /// don't do blocking I/O, like Gemini/Codex). Ollama overrides this
+    /// with a proper `tokio::net::TcpStream` connect.
+    async fn is_available_async(&self) -> bool {
+        self.is_available()
+    }
+
     async fn send(&self, prompt: String, options: PromptOptions) -> Result<LLMResponse, LLMError>;
 
     async fn stream_send(

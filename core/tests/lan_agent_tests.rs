@@ -66,6 +66,13 @@ impl LLMProvider for MinimalMockProvider {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn make_runtime() -> Arc<ChatRuntime> {
     let mut router = ProviderRouter::new();
     router.register(Arc::new(MinimalMockProvider));
@@ -123,7 +130,7 @@ async fn send_signed(addr: SocketAddr, secret: &str, payload: LanPayload) -> Lan
     let envelope = LanEnvelope {
         protocol_version: 1,
         request_id: "test-req".to_string(),
-        timestamp_ms: 0,
+        timestamp_ms: now_ms(),
         hmac_signature: signature,
         payload,
     };
@@ -146,7 +153,7 @@ async fn send_wrong_signature(addr: SocketAddr, payload: LanPayload) -> LanEnvel
     let envelope = LanEnvelope {
         protocol_version: 1,
         request_id: "test-req".to_string(),
-        timestamp_ms: 0,
+        timestamp_ms: now_ms(),
         hmac_signature: signature,
         payload,
     };
@@ -166,7 +173,7 @@ async fn send_unsigned(addr: SocketAddr, payload: LanPayload) -> LanEnvelope {
     let envelope = LanEnvelope {
         protocol_version: 1,
         request_id: "test-req".to_string(),
-        timestamp_ms: 0,
+        timestamp_ms: now_ms(),
         hmac_signature: String::new(),
         payload,
     };
@@ -257,7 +264,7 @@ async fn lan_tampered_payload_is_rejected() {
     let envelope = LanEnvelope {
         protocol_version: 1,
         request_id: "tamper".to_string(),
-        timestamp_ms: 0,
+        timestamp_ms: now_ms(),
         hmac_signature: signature, // firma del original
         payload: tampered,         // payload diferente
     };
@@ -289,7 +296,7 @@ async fn lan_server_without_secret_returns_config_error() {
     let envelope = LanEnvelope {
         protocol_version: 1,
         request_id: "req".to_string(),
-        timestamp_ms: 0,
+        timestamp_ms: now_ms(),
         hmac_signature: String::new(),
         payload: LanPayload::Ping,
     };

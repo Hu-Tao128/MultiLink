@@ -49,6 +49,7 @@ public:
     Q_INVOKABLE void setSelectedSessionProjectRoot(const QString &projectRoot);
     Q_INVOKABLE void copyText(const QString &text);
     Q_INVOKABLE void clearStartupNotice();
+    Q_INVOKABLE bool setMissingOllamaNoticeSuppressed(bool suppressed);
     Q_INVOKABLE QString serversConfigJson();
     Q_INVOKABLE bool saveServersConfigJson(const QString &json);
     Q_INVOKABLE QString testServerConnection(const QString &baseUrl);

@@ -17,6 +17,7 @@ Page {
     property int currentTotalTokens: 0
     property bool currentUsageIsEstimated: false
     property int contextMaxTokens: 4096
+    property bool suppressStartupWarning: false
 
     readonly property color colorBackground: "#F5F6F7"
     readonly property color colorSurface: "#FFFFFF"
@@ -309,7 +310,15 @@ Page {
     Component.onCompleted: {
         hydrateCurrentSession()
         if (controller && controller.startupNotice.length > 0) {
-            configErrorDialog.open()
+            const notice = controller.startupNotice.toLowerCase()
+            const isOllamaMissingNotice = notice.indexOf("ollama") >= 0
+                && (notice.indexOf("no tienes ollama") >= 0
+                    || notice.indexOf("no se detecto respuesta de ollama") >= 0)
+            if (isOllamaMissingNotice) {
+                startupWarningDialog.open()
+            } else {
+                configErrorDialog.open()
+            }
         }
     }
 
@@ -354,11 +363,50 @@ Page {
         }
     }
 
+    Dialog {
+        id: startupWarningDialog
+        title: "Configura tu proveedor"
+        modal: true
+        standardButtons: Dialog.Ok
+        closePolicy: Popup.NoAutoClose
+        width: Math.min(chatPage.width - 40, 620)
+        onAccepted: {
+            if (controller && suppressStartupWarning) {
+                controller.setMissingOllamaNoticeSuppressed(true)
+            }
+            if (controller) {
+                controller.clearStartupNotice()
+            }
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 10
+            Label {
+                Layout.fillWidth: true
+                text: controller ? controller.startupNotice : ""
+                wrapMode: Text.Wrap
+            }
+            CheckBox {
+                text: "No mostrar de nuevo"
+                checked: suppressStartupWarning
+                onToggled: suppressStartupWarning = checked
+            }
+        }
+    }
+
     Connections {
         target: controller
         function onStartupNoticeChanged() {
             if (controller && controller.startupNotice.length > 0) {
-                configErrorDialog.open()
+                const notice = controller.startupNotice.toLowerCase()
+                const isOllamaMissingNotice = notice.indexOf("ollama") >= 0
+                    && (notice.indexOf("no tienes ollama") >= 0
+                        || notice.indexOf("no se detecto respuesta de ollama") >= 0)
+                if (isOllamaMissingNotice) {
+                    startupWarningDialog.open()
+                } else {
+                    configErrorDialog.open()
+                }
             }
         }
     }
@@ -411,20 +459,22 @@ Page {
                 id: sessionBox
                 textRole: "title"
                 model: controller ? controller.sessions : []
-                Layout.preferredWidth: 280
+                Layout.fillWidth: true
+                Layout.maximumWidth: 340
+                Layout.minimumWidth: 120
                 onActivated: function(index) {
                     selectSessionIndex(index)
                 }
             }
             Button {
-                text: "Nueva sesion"
+                text: "Nueva"
                 onClicked: {
                     pendingSelectNewestSession = true
                     controller.newSession()
                 }
             }
             Button {
-                text: "Eliminar sesion"
+                text: "Eliminar"
                 enabled: currentViewSessionId().length > 0
                 onClicked: {
                     pendingDeleteSessionId = currentViewSessionId()
@@ -434,7 +484,7 @@ Page {
                 }
             }
             Button {
-                text: "Limpiar vacías"
+                text: "Limpiar"
                 onClicked: controller.deleteEmptySessions()
             }
             Button {
@@ -443,17 +493,18 @@ Page {
                 onClicked: projectFolderDialog.open()
             }
             Label {
-                Layout.preferredWidth: 320
+                Layout.fillWidth: true
+                Layout.maximumWidth: 320
                 elide: Label.ElideMiddle
                 color: colorTextSecondary
                 text: (controller && controller.selectedProjectRoot.length > 0)
                       ? controller.selectedProjectRoot
                       : "Sin carpeta de proyecto"
             }
-            Item { Layout.fillWidth: true }
         }
 
         Rectangle {
+            id: chatArea
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.alignment: Qt.AlignHCenter
@@ -479,11 +530,13 @@ Page {
                 delegate: Item {
                     width: ListView.view.width
                     height: bubble.implicitHeight + 6
-                    property var segments: parseMessageSegments(model.text)
+
+                    property bool isStreaming: model.isStreaming === true
+                    property var segments: isStreaming ? [{ kind: "text", value: model.text }] : parseMessageSegments(model.text)
 
                     Rectangle {
                         id: bubble
-                        width: parent.width * 0.86
+                        width: Math.min(chatArea.width * 0.86, chatArea.width - 20)
                         implicitHeight: bubbleContent.implicitHeight + 14
                         anchors.right: model.role === "user" ? parent.right : undefined
                         anchors.left: model.role === "assistant" ? parent.left : undefined
@@ -724,7 +777,9 @@ Page {
                 id: providerModelBox
                 model: controller ? controller.availableModelsDetailed : []
                 textRole: "label"
-                Layout.preferredWidth: 340
+                Layout.fillWidth: true
+                Layout.maximumWidth: 380
+                Layout.minimumWidth: 120
                 delegate: ItemDelegate {
                     width: providerModelBox.width
                     text: modelData.provider + " - " + modelData.label
@@ -744,7 +799,7 @@ Page {
             TextField {
                 id: promptInput
                 Layout.fillWidth: true
-                Layout.preferredHeight: 40
+                Layout.minimumWidth: 80
                 placeholderText: "Escribe tu mensaje..."
                 enabled: !isStreamingActiveScope()
                 onAccepted: sendButton.clicked()
@@ -799,7 +854,9 @@ Page {
             }
             pendingAssistantText = ""
             if (currentAssistantDraftIndex() < 0) {
-                messageModel.append({ role: "assistant", text: "" })
+                messageModel.append({ role: "assistant", text: "", isStreaming: true })
+            } else {
+                messageModel.setProperty(currentAssistantDraftIndex(), "isStreaming", true)
             }
             scrollToBottom()
         }
@@ -809,7 +866,7 @@ Page {
             }
             let draftIndex = currentAssistantDraftIndex()
             if (draftIndex < 0) {
-                messageModel.append({ role: "assistant", text: "" })
+                messageModel.append({ role: "assistant", text: "", isStreaming: true })
                 draftIndex = currentAssistantDraftIndex()
                 pendingAssistantText = ""
             }
@@ -822,13 +879,17 @@ Page {
             }
             pendingAssistantText += text
             messageModel.setProperty(draftIndex, "text", pendingAssistantText)
-            chatList.positionViewAtEnd()
         }
         function onStreamFinished(sessionId) {
             if (sessionId !== currentViewSessionId()) {
                 return
             }
+            let draftIndex = currentAssistantDraftIndex()
+            if (draftIndex >= 0) {
+                messageModel.setProperty(draftIndex, "isStreaming", false)
+            }
             pendingAssistantText = ""
+            scrollToBottom()
         }
         function onStreamError(sessionId, message) {
             if (sessionId !== currentViewSessionId()) {

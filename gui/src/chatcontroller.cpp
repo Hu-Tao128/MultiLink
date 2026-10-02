@@ -45,6 +45,7 @@ char *chat_backend_get_provider_health(void *backend);
 bool chat_backend_get_is_loading(void *backend);
 char *chat_backend_get_startup_notice(void *backend);
 void chat_backend_clear_startup_notice(void *backend);
+bool chat_backend_set_missing_ollama_notice_suppressed(void *backend, bool suppressed);
 char *chat_backend_servers_config_json(void *backend);
 bool chat_backend_save_servers_config_json(void *backend, const char *servers_json);
 char *chat_backend_test_server_connection(void *backend, const char *base_url);
@@ -428,6 +429,13 @@ void ChatController::clearStartupNotice() {
     m_startupNotice.clear();
     chat_backend_clear_startup_notice(m_backend);
     emit startupNoticeChanged();
+}
+
+bool ChatController::setMissingOllamaNoticeSuppressed(bool suppressed) {
+    if (!m_backend) {
+        return false;
+    }
+    return chat_backend_set_missing_ollama_notice_suppressed(m_backend, suppressed);
 }
 
 QString ChatController::serversConfigJson() {

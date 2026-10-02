@@ -68,6 +68,9 @@ pub struct ProviderRouter {
     circuit_breaker_config: CircuitBreakerConfig,
     health_check_interval: Duration,
     shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// Base URL of the registered Ollama provider (cached on register()).
+    /// Used by ExecutionDispatcher to detect loopback primaries.
+    ollama_base_url: Option<String>,
 }
 
 impl Default for ProviderRouter {
@@ -86,6 +89,7 @@ impl ProviderRouter {
             circuit_breaker_config: CircuitBreakerConfig::default(),
             health_check_interval: Duration::from_secs(30),
             shutdown_tx: Arc::new(RwLock::new(None)),
+            ollama_base_url: None,
         }
     }
 
@@ -98,6 +102,7 @@ impl ProviderRouter {
             circuit_breaker_config: config,
             health_check_interval: Duration::from_secs(30),
             shutdown_tx: Arc::new(RwLock::new(None)),
+            ollama_base_url: None,
         }
     }
 
@@ -109,6 +114,18 @@ impl ProviderRouter {
     pub fn register(&mut self, provider: Arc<dyn LLMProvider>) {
         let id = provider.id();
         self.providers.insert(id, provider);
+    }
+
+    /// Store the Ollama primary base URL so the dispatcher can detect loopback
+    /// primaries without needing to downcast `Arc<dyn LLMProvider>`.
+    /// Call this alongside `register()` when wiring up an OllamaProvider.
+    pub fn set_ollama_base_url(&mut self, url: impl Into<String>) {
+        self.ollama_base_url = Some(normalize_base_url(&url.into()));
+    }
+
+    /// Returns the base URL of the registered Ollama provider, if any.
+    pub fn primary_ollama_url(&self) -> Option<&str> {
+        self.ollama_base_url.as_deref()
     }
 
     pub fn get_provider(&self, id: ProviderId) -> Option<&Arc<dyn LLMProvider>> {
@@ -397,7 +414,7 @@ impl ProviderRouter {
         }
 
         if let Some(provider) = self.providers.get(&preferred) {
-            if provider.is_available() && self.check_circuit_breaker(preferred).await {
+            if provider.is_available_async().await && self.check_circuit_breaker(preferred).await {
                 match provider.send(prompt.clone(), options.clone()).await {
                     Ok(response) => {
                         self.record_success(preferred).await;
@@ -419,7 +436,7 @@ impl ProviderRouter {
             }
 
             if let Some(provider) = self.providers.get(provider_id) {
-                if provider.is_available() && self.check_circuit_breaker(*provider_id).await {
+                if provider.is_available_async().await && self.check_circuit_breaker(*provider_id).await {
                     match self
                         .send_with_retry(provider, prompt.clone(), options.clone())
                         .await
@@ -440,6 +457,13 @@ impl ProviderRouter {
         Err(LLMError::Unavailable)
     }
 
+    // RETRY POLICY — Layer 3 (router, non-streaming):
+    // Wraps provider.send() for non-streaming requests. Handles transient
+    // availability issues by trying the same provider up to DEFAULT_MAX_RETRIES
+    // (3) times with 500ms base exponential backoff.
+    // Scope: one provider, multiple attempts at the router level.
+    // NOTE: This is NOT called from stream_send() — streaming retries are
+    // handled by OllamaProvider.stream_send() (Layer 2) directly.
     async fn send_with_retry(
         &self,
         provider: &Arc<dyn LLMProvider>,
@@ -488,7 +512,7 @@ impl ProviderRouter {
         }
 
         if let Some(provider) = self.providers.get(&preferred) {
-            if provider.is_available() && self.check_circuit_breaker(preferred).await {
+            if provider.is_available_async().await && self.check_circuit_breaker(preferred).await {
                 return provider.stream_send(prompt.clone(), options.clone()).await;
             }
         }
@@ -499,7 +523,7 @@ impl ProviderRouter {
             }
 
             if let Some(provider) = self.providers.get(provider_id) {
-                if provider.is_available() && self.check_circuit_breaker(*provider_id).await {
+                if provider.is_available_async().await && self.check_circuit_breaker(*provider_id).await {
                     return provider.stream_send(prompt.clone(), options.clone()).await;
                 }
             }
@@ -520,7 +544,7 @@ impl ProviderRouter {
         }
 
         if let Some(provider) = self.providers.get(&preferred) {
-            if provider.is_available() {
+            if provider.is_available_async().await {
                 return provider.get_model_info(model).await;
             }
         }
@@ -530,7 +554,7 @@ impl ProviderRouter {
                 continue;
             }
             if let Some(provider) = self.providers.get(provider_id) {
-                if provider.is_available() {
+                if provider.is_available_async().await {
                     return provider.get_model_info(model).await;
                 }
             }

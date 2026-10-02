@@ -75,6 +75,15 @@ impl ExecutionDispatcher {
             _ => None,
         };
 
+        // Detect loopback primaries: if the registered Ollama server is on
+        // 127.0.0.1 / ::1 / localhost, a failure must not trigger the remote
+        // fallback loop — the problem is local and remote servers won't help.
+        let primary_is_local = self
+            .router
+            .primary_ollama_url()
+            .map(is_loopback_url)
+            .unwrap_or(false);
+
         let primary_key = "primary-router".to_string();
         let primary_sem = self.semaphore_for(&primary_key, 1).await;
         let _primary_permit = primary_sem
@@ -104,16 +113,27 @@ impl ExecutionDispatcher {
                 })
             }
             Err(primary_err) => {
-                self.record_status(primary_key.clone(), false, started.elapsed().as_millis(), 0)
-                    .await;
+                // NOTE: We do NOT call record_status on the primary here.
+                // The router's ProviderRouter.record_failure() already tracks
+                // Ollama health via the circuit breaker in router.rs.
+                // `ExecutionDispatcher.circuits` tracks only remote execution
+                // servers, not the primary router path.
 
                 if !request.allow_remote_fallback
                     || request.provider != ProviderId::Ollama
                     || self.servers.is_empty()
+                    || primary_is_local
                 {
                     return Err(primary_err);
                 }
 
+                // RETRY POLICY — Layer 4 (dispatcher, fallback loop):
+                // Iterates remote execution_servers after the primary router
+                // path fails. Each remote server is tried once; circuit-open
+                // servers are skipped. 150ms base exponential backoff between
+                // attempts (capped at 1200ms).
+                // Scope: cross-server fallback. Only reached when primary is
+                // non-loopback AND allow_remote_fallback = true.
                 let mut retries = 0usize;
                 let mut last_err = primary_err;
                 for server in self.servers.iter().filter(|s| s.enabled) {
@@ -257,4 +277,29 @@ fn normalize_base_url(input: &str) -> String {
         return trimmed.to_string();
     }
     format!("http://{}", trimmed)
+}
+
+/// Returns true if the host part of `url` is a loopback address (127.0.0.1,
+/// ::1, or the string "localhost"). Used to prevent remote fallback when the
+/// primary Ollama target is local — a local failure will not be resolved by
+/// trying a remote execution server.
+pub(crate) fn is_loopback_url(url: &str) -> bool {
+    // Strip scheme
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+
+    // Extract host (drop path/port)
+    let host = if rest.starts_with('[') {
+        // IPv6 bracket form: [::1]:port/path
+        rest.trim_start_matches('[')
+            .split(']')
+            .next()
+            .unwrap_or(rest)
+    } else {
+        rest.split('/').next().unwrap_or(rest).split(':').next().unwrap_or(rest)
+    };
+
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }

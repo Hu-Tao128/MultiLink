@@ -1,4 +1,4 @@
-use std::net::{SocketAddr, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -64,19 +64,28 @@ fn normalize_ollama_url(url: &str) -> String {
 }
 
 fn is_port_open(host: &str, port: u16) -> bool {
-    let addr = format!("{}:{}", host, port);
-    let fallback = SocketAddr::from(([127, 0, 0, 1], 0));
-    TcpStream::connect_timeout(
-        &addr.parse().unwrap_or(fallback),
-        Duration::from_millis(500),
-    )
-    .is_ok()
+    // Las direcciones IPv6 (p.ej. "::1") deben ir entre corchetes para que
+    // SocketAddr las parsee correctamente: "[::1]:11434".
+    let addr_str = if host.contains(':') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    };
+
+    // Si la dirección no parsea, no pánico — simplemente reportamos el puerto
+    // como cerrado.
+    let Ok(socket_addr) = addr_str.parse() else {
+        return false;
+    };
+
+    TcpStream::connect_timeout(&socket_addr, Duration::from_millis(500)).is_ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     Ollama,
+    OllamaCloud,
     Gemini,
     Codex,
 }
@@ -130,6 +139,24 @@ pub struct NetworkConfig {
     pub allow_remote: bool,
     pub shared_secret: String,
     pub allowed_ips: Vec<String>,
+    /// Maximum new connections per second accepted from a single source IP.
+    /// Excess connections are dropped at the accept stage. Default: 20.
+    #[serde(default = "default_lan_rate_limit")]
+    pub lan_rate_limit_per_sec: u32,
+}
+
+fn default_lan_rate_limit() -> u32 {
+    20
+}
+
+impl NetworkConfig {
+    pub fn lan_rate_limit(&self) -> u32 {
+        if self.lan_rate_limit_per_sec == 0 {
+            default_lan_rate_limit()
+        } else {
+            self.lan_rate_limit_per_sec
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +164,7 @@ pub struct NetworkConfig {
 pub struct UiConfig {
     pub streaming: bool,
     pub json_logs: bool,
+    pub suppress_missing_ollama_notice: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,6 +467,7 @@ impl Default for UiConfig {
         Self {
             streaming: true,
             json_logs: false,
+            suppress_missing_ollama_notice: false,
         }
     }
 }
@@ -628,7 +657,7 @@ impl AppConfig {
             if let Some(server) = self
                 .servers
                 .iter_mut()
-                .find(|s| s.provider == ProviderKind::Ollama)
+                .find(|s| matches!(s.provider, ProviderKind::Ollama | ProviderKind::OllamaCloud))
             {
                 server.base_url = value;
             }
@@ -638,7 +667,7 @@ impl AppConfig {
             if let Some(server) = self
                 .servers
                 .iter_mut()
-                .find(|s| s.provider == ProviderKind::Ollama)
+                .find(|s| matches!(s.provider, ProviderKind::Ollama | ProviderKind::OllamaCloud))
             {
                 server.default_model = value;
             }
@@ -777,7 +806,10 @@ impl AppConfig {
         let mut execution_servers: Vec<ExecutionServerRuntime> = self
             .servers
             .iter()
-            .filter(|s| s.enabled && s.provider == ProviderKind::Ollama)
+            .filter(|s| {
+                s.enabled
+                    && matches!(s.provider, ProviderKind::Ollama | ProviderKind::OllamaCloud)
+            })
             .map(|s| ExecutionServerRuntime {
                 name: s.name.clone(),
                 base_url: s.base_url.clone(),

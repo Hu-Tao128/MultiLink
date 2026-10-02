@@ -20,6 +20,7 @@ pub mod session;
 pub mod skills;
 pub mod system;
 pub mod tools;
+pub mod web_assets;
 
 pub use context_engine::{
     ContextEngine, ContextEngineV1, ContextEngineV2, ContextEngineV2Plus, ContextEngineVersion,

@@ -50,6 +50,8 @@ impl LLMProvider for FailingPrimaryProvider {
 
 fn dispatcher_with_unreachable_remote() -> ExecutionDispatcher {
     let mut router = ProviderRouter::new();
+    // Primary is a non-loopback URL so remote fallback is attempted.
+    router.set_ollama_base_url("http://192.168.1.100:11434");
     router.register(Arc::new(FailingPrimaryProvider));
 
     ExecutionDispatcher::new(
@@ -57,6 +59,25 @@ fn dispatcher_with_unreachable_remote() -> ExecutionDispatcher {
         vec![ExecutionServerRuntime {
             name: "Remote fallback".to_string(),
             base_url: "http://127.0.0.1:9".to_string(),
+            default_model: "qwen2.5-coder:3b".to_string(),
+            priority: 1,
+            enabled: true,
+            max_concurrency: 1,
+        }],
+    )
+}
+
+fn dispatcher_with_loopback_primary() -> ExecutionDispatcher {
+    let mut router = ProviderRouter::new();
+    // Primary is loopback — remote fallback must be suppressed.
+    router.set_ollama_base_url("http://127.0.0.1:11434");
+    router.register(Arc::new(FailingPrimaryProvider));
+
+    ExecutionDispatcher::new(
+        Arc::new(router),
+        vec![ExecutionServerRuntime {
+            name: "Remote fallback".to_string(),
+            base_url: "http://192.168.1.200:11434".to_string(),
             default_model: "qwen2.5-coder:3b".to_string(),
             priority: 1,
             enabled: true,
@@ -108,5 +129,32 @@ async fn dispatcher_attempts_remote_fallback_when_allowed() {
     assert!(
         !err.to_string().contains("primary fail"),
         "expected fallback attempt to replace primary error"
+    );
+}
+
+#[tokio::test]
+async fn dispatcher_does_not_fall_back_when_primary_is_loopback() {
+    // When the primary Ollama URL is loopback (127.0.0.1 / ::1 / localhost),
+    // a failure should return the primary error directly without contacting
+    // any remote execution server — the problem is local.
+    let dispatcher = dispatcher_with_loopback_primary();
+
+    let err = match dispatcher
+        .dispatch(ExecutionDispatchRequest {
+            provider: ProviderId::Ollama,
+            prompt: "hello".to_string(),
+            options: PromptOptions::default(),
+            allow_remote_fallback: true, // would normally allow fallback
+        })
+        .await
+    {
+        Ok(_) => panic!("dispatch should fail"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string().contains("primary fail"),
+        "loopback primary failure must propagate without remote fallback, got: {}",
+        err
     );
 }
