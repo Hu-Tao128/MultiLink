@@ -12,6 +12,7 @@ Page {
     property bool statusOk: false
 
     readonly property real narrowThreshold: 600
+    readonly property real outerMargin: Math.min(16, settingsPage.width * 0.03)
 
     function loadServers() {
         serversModel.clear()
@@ -34,7 +35,8 @@ Page {
                 default_model: row.default_model || "auto",
                 priority: Number(row.priority || (i + 1)),
                 enabled: row.enabled === undefined ? true : !!row.enabled,
-                test_result: ""
+                test_result: "",
+                testing: false
             })
         }
     }
@@ -64,21 +66,111 @@ Page {
             : "No se pudo guardar la configuracion"
     }
 
-    Component.onCompleted: loadServers()
+    function defaultBaseUrlFor(provider) {
+        if (provider === "deepseek") return "https://api.deepseek.com"
+        if (provider === "gemini") return "https://generativelanguage.googleapis.com"
+        if (provider === "codex") return "https://api.openai.com/v1"
+        return "http://127.0.0.1:11434"
+    }
+
+    function loadProviderTokens() {
+        providerKeysModel.clear()
+        const providers = [
+            { key: "deepseek", label: "DeepSeek" },
+            { key: "gemini", label: "Gemini" },
+            { key: "codex", label: "Codex / OpenAI" }
+        ]
+        for (let i = 0; i < providers.length; i += 1) {
+            const entry = providers[i]
+            providerKeysModel.append({
+                providerKey: entry.key,
+                label: entry.label,
+                hasToken: controller ? controller.hasProviderToken(entry.key) : false,
+                inputText: "",
+                testing: false,
+                statusText: ""
+            })
+        }
+    }
+
+    function saveProviderTokenAt(index) {
+        const item = providerKeysModel.get(index)
+        if (!item.inputText || item.inputText.length === 0) {
+            return
+        }
+        const ok = controller
+            ? controller.saveProviderToken(item.providerKey, item.inputText)
+            : false
+        providerKeysModel.setProperty(index, "hasToken", ok)
+        providerKeysModel.setProperty(index, "statusText",
+            ok ? "Clave guardada. Ya esta activa." : "No se pudo guardar la clave.")
+        providerKeysModel.setProperty(index, "inputText", "")
+    }
+
+    function testProviderKeyAt(index) {
+        const item = providerKeysModel.get(index)
+        const candidate = item.inputText && item.inputText.length > 0 ? item.inputText : ""
+        providerKeysModel.setProperty(index, "testing", true)
+        providerKeysModel.setProperty(index, "statusText", "Probando clave...")
+        const raw = controller
+            ? controller.testProviderKey(item.providerKey, candidate)
+            : "{\"ok\":false,\"error\":\"controller no disponible\",\"hint\":\"\"}"
+        let parsed = { ok: false, model_count: 0, error: "respuesta invalida", hint: "" }
+        try {
+            parsed = JSON.parse(raw)
+        } catch (e) {
+        }
+        const ok = !!parsed.ok
+        providerKeysModel.setProperty(index, "testing", false)
+        if (ok) {
+            providerKeysModel.setProperty(index, "hasToken", true)
+            providerKeysModel.setProperty(index, "inputText", "")
+            providerKeysModel.setProperty(index, "statusText",
+                "Clave valida. Modelos detectados: " + parsed.model_count)
+        } else {
+            providerKeysModel.setProperty(index, "statusText",
+                "Error: " + parsed.error
+                + (parsed.hint && parsed.hint.length > 0 ? "\n" + parsed.hint : ""))
+        }
+    }
+
+    function clearProviderTokenAt(index) {
+        const item = providerKeysModel.get(index)
+        const ok = controller
+            ? controller.clearProviderToken(item.providerKey)
+            : false
+        if (ok) {
+            providerKeysModel.setProperty(index, "hasToken", false)
+        }
+        providerKeysModel.setProperty(index, "statusText",
+            ok ? "Clave eliminada." : "No se pudo eliminar la clave.")
+        providerKeysModel.setProperty(index, "inputText", "")
+    }
+
+    Component.onCompleted: {
+        loadServers()
+        loadProviderTokens()
+    }
 
     ListModel { id: serversModel }
+    ListModel { id: providerKeysModel }
 
     ScrollView {
+        id: settingsScroll
         anchors.fill: parent
+        contentWidth: availableWidth
 
         ColumnLayout {
-            anchors.margins: Math.min(16, settingsPage.width * 0.03)
+            x: settingsPage.outerMargin
+            width: Math.max(0, settingsScroll.availableWidth - (2 * settingsPage.outerMargin))
             spacing: 12
+            Layout.fillWidth: true
 
             Label {
                 text: "Servidores"
                 font.bold: true
                 font.pixelSize: 18
+                Layout.topMargin: settingsPage.outerMargin
             }
 
             Label {
@@ -120,7 +212,7 @@ Page {
 
                         GridLayout {
                             id: serverFormGrid
-                            columns: width > settingsPage.narrowThreshold ? 2 : 1
+                            columns: width > 1100 ? 3 : (width > settingsPage.narrowThreshold ? 2 : 1)
                             columnSpacing: 8
                             rowSpacing: 8
                             Layout.fillWidth: true
@@ -132,9 +224,24 @@ Page {
                                 onTextChanged: serversModel.setProperty(index, "name", text)
                             }
                             ComboBox {
-                                model: ["ollama", "ollama_cloud", "gemini", "codex"]
-                                currentIndex: Math.max(0, ["ollama", "ollama_cloud", "gemini", "codex"].indexOf(model.provider))
-                                onActivated: serversModel.setProperty(index, "provider", currentText)
+                                model: ["ollama", "ollama_cloud", "gemini", "codex", "deepseek"]
+                                currentIndex: Math.max(0, ["ollama", "ollama_cloud", "gemini", "codex", "deepseek"].indexOf(model.provider))
+                                onActivated: {
+                                    const nextProvider = currentText
+                                    const previousBase = model.base_url || ""
+                                    const looksLocal = previousBase.length === 0
+                                        || previousBase.indexOf("127.0.0.1") >= 0
+                                        || previousBase.indexOf("localhost") >= 0
+                                    serversModel.setProperty(index, "provider", nextProvider)
+                                    if (looksLocal) {
+                                        serversModel.setProperty(index, "base_url",
+                                            defaultBaseUrlFor(nextProvider))
+                                    }
+                                    if (nextProvider === "deepseek"
+                                            && (!model.default_model || model.default_model === "auto")) {
+                                        serversModel.setProperty(index, "default_model", "deepseek-chat")
+                                    }
+                                }
                             }
 
                             TextField {
@@ -231,6 +338,90 @@ Page {
                 color: statusOk ? "#2E7D32" : "#B3261E"
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
+            }
+
+            Label {
+                text: "Claves de API"
+                font.bold: true
+                font.pixelSize: 18
+                Layout.topMargin: 12
+            }
+
+            Label {
+                text: "Pega la clave y pulsa \"Probar clave\": se valida, se guarda y los modelos del proveedor aparecen como un servidor mas (con prioridad editable en Servidores)."
+                color: "#666"
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+
+            Repeater {
+                model: providerKeysModel
+                delegate: Frame {
+                    Layout.fillWidth: true
+                    padding: 10
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Label {
+                                text: model.label
+                                font.bold: true
+                            }
+                            Item { Layout.fillWidth: true }
+                            Label {
+                                text: model.hasToken ? "Configurada" : "Sin configurar"
+                                color: model.hasToken ? "#2E7D32" : "#B3261E"
+                            }
+                        }
+
+                        GridLayout {
+                            Layout.fillWidth: true
+                            columns: settingsPage.width > settingsPage.narrowThreshold ? 4 : 1
+                            columnSpacing: 6
+                            rowSpacing: 6
+
+                            TextField {
+                                Layout.fillWidth: true
+                                placeholderText: model.hasToken
+                                    ? "Reemplazar clave..."
+                                    : "Pega la API key aqui"
+                                echoMode: TextInput.Password
+                                text: model.inputText
+                                onTextChanged: providerKeysModel.setProperty(index, "inputText", text)
+                            }
+                            Button {
+                                text: model.testing ? "Probando..." : "Probar clave"
+                                enabled: !model.testing
+                                    && (model.hasToken || model.inputText.length > 0)
+                                Layout.fillWidth: settingsPage.width <= settingsPage.narrowThreshold
+                                onClicked: testProviderKeyAt(index)
+                            }
+                            Button {
+                                text: "Guardar"
+                                enabled: model.inputText.length > 0
+                                Layout.fillWidth: settingsPage.width <= settingsPage.narrowThreshold
+                                onClicked: saveProviderTokenAt(index)
+                            }
+                            Button {
+                                text: "Borrar"
+                                enabled: model.hasToken && !model.testing
+                                Layout.fillWidth: settingsPage.width <= settingsPage.narrowThreshold
+                                onClicked: clearProviderTokenAt(index)
+                            }
+                        }
+
+                        Label {
+                            text: model.statusText
+                            visible: model.statusText.length > 0
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            color: "#666"
+                        }
+                    }
+                }
             }
         }
     }

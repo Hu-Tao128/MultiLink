@@ -49,6 +49,10 @@ bool chat_backend_set_missing_ollama_notice_suppressed(void *backend, bool suppr
 char *chat_backend_servers_config_json(void *backend);
 bool chat_backend_save_servers_config_json(void *backend, const char *servers_json);
 char *chat_backend_test_server_connection(void *backend, const char *base_url);
+char *chat_backend_test_provider_key(void *backend, const char *provider, const char *token);
+int chat_backend_save_provider_token(void *backend, const char *provider, const char *token);
+int chat_backend_clear_provider_token(void *backend, const char *provider);
+int chat_backend_has_provider_token(void *backend, const char *provider);
 void chat_backend_string_free(char *ptr);
 }
 
@@ -464,6 +468,48 @@ QString ChatController::testServerConnection(const QString &baseUrl) {
     }
     const QByteArray encoded = baseUrl.toUtf8();
     return takeRustString(chat_backend_test_server_connection(m_backend, encoded.constData()));
+}
+
+QString ChatController::testProviderKey(const QString &provider, const QString &token) {
+    if (!m_backend || provider.trimmed().isEmpty()) {
+        return QStringLiteral("{\"ok\":false,\"error\":\"backend unavailable\",\"hint\":\"\",\"models\":[],\"model_count\":0}");
+    }
+    const QByteArray providerEncoded = provider.toUtf8();
+    const QByteArray tokenEncoded = token.toUtf8();
+    return takeRustString(chat_backend_test_provider_key(
+        m_backend,
+        providerEncoded.constData(),
+        tokenEncoded.constData()
+    ));
+}
+
+bool ChatController::saveProviderToken(const QString &provider, const QString &token) {
+    if (!m_backend || provider.trimmed().isEmpty() || token.isEmpty()) {
+        return false;
+    }
+    const QByteArray providerEncoded = provider.toUtf8();
+    const QByteArray tokenEncoded = token.toUtf8();
+    return chat_backend_save_provider_token(
+               m_backend,
+               providerEncoded.constData(),
+               tokenEncoded.constData()
+           ) != 0;
+}
+
+bool ChatController::clearProviderToken(const QString &provider) {
+    if (!m_backend || provider.trimmed().isEmpty()) {
+        return false;
+    }
+    const QByteArray providerEncoded = provider.toUtf8();
+    return chat_backend_clear_provider_token(m_backend, providerEncoded.constData()) != 0;
+}
+
+bool ChatController::hasProviderToken(const QString &provider) {
+    if (!m_backend || provider.trimmed().isEmpty()) {
+        return false;
+    }
+    const QByteArray providerEncoded = provider.toUtf8();
+    return chat_backend_has_provider_token(m_backend, providerEncoded.constData()) != 0;
 }
 
 

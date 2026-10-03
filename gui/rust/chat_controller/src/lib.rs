@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use multilink_core::auth::TokenStore;
 use multilink_core::config::ServerConfig;
 use multilink_core::providers::codex::CodexProvider;
+use multilink_core::providers::deepseek::DeepSeekProvider;
 use multilink_core::providers::gemini::GeminiProvider;
 use multilink_core::providers::ollama::OllamaProvider;
 use multilink_core::{
@@ -129,26 +130,8 @@ pub extern "C" fn chat_backend_create(
         selected_server.default_model.clone(),
     )));
 
-    let token_store_path = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("multilink");
-    let token_store = TokenStore::for_path(token_store_path.clone());
-    let gemini_token = runtime.block_on(async {
-        token_store
-            .load("gemini")
-            .await
-            .ok()
-            .flatten()
-            .map(|t| t.access_token)
-    });
-    let codex_token = runtime.block_on(async {
-        token_store
-            .load("codex")
-            .await
-            .ok()
-            .flatten()
-            .map(|t| t.access_token)
-    });
+    let gemini_token = load_provider_token(&runtime, "gemini");
+    let codex_token = load_provider_token(&runtime, "codex");
 
     if let Ok(gemini) = GeminiProvider::new(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
@@ -165,6 +148,35 @@ pub extern "C" fn chat_backend_create(
         120,
     ) {
         router.register(Arc::new(codex));
+    }
+
+    // DeepSeek: OpenAI-compatible Chat Completions API. Prefer the API key from
+    // the environment, then fall back to the token store (same mechanism used
+    // for Gemini/Codex). The base URL / model come from the configured server
+    // when present, otherwise from sensible defaults.
+    let deepseek_api_key = std::env::var("DEEPSEEK_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| load_provider_token(&runtime, "deepseek"));
+    let deepseek_server = config
+        .servers
+        .iter()
+        .find(|server| matches!(server.provider, ProviderKind::DeepSeek))
+        .cloned();
+    let deepseek_base_url = deepseek_server
+        .as_ref()
+        .map(|server| normalize_base_url(&server.base_url))
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| DeepSeekProvider::default_base_url().to_string());
+    let deepseek_model = deepseek_server
+        .as_ref()
+        .map(|server| server.default_model.clone())
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| "deepseek-chat".to_string());
+    if let Ok(deepseek) =
+        DeepSeekProvider::new(deepseek_base_url, deepseek_api_key, deepseek_model, 0)
+    {
+        router.register(Arc::new(deepseek));
     }
 
     let chat_runtime = Arc::new(
@@ -490,10 +502,18 @@ pub unsafe extern "C" fn chat_backend_new_session(handle: *mut BackendHandle) ->
         Some(model)
     };
 
+    let resolved_provider = resolve_provider_for_route(
+        &backend.config_path,
+        &backend.runtime,
+        model_server_url.as_deref(),
+        selected_model.as_deref(),
+    )
+    .unwrap_or(ProviderId::Ollama);
+
     let id = backend.runtime.block_on(async {
         let id = backend
             .chat_runtime
-            .create_session(ProviderId::Ollama, selected_model.clone())
+            .create_session(resolved_provider, selected_model.clone())
             .await;
         let _ = backend
             .chat_runtime
@@ -620,11 +640,23 @@ pub unsafe extern "C" fn chat_backend_select_model_with_server(
         .map(|v| v.clone())
         .unwrap_or_default();
 
+    let resolved_provider = resolve_provider_for_route(
+        &backend.config_path,
+        &backend.runtime,
+        selected_server_url.as_deref(),
+        Some(value.as_str()),
+    );
+
     let runtime = backend.runtime.handle().clone();
     let chat_runtime = backend.chat_runtime.clone();
     let value_for_task = value.clone();
     let selected_server_for_task = selected_server_url.clone();
     runtime.spawn(async move {
+        if let Some(provider) = resolved_provider {
+            let _ = chat_runtime
+                .update_session_provider(&active_session, provider)
+                .await;
+        }
         let _ = chat_runtime
             .update_session_model_route(
                 &active_session,
@@ -635,6 +667,14 @@ pub unsafe extern "C" fn chat_backend_select_model_with_server(
     });
 
     if let Ok(mut ui) = backend.ui_state.lock() {
+        if let Some(provider) = resolved_provider {
+            ui.active_provider = provider_label(provider).to_string();
+            ui.provider_scope = if provider == ProviderId::Ollama {
+                "LOCAL".to_string()
+            } else {
+                "REMOTE".to_string()
+            };
+        }
         ui.active_model = value;
         ui.active_model_server_url = selected_server_url;
     }
@@ -786,6 +826,11 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
         );
     }
 
+    let deepseek_api_key = std::env::var("DEEPSEEK_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| load_provider_token(&backend.runtime, "deepseek"));
+
     let result = backend.runtime.block_on(async move {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(3))
@@ -801,51 +846,23 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
             };
         };
 
-        let endpoint = format!("{}/api/tags", url);
-        let response = match client.get(endpoint).send().await {
-            Ok(v) => v,
-            Err(err) => {
-                let err_text = err.to_string();
-                return ServerTestResult {
-                    ok: false,
-                    model_count: 0,
-                    models: Vec::new(),
-                    error: err_text.clone(),
-                    hint: connection_hint_for_error(&url, &err_text),
-                };
-            }
-        };
-
-        if !response.status().is_success() {
-            return ServerTestResult {
-                ok: false,
-                model_count: 0,
-                models: Vec::new(),
-                error: format!("http status {}", response.status()),
-                hint: String::new(),
-            };
+        let ollama = probe_ollama_tags_detailed(&client, &url).await;
+        if ollama.ok {
+            return ollama;
         }
 
-        let tags = match response.json::<OllamaTagsResponse>().await {
-            Ok(v) => v,
-            Err(err) => {
-                return ServerTestResult {
-                    ok: false,
-                    model_count: 0,
-                    models: Vec::new(),
-                    error: format!("invalid response: {}", err),
-                    hint: String::new(),
-                }
-            }
-        };
+        let openai = probe_openai_models(&client, &url, deepseek_api_key.as_deref()).await;
+        if openai.ok {
+            return openai;
+        }
 
-        let models: Vec<String> = tags.models.into_iter().map(|m| m.name).collect();
-        ServerTestResult {
-            ok: true,
-            model_count: models.len(),
-            models,
-            error: String::new(),
-            hint: String::new(),
+        // Prefer the native Ollama diagnostics for connectivity problems, but
+        // surface the OpenAI-compatible probe when it is more specific (for
+        // example, an auth error on a DeepSeek endpoint).
+        if ollama.hint.is_empty() && !ollama.error.starts_with("invalid response") {
+            ollama
+        } else {
+            openai
         }
     });
 
@@ -853,6 +870,88 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
         serde_json::to_string(&result)
             .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialization failed\"}".to_string()),
     )
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_test_provider_key(
+    handle: *mut BackendHandle,
+    provider_cstr: *const c_char,
+    token_cstr: *const c_char,
+) -> *mut c_char {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return into_c_string(provider_error_json("backend unavailable"));
+    };
+    let Some(provider) = c_char_ptr_to_string(provider_cstr).map(|value| value.trim().to_ascii_lowercase())
+    else {
+        return into_c_string(provider_error_json("proveedor invalido"));
+    };
+    if provider.is_empty() || provider_server_defaults(&provider).is_none() {
+        return into_c_string(provider_error_json("proveedor no soportado"));
+    }
+
+    let provided_token = c_char_ptr_to_string(token_cstr)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let base_url = resolve_provider_base_url(&backend.config_path, &backend.runtime, &provider);
+    let token = match provided_token.clone() {
+        Some(token) => Some(token),
+        None => load_provider_token(&backend.runtime, &provider),
+    };
+
+    let result = backend
+        .runtime
+        .block_on(async { probe_provider_models(&provider, &base_url, token.as_deref()).await });
+
+    if result.ok {
+        if let Some(token) = provided_token {
+            let stored = multilink_core::StoredToken {
+                access_token: token.clone(),
+                refresh_token: None,
+                expires_at: None,
+                token_type: Some("Bearer".to_string()),
+            };
+            let store = TokenStore::for_path(primary_token_store_root());
+            let _ = backend.runtime.block_on(store.save(&provider, &stored));
+            backend
+                .chat_runtime
+                .set_provider_token(provider_id_from_str(&provider), Some(token));
+        }
+
+        // Register the provider as a server (using a discovered model when
+        // available) so its models become selectable and prioritizable.
+        let preferred_model = result
+            .models
+            .iter()
+            .find(|model| !is_embedding_like_model(model))
+            .cloned();
+        let config_path = backend.config_path.clone();
+        let provider_for_task = provider.clone();
+        backend.runtime.block_on(async {
+            if let Ok(mut cfg) = AppConfig::load_or_create(&config_path).await {
+                if ensure_provider_server(&mut cfg, &provider_for_task, preferred_model.as_deref()) {
+                    if let Ok(body) = toml::to_string_pretty(&cfg) {
+                        let _ = std::fs::write(&config_path, body);
+                    }
+                }
+            }
+        });
+
+        unsafe { chat_backend_request_models(handle) };
+    }
+
+    into_c_string(serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string()))
+}
+
+fn provider_error_json(message: &str) -> String {
+    serde_json::json!({
+        "ok": false,
+        "model_count": 0,
+        "models": [],
+        "error": message,
+        "hint": ""
+    })
+    .to_string()
 }
 
 #[unsafe(no_mangle)]
@@ -1193,7 +1292,7 @@ pub extern "C" fn chat_backend_save_provider_token(
     }
 
     let stored = multilink_core::StoredToken {
-        access_token: token,
+        access_token: token.clone(),
         refresh_token: None,
         expires_at: None,
         token_type: Some("Bearer".to_string()),
@@ -1204,7 +1303,33 @@ pub extern "C" fn chat_backend_save_provider_token(
         .join("multilink");
     let store = TokenStore::for_path(store_path);
     match backend.runtime.block_on(store.save(&provider, &stored)) {
-        Ok(_) => 1,
+        Ok(_) => {
+            // Apply the credential to the live provider so the key works
+            // immediately, without restarting the app.
+            backend
+                .chat_runtime
+                .set_provider_token(provider_id_from_str(&provider), Some(token));
+
+            // Convenience: make the provider usable as a server so its models
+            // become selectable and it can be prioritised, without extra steps.
+            if provider_server_defaults(&provider).is_some() {
+                let config_path = backend.config_path.clone();
+                let provider_for_task = provider.clone();
+                backend.runtime.block_on(async {
+                    if let Ok(mut cfg) = AppConfig::load_or_create(&config_path).await {
+                        if ensure_provider_server(&mut cfg, &provider_for_task, None) {
+                            if let Ok(body) = toml::to_string_pretty(&cfg) {
+                                let _ = std::fs::write(&config_path, body);
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Refresh the model list so newly available models show up.
+            unsafe { chat_backend_request_models(handle) };
+            1
+        }
         Err(_) => 0,
     }
 }
@@ -1239,7 +1364,13 @@ pub extern "C" fn chat_backend_clear_provider_token(
         .runtime
         .block_on(store.save(&provider, &empty_token))
     {
-        Ok(_) => 1,
+        Ok(_) => {
+            backend
+                .chat_runtime
+                .set_provider_token(provider_id_from_str(&provider), None);
+            unsafe { chat_backend_request_models(handle) };
+            1
+        }
         Err(_) => 0,
     }
 }
@@ -1365,21 +1496,54 @@ async fn build_sessions_json(chat_runtime: &ChatRuntime) -> String {
 }
 
 async fn build_models_json(config_path: &PathBuf, fallback_base_url: &str) -> String {
-    let mut servers = load_enabled_ollama_servers(config_path);
+    let mut servers = load_enabled_chat_servers(config_path);
     if servers.is_empty() {
-        servers.push(("Primary".to_string(), normalize_base_url(fallback_base_url)));
+        servers.push((
+            "Primary".to_string(),
+            normalize_base_url(fallback_base_url),
+            ProviderKind::Ollama,
+            String::new(),
+        ));
     }
 
     let mut rows = Vec::new();
-    for (server_name, base_url) in servers {
-        let models = fetch_models_for_server(&server_name, &base_url).await;
-        rows.extend(models);
+    for (server_name, base_url, kind, default_model) in servers {
+        match kind {
+            ProviderKind::DeepSeek | ProviderKind::Codex => {
+                let key = provider_api_key(provider_key_of(kind)).await;
+                rows.extend(
+                    fetch_openai_models_for_server(
+                        &server_name,
+                        &base_url,
+                        &default_model,
+                        key.as_deref(),
+                        kind == ProviderKind::DeepSeek,
+                    )
+                    .await,
+                );
+            }
+            ProviderKind::Gemini => {
+                let key = provider_api_key("gemini").await;
+                rows.extend(
+                    fetch_gemini_models_for_server(
+                        &server_name,
+                        &base_url,
+                        &default_model,
+                        key.as_deref(),
+                    )
+                    .await,
+                );
+            }
+            _ => {
+                rows.extend(fetch_models_for_server(&server_name, &base_url).await);
+            }
+        }
     }
 
     serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn load_enabled_ollama_servers(config_path: &PathBuf) -> Vec<(String, String)> {
+fn load_enabled_chat_servers(config_path: &PathBuf) -> Vec<(String, String, ProviderKind, String)> {
     let mut out = Vec::new();
     if let Ok(raw) = std::fs::read_to_string(config_path) {
         if let Ok(cfg) = toml::from_str::<AppConfig>(&raw) {
@@ -1388,12 +1552,24 @@ fn load_enabled_ollama_servers(config_path: &PathBuf) -> Vec<(String, String)> {
                 .into_iter()
                 .filter(|s| {
                     s.enabled
-                        && matches!(s.provider, ProviderKind::Ollama | ProviderKind::OllamaCloud)
+                        && matches!(
+                            s.provider,
+                            ProviderKind::Ollama
+                                | ProviderKind::OllamaCloud
+                                | ProviderKind::DeepSeek
+                                | ProviderKind::Gemini
+                                | ProviderKind::Codex
+                        )
                 })
                 .collect::<Vec<_>>();
             servers.sort_by_key(|s| s.priority);
             for server in servers {
-                out.push((server.name, normalize_base_url(&server.base_url)));
+                out.push((
+                    server.name,
+                    normalize_base_url(&server.base_url),
+                    server.provider,
+                    server.default_model,
+                ));
             }
         }
     }
@@ -1488,6 +1664,171 @@ async fn probe_ollama_tags(base_url: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Resolves a provider API key from environment variables or the token store.
+async fn provider_api_key(provider: &str) -> Option<String> {
+    let env_names: &[&str] = match provider {
+        "deepseek" => &["DEEPSEEK_API_KEY"],
+        "gemini" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "codex" | "openai" => &["OPENAI_API_KEY"],
+        _ => &[],
+    };
+    for name in env_names {
+        if let Ok(value) = std::env::var(name) {
+            if !value.trim().is_empty() {
+                return Some(value);
+            }
+        }
+    }
+
+    for root in token_store_roots() {
+        let store = TokenStore::for_path(root);
+        if let Ok(Some(token)) = store.load(provider).await {
+            if !token.access_token.trim().is_empty() {
+                return Some(token.access_token);
+            }
+        }
+    }
+    None
+}
+
+fn provider_key_of(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::DeepSeek => "deepseek",
+        ProviderKind::Gemini => "gemini",
+        ProviderKind::Codex => "codex",
+        _ => "ollama",
+    }
+}
+
+fn dedupe_preserving_order(ids: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
+}
+
+#[derive(serde::Deserialize)]
+struct GeminiModelsResponse {
+    #[serde(default)]
+    models: Vec<GeminiModelInfo>,
+}
+
+#[derive(serde::Deserialize)]
+struct GeminiModelInfo {
+    #[serde(default)]
+    name: String,
+}
+
+/// Lists models from an OpenAI-compatible `/models` endpoint. Falls back to
+/// known model ids when the endpoint cannot be queried (offline / bad key).
+async fn fetch_openai_models_for_server(
+    server_name: &str,
+    base_url: &str,
+    fallback_model: &str,
+    token: Option<&str>,
+    deepseek: bool,
+) -> Vec<serde_json::Value> {
+    let base_url = normalize_base_url(base_url);
+    let client = reqwest::Client::new();
+    let mut request = client.get(format!("{}/models", base_url.trim_end_matches('/')));
+    if let Some(key) = token {
+        request = request.bearer_auth(key);
+    }
+
+    let mut ids: Vec<String> = match request.send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<OpenAiModelsResponse>().await {
+            Ok(payload) => payload
+                .data
+                .into_iter()
+                .map(|model| model.id)
+                .filter(|id| !id.is_empty())
+                .collect(),
+            Err(_) => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+
+    if deepseek && ids.is_empty() {
+        ids.push(multilink_core::providers::deepseek::DEEPSEEK_CHAT_MODEL.to_string());
+        ids.push(multilink_core::providers::deepseek::DEEPSEEK_REASONER_MODEL.to_string());
+    }
+    if !fallback_model.trim().is_empty() {
+        ids.push(fallback_model.trim().to_string());
+    }
+    dedupe_preserving_order(&mut ids);
+
+    let provider_label = if deepseek { "deepseek" } else { "openai" };
+    ids.into_iter()
+        .filter(|id| !is_embedding_like_model(id))
+        .map(|id| {
+            json!({
+                "provider": format!("{}@{}", provider_label, server_name),
+                "name": id,
+                "label": format!("{} ({}) [{}]", id, provider_label, server_name),
+                "serverName": server_name,
+                "serverUrl": base_url,
+                "sizeBytes": 0,
+            })
+        })
+        .collect()
+}
+
+/// Lists models from the Gemini `models.list` endpoint.
+async fn fetch_gemini_models_for_server(
+    server_name: &str,
+    base_url: &str,
+    fallback_model: &str,
+    token: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let base_url = normalize_base_url(base_url);
+    let client = reqwest::Client::new();
+    let endpoint = format!("{}/v1beta/models", base_url.trim_end_matches('/'));
+    let mut request = client.get(&endpoint);
+    if let Some(key) = token {
+        if key.starts_with("AIza") {
+            request = request.query(&[("key", key)]);
+        } else {
+            request = request.bearer_auth(key);
+        }
+    }
+
+    let mut ids: Vec<String> = match request.send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<GeminiModelsResponse>().await {
+            Ok(payload) => payload
+                .models
+                .into_iter()
+                .map(|model| {
+                    model
+                        .name
+                        .strip_prefix("models/")
+                        .unwrap_or(&model.name)
+                        .to_string()
+                })
+                .filter(|id| !id.is_empty())
+                .collect(),
+            Err(_) => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+
+    if !fallback_model.trim().is_empty() {
+        ids.push(fallback_model.trim().to_string());
+    }
+    dedupe_preserving_order(&mut ids);
+
+    ids.into_iter()
+        .filter(|id| !is_embedding_like_model(id))
+        .map(|id| {
+            json!({
+                "provider": format!("gemini@{}", server_name),
+                "name": id,
+                "label": format!("{} (gemini) [{}]", id, server_name),
+                "serverName": server_name,
+                "serverUrl": base_url,
+                "sizeBytes": 0,
+            })
+        })
+        .collect()
+}
+
 async fn fetch_models_for_server(server_name: &str, base_url: &str) -> Vec<serde_json::Value> {
     let base_url = normalize_base_url(base_url);
     let client = reqwest::Client::new();
@@ -1565,6 +1906,421 @@ fn provider_label(provider: ProviderId) -> &'static str {
         ProviderId::Ollama => "Ollama",
         ProviderId::Gemini => "Gemini",
         ProviderId::Codex => "Codex",
+        ProviderId::DeepSeek => "DeepSeek",
+    }
+}
+
+/// Maps a provider key coming from the GUI (token store / settings) to the
+/// runtime provider id.
+fn provider_id_from_str(provider: &str) -> ProviderId {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "gemini" => ProviderId::Gemini,
+        "codex" | "openai" => ProviderId::Codex,
+        "deepseek" => ProviderId::DeepSeek,
+        _ => ProviderId::Ollama,
+    }
+}
+
+/// (name, base_url, default_model) defaults for a remote provider.
+fn provider_server_defaults(provider: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "deepseek" => Some(("DeepSeek", "https://api.deepseek.com", "deepseek-chat")),
+        "gemini" => Some((
+            "Gemini",
+            "https://generativelanguage.googleapis.com",
+            "gemini-2.0-flash",
+        )),
+        "codex" | "openai" => Some(("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini")),
+        _ => None,
+    }
+}
+
+/// Ensures a server entry exists for a remote provider so its models become
+/// selectable and it can be prioritised like any other server.
+/// Returns true when the config was modified.
+fn ensure_provider_server(
+    config: &mut AppConfig,
+    provider: &str,
+    preferred_model: Option<&str>,
+) -> bool {
+    let Some((name, base_url, default_model)) = provider_server_defaults(provider) else {
+        return false;
+    };
+    let kind = provider_id_from_str(provider);
+    if kind == ProviderId::Ollama {
+        return false;
+    }
+    if config
+        .servers
+        .iter()
+        .any(|server| server.provider.provider_id() == kind)
+    {
+        return false;
+    }
+
+    let next_priority = config
+        .servers
+        .iter()
+        .map(|server| server.priority)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+        .max(1);
+
+    let chosen_model = preferred_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(default_model);
+
+    config.servers.push(ServerConfig {
+        name: name.to_string(),
+        provider: kind_to_provider_kind(kind),
+        base_url: base_url.to_string(),
+        default_model: chosen_model.to_string(),
+        priority: next_priority,
+        enabled: true,
+    });
+    true
+}
+
+fn kind_to_provider_kind(id: ProviderId) -> ProviderKind {
+    match id {
+        ProviderId::DeepSeek => ProviderKind::DeepSeek,
+        ProviderId::Gemini => ProviderKind::Gemini,
+        ProviderId::Codex => ProviderKind::Codex,
+        ProviderId::Ollama => ProviderKind::Ollama,
+    }
+}
+
+/// Resolves the base URL to probe for a provider: the configured server if any,
+/// otherwise the provider default.
+fn resolve_provider_base_url(config_path: &std::path::Path, runtime: &Runtime, provider: &str) -> String {
+    let kind = provider_id_from_str(provider);
+    if let Ok(cfg) = runtime.block_on(AppConfig::load_or_create(config_path)) {
+        if let Some(server) = cfg
+            .servers
+            .iter()
+            .find(|server| server.provider.provider_id() == kind)
+        {
+            let normalized = normalize_base_url(&server.base_url);
+            if !normalized.is_empty() {
+                return normalized;
+            }
+        }
+    }
+    provider_server_defaults(provider)
+        .map(|(_, base_url, _)| base_url.to_string())
+        .unwrap_or_else(|| "http://127.0.0.1:11434".to_string())
+}
+
+fn primary_token_store_root() -> std::path::PathBuf {
+    dirs::data_local_dir()
+        .or_else(dirs::config_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("multilink")
+}
+
+/// Probes a provider's model-list endpoint and returns a structured result.
+async fn probe_provider_models(
+    provider: &str,
+    base_url: &str,
+    token: Option<&str>,
+) -> ServerTestResult {
+    let client = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            return ServerTestResult {
+                ok: false,
+                model_count: 0,
+                models: Vec::new(),
+                error: "failed to create HTTP client".to_string(),
+                hint: String::new(),
+            }
+        }
+    };
+
+    if provider == "gemini" {
+        probe_gemini_models(&client, base_url, token).await
+    } else {
+        probe_openai_models(&client, base_url, token).await
+    }
+}
+
+/// Directories where provider tokens may live. The GUI writes to the data dir,
+/// while the CLI/older builds may have written to the config dir.
+fn token_store_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(dir) = dirs::data_local_dir() {
+        roots.push(dir.join("multilink"));
+    }
+    if let Some(dir) = dirs::config_dir() {
+        roots.push(dir.join("multilink"));
+    }
+    roots
+}
+
+/// Loads a provider token from any known token store location.
+fn load_provider_token(runtime: &Runtime, provider: &str) -> Option<String> {
+    for root in token_store_roots() {
+        let store = TokenStore::for_path(root);
+        if let Ok(Some(token)) = runtime.block_on(store.load(provider)) {
+            if !token.access_token.trim().is_empty() {
+                return Some(token.access_token);
+            }
+        }
+    }
+    None
+}
+
+/// Resolves which provider a (server_url, model) pair belongs to by inspecting
+/// the configured servers. Falls back to matching on the default model name.
+fn resolve_provider_for_route(
+    config_path: &std::path::Path,
+    runtime: &Runtime,
+    server_url: Option<&str>,
+    model: Option<&str>,
+) -> Option<ProviderId> {
+    let config = runtime.block_on(async { AppConfig::load_or_create(config_path).await.ok() })?;
+
+    if let Some(url) = server_url {
+        let normalized = normalize_base_url(url);
+        if let Some(server) = config
+            .servers
+            .iter()
+            .find(|server| normalize_base_url(&server.base_url) == normalized)
+        {
+            return Some(server.provider.provider_id());
+        }
+    }
+
+    if let Some(model) = model {
+        if let Some(server) = config
+            .servers
+            .iter()
+            .find(|server| server.default_model == model)
+        {
+            return Some(server.provider.provider_id());
+        }
+    }
+
+    None
+}
+
+/// Probes an Ollama-native `/api/tags` endpoint.
+async fn probe_ollama_tags_detailed(client: &reqwest::Client, url: &str) -> ServerTestResult {
+    let endpoint = format!("{}/api/tags", url);
+    let response = match client.get(endpoint).send().await {
+        Ok(value) => value,
+        Err(err) => {
+            let err_text = err.to_string();
+            return ServerTestResult {
+                ok: false,
+                model_count: 0,
+                models: Vec::new(),
+                error: err_text.clone(),
+                hint: connection_hint_for_error(url, &err_text),
+            };
+        }
+    };
+
+    if !response.status().is_success() {
+        return ServerTestResult {
+            ok: false,
+            model_count: 0,
+            models: Vec::new(),
+            error: format!("http status {}", response.status()),
+            hint: String::new(),
+        };
+    }
+
+    match response.json::<OllamaTagsResponse>().await {
+        Ok(tags) => {
+            let models: Vec<String> = tags.models.into_iter().map(|m| m.name).collect();
+            ServerTestResult {
+                ok: true,
+                model_count: models.len(),
+                models,
+                error: String::new(),
+                hint: String::new(),
+            }
+        }
+        Err(err) => ServerTestResult {
+            ok: false,
+            model_count: 0,
+            models: Vec::new(),
+            error: format!("invalid response: {}", err),
+            hint: String::new(),
+        },
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct OpenAiModelsResponse {
+    #[serde(default)]
+    data: Vec<OpenAiModelInfo>,
+}
+
+#[derive(serde::Deserialize)]
+struct OpenAiModelInfo {
+    #[serde(default)]
+    id: String,
+}
+
+/// Probes an OpenAI-compatible `/models` endpoint (DeepSeek, etc.).
+async fn probe_openai_models(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+) -> ServerTestResult {
+    let endpoint = format!("{}/models", url);
+    let mut request = client.get(endpoint);
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+
+    let response = match request.send().await {
+        Ok(value) => value,
+        Err(err) => {
+            let err_text = err.to_string();
+            return ServerTestResult {
+                ok: false,
+                model_count: 0,
+                models: Vec::new(),
+                error: err_text.clone(),
+                hint: connection_hint_for_error(url, &err_text),
+            };
+        }
+    };
+
+    let status = response.status();
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return ServerTestResult {
+            ok: false,
+            model_count: 0,
+            models: Vec::new(),
+            error: format!("http status {}", status),
+            hint: "El servidor requiere una API key. Guarda la clave del proveedor en Opciones o configura la variable de entorno correspondiente.".to_string(),
+        };
+    }
+    if !status.is_success() {
+        return ServerTestResult {
+            ok: false,
+            model_count: 0,
+            models: Vec::new(),
+            error: format!("http status {}", status),
+            hint: String::new(),
+        };
+    }
+
+    match response.json::<OpenAiModelsResponse>().await {
+        Ok(payload) => {
+            let models: Vec<String> = payload
+                .data
+                .into_iter()
+                .map(|model| model.id)
+                .filter(|id| !id.is_empty())
+                .collect();
+            ServerTestResult {
+                ok: true,
+                model_count: models.len(),
+                models,
+                error: String::new(),
+                hint: String::new(),
+            }
+        }
+        Err(err) => ServerTestResult {
+            ok: false,
+            model_count: 0,
+            models: Vec::new(),
+            error: format!("invalid response: {}", err),
+            hint: String::new(),
+        },
+    }
+}
+
+/// Probes the Gemini `models.list` endpoint.
+async fn probe_gemini_models(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+) -> ServerTestResult {
+    let endpoint = format!("{}/v1beta/models", url.trim_end_matches('/'));
+    let mut request = client.get(endpoint);
+    if let Some(key) = api_key {
+        if key.starts_with("AIza") {
+            request = request.query(&[("key", key)]);
+        } else {
+            request = request.bearer_auth(key);
+        }
+    }
+
+    let response = match request.send().await {
+        Ok(value) => value,
+        Err(err) => {
+            let err_text = err.to_string();
+            return ServerTestResult {
+                ok: false,
+                model_count: 0,
+                models: Vec::new(),
+                error: err_text.clone(),
+                hint: connection_hint_for_error(url, &err_text),
+            };
+        }
+    };
+
+    let status = response.status();
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return ServerTestResult {
+            ok: false,
+            model_count: 0,
+            models: Vec::new(),
+            error: format!("http status {}", status),
+            hint: "Gemini requiere una API key valida (empieza con 'AIza').".to_string(),
+        };
+    }
+    if !status.is_success() {
+        return ServerTestResult {
+            ok: false,
+            model_count: 0,
+            models: Vec::new(),
+            error: format!("http status {}", status),
+            hint: String::new(),
+        };
+    }
+
+    match response.json::<GeminiModelsResponse>().await {
+        Ok(payload) => {
+            let models: Vec<String> = payload
+                .models
+                .into_iter()
+                .map(|model| {
+                    model
+                        .name
+                        .strip_prefix("models/")
+                        .unwrap_or(&model.name)
+                        .to_string()
+                })
+                .filter(|id| !id.is_empty())
+                .collect();
+            ServerTestResult {
+                ok: true,
+                model_count: models.len(),
+                models,
+                error: String::new(),
+                hint: String::new(),
+            }
+        }
+        Err(err) => ServerTestResult {
+            ok: false,
+            model_count: 0,
+            models: Vec::new(),
+            error: format!("invalid response: {}", err),
+            hint: String::new(),
+        },
     }
 }
 

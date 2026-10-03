@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use multilink_core::providers::deepseek::DeepSeekProvider;
 use multilink_core::providers::ollama::OllamaProvider;
 use multilink_core::{AppConfig, ChatRuntime, ProviderId, ProviderRouter, StreamEvent};
 
@@ -54,6 +55,9 @@ impl Default for ChatBridge {
             selected_server.base_url.clone(),
             default_model.clone(),
         )));
+        if let Some(deepseek) = DeepSeekProvider::from_env() {
+            router.register(Arc::new(deepseek));
+        }
 
         let chat_runtime = if let Some(rt) = runtime.as_ref() {
             rt.block_on(async {
@@ -184,6 +188,7 @@ fn parse_provider(provider: &str) -> ProviderId {
     match provider.to_ascii_lowercase().as_str() {
         "gemini" => ProviderId::Gemini,
         "codex" => ProviderId::Codex,
+        "deepseek" => ProviderId::DeepSeek,
         _ => ProviderId::Ollama,
     }
 }

@@ -209,7 +209,7 @@ After building, test these features manually:
 - [ ] Add server button works
 - [ ] "Probar conexion" shows correct OK/error
 - [ ] Save persists after restart
-- [ ] Provider dropdown shows: ollama, gemini, codex
+- [ ] Provider dropdown shows: ollama, ollama_cloud, gemini, codex, deepseek
 
 ### Chat
 - [ ] Send prompt → get response from Ollama
@@ -223,7 +223,8 @@ After building, test these features manually:
 - [ ] Remote device rejected with wrong secret
 
 ### Known GUI Gaps (not yet wired)
-- Provider OAuth token UI not implemented (Gemini/Codex tokens via file only)
+- Provider API keys are entered in Settings → "Claves de API" (DeepSeek/Gemini/Codex) and stored locally; they apply live.
+- Gemini/Codex still need full request/response integration (scaffold providers).
 
 ## Commit Guidance
 
