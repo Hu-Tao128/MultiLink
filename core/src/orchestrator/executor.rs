@@ -80,10 +80,15 @@ impl Executor {
         context_engine: Arc<dyn ContextEngine>,
         tool_executor: Arc<ToolExecutor>,
     ) -> Self {
-        let tool_descriptions = crate::tools::description::load_all_descriptions()
-            .values()
-            .cloned()
-            .collect();
+        // Keep the tool catalog in a deterministic order (alphabetical). This
+        // matters for providers with automatic prompt caching (DeepSeek):
+        // a stable prefix increases cache hits and lowers cost/latency.
+        let mut tool_descriptions: Vec<ToolDescription> =
+            crate::tools::description::load_all_descriptions()
+                .values()
+                .cloned()
+                .collect();
+        tool_descriptions.sort_by(|a, b| a.name.cmp(&b.name));
         Self {
             router,
             skill_orchestrator,
@@ -887,11 +892,9 @@ impl Executor {
         available_tools: &[String],
     ) -> Result<crate::orchestrator::planner::DecisionResult, String> {
         let available_providers = self.router.get_available_providers().await;
-        let selected_provider = ProviderSelector::select(
-            &crate::orchestrator::provider_selector::RequiredCapabilities::new(),
-            &available_providers,
-        )
-        .unwrap_or(ProviderId::Ollama);
+        let required = crate::orchestrator::planner::infer_capabilities(goal);
+        let selected_provider =
+            ProviderSelector::select(&required, &available_providers).unwrap_or(ProviderId::Ollama);
 
         let structured_context = if !context.is_empty() {
             let ctx_items: Vec<serde_json::Value> = context
@@ -967,11 +970,9 @@ Respond ONLY with valid JSON, no other text."#,
         context: &[crate::orchestrator::planner::StepResult],
     ) -> Result<String, String> {
         let available_providers = self.router.get_available_providers().await;
-        let selected_provider = ProviderSelector::select(
-            &crate::orchestrator::provider_selector::RequiredCapabilities::new(),
-            &available_providers,
-        )
-        .unwrap_or(ProviderId::Ollama);
+        let required = crate::orchestrator::planner::infer_capabilities(prompt);
+        let selected_provider =
+            ProviderSelector::select(&required, &available_providers).unwrap_or(ProviderId::Ollama);
 
         let injected_tool_context = build_tool_context_message(context);
         let structured_context = if !context.is_empty() {

@@ -97,7 +97,10 @@ impl ProviderSelector {
     fn compute_score(required: &RequiredCapabilities, caps: &ProviderCapabilities) -> i32 {
         let mut score = 0i32;
 
-        if caps.is_local {
+        // For pure latency/vision/context work a local model is usually the
+        // best default. For reasoning work we deliberately drop the local
+        // bonus so a capable remote reasoner can win.
+        if caps.is_local && !required.reasoning {
             score += 50;
         }
 
@@ -115,7 +118,17 @@ impl ProviderSelector {
         }
 
         if required.reasoning && caps.supports_thinking {
-            score += 15;
+            // Strong signal: a model that advertises thinking is the right
+            // pick for reasoning-heavy prompts.
+            score += 45;
+            if !caps.is_local {
+                // Large hosted reasoners (DeepSeek reasoner, o-series, ...)
+                // usually outperform local thinkers on hard tasks.
+                score += 20;
+            }
+        } else if required.reasoning {
+            // Deprioritise models that cannot think when reasoning is required.
+            score -= 25;
         }
 
         if required.coding && caps.capability_tags.contains(&"coding".to_string()) {
@@ -243,6 +256,50 @@ mod tests {
         p.is_available = false;
         let req = RequiredCapabilities::default();
         assert_eq!(ProviderSelector::select(&req, &[p]), None);
+    }
+
+    #[test]
+    fn test_reasoning_prefers_thinking_provider() {
+        let req = RequiredCapabilities {
+            reasoning: true,
+            ..Default::default()
+        };
+        let providers = vec![
+            info(
+                ProviderId::Ollama,
+                caps(false, false, false, 8192, true, Some(50)),
+            ),
+            info(
+                ProviderId::DeepSeek,
+                caps(false, false, true, 64000, false, Some(900)),
+            ),
+        ];
+        assert_eq!(
+            ProviderSelector::select(&req, &providers),
+            Some(ProviderId::DeepSeek)
+        );
+    }
+
+    #[test]
+    fn test_reasoning_prefers_remote_reasoner_over_local_thinker() {
+        let req = RequiredCapabilities {
+            reasoning: true,
+            ..Default::default()
+        };
+        let providers = vec![
+            info(
+                ProviderId::Ollama,
+                caps(false, false, true, 32768, true, Some(80)),
+            ),
+            info(
+                ProviderId::DeepSeek,
+                caps(false, false, true, 64000, false, Some(900)),
+            ),
+        ];
+        assert_eq!(
+            ProviderSelector::select(&req, &providers),
+            Some(ProviderId::DeepSeek)
+        );
     }
 
     #[test]

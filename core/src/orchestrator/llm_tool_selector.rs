@@ -9,9 +9,12 @@ use crate::providers::{PromptOptions, ProviderId};
 use crate::router::ProviderRouter;
 use crate::tools::description::ToolDescription;
 
-const SMALL_TARGET_PROMPT_TOKENS: usize = 900;
-const MEDIUM_TARGET_PROMPT_TOKENS: usize = 1200;
-const LARGE_TARGET_PROMPT_TOKENS: usize = 2048;
+const SMALL_TARGET_PROMPT_TOKENS: usize = 700;
+const MEDIUM_TARGET_PROMPT_TOKENS: usize = 1400;
+const LARGE_TARGET_PROMPT_TOKENS: usize = 3072;
+const SMALL_CONTEXT_TOKENS: usize = 300;
+const MEDIUM_CONTEXT_TOKENS: usize = 600;
+const LARGE_CONTEXT_TOKENS: usize = 1500;
 const ESTIMATED_TOKENS_PER_CHAR: f64 = 0.25;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +66,7 @@ impl LlmToolSelector {
         let system = self.system_prompt();
 
         eprintln!("[llm_tool_selector] selecting_provider...");
-        let provider = self.select_provider().await?;
+        let provider = self.select_provider(goal).await?;
 
         eprintln!("[llm_tool_selector] provider_selected={:?}", provider);
         eprintln!("[llm_tool_selector] sending_prompt chars={}", prompt.len());
@@ -234,7 +237,8 @@ impl LlmToolSelector {
         let context_str = if context.is_empty() {
             "No previous steps executed yet.".to_string()
         } else {
-            let max_context_chars = (500.0 / ESTIMATED_TOKENS_PER_CHAR) as usize;
+            let max_context_chars =
+                (self.context_token_budget() as f64 / ESTIMATED_TOKENS_PER_CHAR) as usize;
             let mut parts: Vec<String> = context
                 .iter()
                 .map(|r| {
@@ -271,6 +275,7 @@ INSTRUCTIONS:\n\
 2. Choose the NEXT tool to call (only ONE)\n\
 3. Provide valid arguments matching the tool's schema\n\
 4. Explain your reasoning briefly\n\n\
+STRATEGY:\n{}\n\n\
 COMPLETION RULES:\n\
 - Do not repeat write_file/apply_patch for the same path.\n\
 - For requests that ask for HTML, CSS and JS, create the missing files before returning null.\n\
@@ -279,8 +284,46 @@ RESPOND IN JSON FORMAT:\n\
 {{\n  \"tool\": \"tool_name\",\n  \"args\": {{ ... }},\n  \"reasoning\": \"why this tool next\"\n}}\n\n\
 IF NO MORE TOOLS NEEDED (goal achieved or blocked):\n\
 {{\n  \"tool\": null,\n  \"args\": null,\n  \"reasoning\": \"goal achieved\" or \"blocked because...\"\n}}",
-            goal, context_str, tools_desc
+            goal,
+            context_str,
+            tools_desc,
+            self.strategy_guidance()
         )
+    }
+
+    /// Extra behavioural guidance injected into the tool-selection prompt.
+    /// Large models get more freedom (multi-step evidence gathering) while
+    /// small models are constrained to a single, low-risk action.
+    fn strategy_guidance(&self) -> &'static str {
+        match self.model_size {
+            ModelSize::Small => {
+                "- Choose exactly ONE tool.\n\
+- Use the simplest tool that can answer the goal.\n\
+- Keep arguments minimal and valid.\n\
+- If you are not confident, return null with a clear reason instead of guessing."
+            }
+            ModelSize::Medium => {
+                "- Read before you write: inspect existing files before editing them.\n\
+- After a successful write, validate it with run_command when a project command exists.\n\
+- Stop and return null once the goal is satisfied."
+            }
+            ModelSize::Large => {
+                "- Plan: you may chain several read-only tools (search_code, open_file, git_diff) to gather evidence BEFORE editing.\n\
+- For bug fixes, locate the cause with search_code/open_file first, then apply a surgical apply_patch.\n\
+- Prefer apply_patch for small edits and write_file for new files.\n\
+- After editing, run the project's validation command (cargo check/test, npm test, ...) before finishing.\n\
+- Do not repeat an identical tool call with identical arguments; if it failed, change approach.\n\
+- Return null when the goal is complete, with a short summary of what changed."
+            }
+        }
+    }
+
+    fn context_token_budget(&self) -> usize {
+        match self.model_size {
+            ModelSize::Small => SMALL_CONTEXT_TOKENS,
+            ModelSize::Medium => MEDIUM_CONTEXT_TOKENS,
+            ModelSize::Large => LARGE_CONTEXT_TOKENS,
+        }
     }
 
     fn target_prompt_tokens(&self) -> usize {
@@ -332,12 +375,29 @@ Respond ONLY with valid JSON."
             .to_string()
     }
 
-    async fn select_provider(&self) -> Result<ProviderId, String> {
+    async fn select_provider(&self, goal: &str) -> Result<ProviderId, String> {
         let available = self.router.available();
         eprintln!("[llm_tool_selector] available_providers={:?}", available);
         if available.is_empty() {
             return Err("No providers available for tool selection".to_string());
         }
+
+        // Prefer the provider whose capabilities best match the goal. This is
+        // what lets a reasoning-heavy task route to a large hosted reasoner
+        // instead of always defaulting to the first local provider.
+        let required = crate::orchestrator::planner::infer_capabilities(goal);
+        let provider_infos = self.router.get_available_providers().await;
+        if let Some(id) = crate::orchestrator::provider_selector::ProviderSelector::select(
+            &required,
+            &provider_infos,
+        ) {
+            eprintln!(
+                "[llm_tool_selector] capability_selected_provider={:?} required={:?}",
+                id, required
+            );
+            return Ok(id);
+        }
+
         Ok(available[0])
     }
 }

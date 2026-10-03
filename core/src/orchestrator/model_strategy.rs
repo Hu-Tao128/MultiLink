@@ -28,6 +28,42 @@ impl ModelSize {
             return ModelSize::Small;
         }
 
+        // Reasoning families emit (or benefit from) extended thinking. Treat
+        // them as large regardless of the parameter count so they get more
+        // steps, richer tool prompts and reasoning-oriented provider routing.
+        const REASONING_MARKERS: &[&str] =
+            &["reasoner", "deepseek-r1", "qwq", "thinking", "llama-think"];
+        if REASONING_MARKERS
+            .iter()
+            .any(|marker| lower.contains(marker))
+        {
+            return ModelSize::Large;
+        }
+
+        // Known large cloud/hosted families. These do not advertise a
+        // parameter count in their name, so the numeric heuristic cannot
+        // classify them.
+        const LARGE_MARKERS: &[&str] = &[
+            "gpt-4",
+            "gpt-5",
+            "claude",
+            "gemini-2",
+            "gemini-pro",
+            "gemini-1.5-pro",
+            "deepseek-chat",
+            "deepseek-v3",
+            "deepseek-v4",
+            "qwen3",
+            "command-r-plus",
+            "mistral-large",
+            "mixtral-8x22b",
+            "o1-",
+            "o3-",
+        ];
+        if LARGE_MARKERS.iter().any(|marker| lower.contains(marker)) {
+            return ModelSize::Large;
+        }
+
         if let Some(size) = extract_size_billions(&lower) {
             if size < 4.0 {
                 ModelSize::Small
@@ -39,6 +75,11 @@ impl ModelSize {
         } else {
             ModelSize::Medium
         }
+    }
+
+    /// True when the model is expected to handle long, multi-step tool loops.
+    pub fn is_large(&self) -> bool {
+        matches!(self, ModelSize::Large)
     }
 
     pub fn allowed_tools(&self) -> Vec<&'static str> {
@@ -87,16 +128,16 @@ impl ModelSize {
                 tool_timeout_secs: 30,
             },
             ModelSize::Medium => ExecutionConfig {
-                max_steps: 10,
+                max_steps: 12,
                 max_retries: 2,
                 require_validation: true,
                 tool_timeout_secs: 60,
             },
             ModelSize::Large => ExecutionConfig {
-                max_steps: 15,
-                max_retries: 3,
+                max_steps: 20,
+                max_retries: 4,
                 require_validation: true,
-                tool_timeout_secs: 120,
+                tool_timeout_secs: 180,
             },
         }
     }
@@ -134,7 +175,12 @@ Args: {}",
                     tool.examples.join("\n")
                 )
             }
-            ModelSize::Large => tool.to_full_prompt(),
+            ModelSize::Large => format!(
+                r"{}
+
+**Enforcement:** call this tool only when the arguments satisfy the schema above; otherwise pick a different tool or return null.",
+                tool.to_full_prompt()
+            ),
         }
     }
 }
@@ -218,10 +264,7 @@ mod tests {
             ModelSize::from_model_name("qwen2.5-coder:14b"),
             ModelSize::Medium
         );
-        assert_eq!(
-            ModelSize::from_model_name("llama3.1:70b"),
-            ModelSize::Large
-        );
+        assert_eq!(ModelSize::from_model_name("llama3.1:70b"), ModelSize::Large);
     }
 
     #[test]
@@ -248,6 +291,45 @@ mod tests {
         );
         assert_eq!(
             ModelSize::from_model_name("mistral:latest"),
+            ModelSize::Medium
+        );
+    }
+
+    #[test]
+    fn test_from_model_name_deepseek_and_reasoners_are_large() {
+        assert_eq!(
+            ModelSize::from_model_name("deepseek-chat"),
+            ModelSize::Large
+        );
+        assert_eq!(
+            ModelSize::from_model_name("deepseek-reasoner"),
+            ModelSize::Large
+        );
+        assert_eq!(
+            ModelSize::from_model_name("deepseek-v4-pro"),
+            ModelSize::Large
+        );
+        assert_eq!(
+            ModelSize::from_model_name("deepseek-r1:14b"),
+            ModelSize::Large
+        );
+        assert_eq!(ModelSize::from_model_name("gpt-4o"), ModelSize::Large);
+        assert_eq!(
+            ModelSize::from_model_name("claude-3-5-sonnet"),
+            ModelSize::Large
+        );
+    }
+
+    #[test]
+    fn test_local_deepseek_coder_still_scales_by_parameters() {
+        // A small local DeepSeek distills should stay small/medium, not become
+        // "large" just because of the vendor name.
+        assert_eq!(
+            ModelSize::from_model_name("deepseek-coder:1.3b"),
+            ModelSize::Small
+        );
+        assert_eq!(
+            ModelSize::from_model_name("deepseek-coder:6.7b"),
             ModelSize::Medium
         );
     }

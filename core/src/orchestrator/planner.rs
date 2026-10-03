@@ -556,39 +556,11 @@ pub fn create_initial_steps(prompt: &str, available_tools: Vec<String>) -> Vec<S
 }
 
 pub fn filter_tools_for_model(model_size: &str) -> Vec<String> {
-    match model_size {
-        "small" => vec![
-            "search_code".to_string(),
-            "open_file".to_string(),
-            "fs_ls".to_string(),
-            "fs_cat".to_string(),
-            "fs_grep".to_string(),
-        ],
-        "medium" => vec![
-            "search_code".to_string(),
-            "open_file".to_string(),
-            "fs_ls".to_string(),
-            "fs_cat".to_string(),
-            "fs_grep".to_string(),
-            "write_file".to_string(),
-            "apply_patch".to_string(),
-            "run_command".to_string(),
-        ],
-        _ => vec![
-            "search_code".to_string(),
-            "open_file".to_string(),
-            "search_and_open".to_string(),
-            "fs_ls".to_string(),
-            "fs_cat".to_string(),
-            "fs_grep".to_string(),
-            "write_file".to_string(),
-            "apply_patch".to_string(),
-            "run_command".to_string(),
-            "git_status".to_string(),
-            "git_diff".to_string(),
-            "system_version".to_string(),
-        ],
-    }
+    crate::orchestrator::model_strategy::ModelSize::from_string(model_size)
+        .allowed_tools()
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
