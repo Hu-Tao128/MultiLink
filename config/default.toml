@@ -8,6 +8,21 @@ default_model = "qwen2.5-coder:3b"
 priority = 1
 enabled = true
 
+# DeepSeek (API compatible con OpenAI). Descomenta y pon tu clave en la
+# variable de entorno DEEPSEEK_API_KEY (o guárdala desde la GUI).
+#   export DEEPSEEK_API_KEY="sk-..."
+# Modelos: deepseek-chat (V3, rapido) y deepseek-reasoner (R1, razonamiento).
+# Puedes sobrescribir sin editar este archivo con:
+#   MULTILINK_DEEPSEEK_BASE_URL / MULTILINK_DEEPSEEK_MODEL
+#
+# [[servers]]
+# name = "DeepSeek"
+# provider = "deepseek"
+# base_url = "https://api.deepseek.com"
+# default_model = "deepseek-chat"
+# priority = 2
+# enabled = true
+
 [context]
 embeddings_enabled = true
 embed_model = "embeddinggemma"

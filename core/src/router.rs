@@ -83,7 +83,12 @@ impl ProviderRouter {
     pub fn new() -> Self {
         Self {
             providers: HashMap::new(),
-            order: vec![ProviderId::Ollama, ProviderId::Gemini, ProviderId::Codex],
+            order: vec![
+                ProviderId::Ollama,
+                ProviderId::Gemini,
+                ProviderId::Codex,
+                ProviderId::DeepSeek,
+            ],
             model_server_map: Arc::new(RwLock::new(HashMap::new())),
             health_states: Arc::new(RwLock::new(HashMap::new())),
             circuit_breaker_config: CircuitBreakerConfig::default(),
@@ -96,7 +101,12 @@ impl ProviderRouter {
     pub fn with_config(config: CircuitBreakerConfig) -> Self {
         Self {
             providers: HashMap::new(),
-            order: vec![ProviderId::Ollama, ProviderId::Gemini, ProviderId::Codex],
+            order: vec![
+                ProviderId::Ollama,
+                ProviderId::Gemini,
+                ProviderId::Codex,
+                ProviderId::DeepSeek,
+            ],
             model_server_map: Arc::new(RwLock::new(HashMap::new())),
             health_states: Arc::new(RwLock::new(HashMap::new())),
             circuit_breaker_config: config,
@@ -130,6 +140,18 @@ impl ProviderRouter {
 
     pub fn get_provider(&self, id: ProviderId) -> Option<&Arc<dyn LLMProvider>> {
         self.providers.get(&id)
+    }
+
+    /// Updates the credential (API key / OAuth token) of a registered provider
+    /// at runtime. Returns false when the provider is not registered.
+    pub fn set_credential(&self, id: ProviderId, credential: Option<String>) -> bool {
+        match self.providers.get(&id) {
+            Some(provider) => {
+                provider.set_credential(credential);
+                true
+            }
+            None => false,
+        }
     }
 
     pub async fn register_model_server(

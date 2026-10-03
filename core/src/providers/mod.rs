@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod codex;
+pub mod deepseek;
 pub mod gemini;
 pub mod ollama;
 
@@ -25,6 +26,7 @@ pub enum ProviderId {
     Ollama,
     Gemini,
     Codex,
+    DeepSeek,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,7 +66,7 @@ pub struct LLMResponse {
     pub usage: Option<TokenUsage>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenUsage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
@@ -183,6 +185,11 @@ pub trait LLMProvider: Send + Sync {
     async fn warmup_model(&self, _model: &str) -> Result<(), LLMError> {
         Ok(())
     }
+
+    /// Updates the provider credential (API key / OAuth token) at runtime so a
+    /// key saved from the GUI takes effect without restarting the app.
+    /// Default: no-op for providers that do not use credentials (local Ollama).
+    fn set_credential(&self, _credential: Option<String>) {}
 }
 
 impl ProviderCapabilities {

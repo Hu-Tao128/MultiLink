@@ -6,6 +6,7 @@ This module within the `core` crate provides a unified interface for interacting
 
 *   **`mod.rs`**: Defines the central `LLMProvider` trait, which all concrete provider implementations must adhere to. It also includes common types used across providers, such as `PromptOptions`, `LLMResponse`, error types, and definitions for stream events.
 *   **`ollama.rs`**: Implements the `LLMProvider` trait for local Ollama instances. This file includes the logic for making HTTP requests to Ollama, handling streaming responses with robust chunk-safe parsing, explicit forwarding of system messages, and fine-tuning for network timeouts.
+*   **`deepseek.rs`**: Implements the `LLMProvider` trait for the DeepSeek OpenAI-compatible Chat Completions API. Handles Bearer auth, non-streaming and SSE streaming (`data: [DONE]`), reasoning models (`deepseek-reasoner` surfaces `reasoning_content` as `<think>...</think>` tokens) and omits `temperature` for reasoners.
 *   **`gemini.rs`**: Serves as a scaffold for integrating with the remote Gemini LLM API. This file will contain the specific API client logic, request/response mapping, and error handling for Gemini.
 *   **`codex.rs`**: Serves as a scaffold for integrating with the remote Codex LLM API. Similar to `gemini.rs`, it will house the API client logic for Codex.
 

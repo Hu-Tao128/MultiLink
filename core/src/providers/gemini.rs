@@ -1,3 +1,4 @@
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -13,7 +14,7 @@ use super::{
 pub struct GeminiProvider {
     client: Client,
     endpoint: String,
-    access_token: Option<String>,
+    access_token: Arc<RwLock<Option<String>>>,
 }
 
 impl GeminiProvider {
@@ -30,13 +31,25 @@ impl GeminiProvider {
         Ok(Self {
             client,
             endpoint,
-            access_token,
+            access_token: Arc::new(RwLock::new(
+                access_token.filter(|token| !token.trim().is_empty()),
+            )),
         })
     }
 
     pub fn with_access_token(mut self, access_token: Option<String>) -> Self {
-        self.access_token = access_token;
+        self.access_token = Arc::new(RwLock::new(
+            access_token.filter(|token| !token.trim().is_empty()),
+        ));
         self
+    }
+
+    fn current_access_token(&self) -> Option<String> {
+        self.access_token
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .filter(|token| !token.trim().is_empty())
     }
 }
 
@@ -73,14 +86,11 @@ impl LLMProvider for GeminiProvider {
     }
 
     fn is_available(&self) -> bool {
-        self.access_token.is_some()
+        self.current_access_token().is_some()
     }
 
     async fn send(&self, prompt: String, options: PromptOptions) -> Result<LLMResponse, LLMError> {
-        let token = self
-            .access_token
-            .as_deref()
-            .ok_or(LLMError::NotConfigured)?;
+        let token = self.current_access_token().ok_or(LLMError::NotConfigured)?;
 
         let final_prompt = if let Some(messages) = options.messages {
             let mut content = String::new();
@@ -106,7 +116,7 @@ impl LLMProvider for GeminiProvider {
         let response = self
             .client
             .post(&self.endpoint)
-            .bearer_auth(token)
+            .bearer_auth(&token)
             .json(&GeminiRequest {
                 prompt: final_prompt,
                 model: options.model,
@@ -185,13 +195,19 @@ impl LLMProvider for GeminiProvider {
     }
 
     async fn health_check(&self) -> Result<bool, LLMError> {
-        let Some(token) = self.access_token.as_deref() else {
+        let Some(token) = self.current_access_token() else {
             return Ok(false);
         };
         let test_url = format!("{}/models", self.endpoint.replace("/generateContent", ""));
-        match self.client.get(&test_url).bearer_auth(token).send().await {
+        match self.client.get(&test_url).bearer_auth(&token).send().await {
             Ok(resp) => Ok(resp.status().is_success()),
             Err(_) => Ok(false),
+        }
+    }
+
+    fn set_credential(&self, credential: Option<String>) {
+        if let Ok(mut guard) = self.access_token.write() {
+            *guard = credential.filter(|value| !value.trim().is_empty());
         }
     }
 }

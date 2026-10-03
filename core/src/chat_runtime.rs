@@ -420,6 +420,31 @@ impl ChatRuntime {
         persist_session(&self.storage_dir, &snapshot).await
     }
 
+    /// Changes the provider used by a session (e.g. switching a session from
+    /// local Ollama to a remote DeepSeek/ChatGPT-compatible server).
+    pub async fn update_session_provider(
+        &self,
+        session_id: &str,
+        provider: ProviderId,
+    ) -> Result<(), ChatRuntimeError> {
+        let snapshot = {
+            let mut guard = self.sessions.write().await;
+            let session = guard
+                .get_mut(session_id)
+                .ok_or(ChatRuntimeError::SessionNotFound)?;
+            session.provider = provider;
+            session.clone()
+        };
+
+        persist_session(&self.storage_dir, &snapshot).await
+    }
+
+    /// Updates the credential for a provider at runtime so an API key saved
+    /// from the GUI becomes usable without restarting the app.
+    pub fn set_provider_token(&self, provider: ProviderId, token: Option<String>) -> bool {
+        self.router.set_credential(provider, token)
+    }
+
     pub async fn set_session_project_root(
         &self,
         session_id: &str,
@@ -836,12 +861,15 @@ impl ChatRuntime {
         if let Some(model_name) = model.as_ref() {
             const MODEL_INFO_TIMEOUT_SECS: u64 = 30;
 
-            // Warmup model first to trigger loading (especially for large models like gemma4)
-            // This sends a minimal request to trigger Ollama to load the model into memory
-            let _ = self
-                .router
-                .warmup_model(ProviderId::Ollama, model_name)
-                .await;
+            // Warmup only applies to local Ollama (trigger model load into
+            // memory). Remote providers have no warmup step and calling it
+            // would add latency + noise.
+            if provider == ProviderId::Ollama {
+                let _ = self
+                    .router
+                    .warmup_model(ProviderId::Ollama, model_name)
+                    .await;
+            }
 
             if let Ok(Ok(caps)) = tokio::time::timeout(
                 Duration::from_secs(MODEL_INFO_TIMEOUT_SECS),

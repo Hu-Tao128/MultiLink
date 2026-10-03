@@ -69,3 +69,49 @@ models_dir = "~/.local/share/multilink/models"
     assert!(!config.servers.is_empty());
     assert_eq!(config.servers[0].base_url, "http://192.168.1.20:11434");
 }
+
+#[tokio::test]
+async fn loads_deepseek_server_and_maps_provider_id() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let file_path = temp.path().join("config.toml");
+    let config_toml = r#"
+version = 2
+
+[[servers]]
+name = "Local Ollama"
+provider = "ollama"
+base_url = "http://127.0.0.1:11434"
+default_model = "qwen2.5-coder:3b"
+priority = 1
+enabled = true
+
+[[servers]]
+name = "DeepSeek"
+provider = "deepseek"
+base_url = "https://api.deepseek.com"
+default_model = "deepseek-chat"
+priority = 2
+enabled = true
+
+[storage]
+models_dir = "~/.local/share/multilink/models"
+"#;
+    fs::write(&file_path, config_toml)
+        .await
+        .expect("write config");
+
+    let config = AppConfig::load_or_create(Path::new(&file_path))
+        .await
+        .expect("config must load");
+
+    let deepseek = config
+        .servers
+        .iter()
+        .find(|server| matches!(server.provider, ProviderKind::DeepSeek))
+        .expect("deepseek server present");
+    assert_eq!(deepseek.default_model, "deepseek-chat");
+    assert_eq!(
+        deepseek.provider.provider_id(),
+        multilink_core::ProviderId::DeepSeek
+    );
+}

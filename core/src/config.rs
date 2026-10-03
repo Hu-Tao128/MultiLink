@@ -88,6 +88,23 @@ pub enum ProviderKind {
     OllamaCloud,
     Gemini,
     Codex,
+    DeepSeek,
+}
+
+impl ProviderKind {
+    /// Maps a configured server provider to the runtime provider id used by
+    /// the router. `OllamaCloud` and `Ollama` share the same OpenAI-ish
+    /// Ollama runtime provider; the distinction is only routing/metadata.
+    pub fn provider_id(self) -> crate::providers::ProviderId {
+        match self {
+            ProviderKind::Ollama | ProviderKind::OllamaCloud => {
+                crate::providers::ProviderId::Ollama
+            }
+            ProviderKind::Gemini => crate::providers::ProviderId::Gemini,
+            ProviderKind::Codex => crate::providers::ProviderId::Codex,
+            ProviderKind::DeepSeek => crate::providers::ProviderId::DeepSeek,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -668,6 +685,26 @@ impl AppConfig {
                 .servers
                 .iter_mut()
                 .find(|s| matches!(s.provider, ProviderKind::Ollama | ProviderKind::OllamaCloud))
+            {
+                server.default_model = value;
+            }
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_DEEPSEEK_BASE_URL") {
+            if let Some(server) = self
+                .servers
+                .iter_mut()
+                .find(|s| matches!(s.provider, ProviderKind::DeepSeek))
+            {
+                server.base_url = value;
+            }
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_DEEPSEEK_MODEL") {
+            if let Some(server) = self
+                .servers
+                .iter_mut()
+                .find(|s| matches!(s.provider, ProviderKind::DeepSeek))
             {
                 server.default_model = value;
             }
