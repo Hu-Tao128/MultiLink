@@ -13,6 +13,9 @@ qt_standard_project_setup()
 if(COMMAND qt_policy)
     if(DEFINED Qt6Core_VERSION AND Qt6Core_VERSION VERSION_GREATER_EQUAL "6.5")
         qt_policy(SET QTP0001 NEW)
+    endif()
+    # QTP0004 only exists in Qt >= 6.8; setting it on 6.5.x aborts configure
+    if(DEFINED Qt6Core_VERSION AND Qt6Core_VERSION VERSION_GREATER_EQUAL "6.8")
         qt_policy(SET QTP0004 NEW)
     endif()
 endif()
@@ -91,7 +94,7 @@ if(UNIX AND NOT APPLE)
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "MultiLink Team")
     set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
     set(CPACK_DEBIAN_PACKAGE_DEPENDS
-        "qt6-qpa-plugins, libqt6quick6, qml6-module-qtquick, qml6-module-qtquick-controls, qml6-module-qtquick-layouts"
+        "qt6-qpa-plugins, libqt6quick6, qml6-module-qtquick, qml6-module-qtquick-controls, qml6-module-qtquick-layouts, qml6-module-qtquick-templates"
     )
 elseif(APPLE)
     # .dmg packaging
