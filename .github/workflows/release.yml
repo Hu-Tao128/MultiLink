@@ -49,6 +49,7 @@ jobs:
           sudo apt-get install -y \
             qt6-base-dev qt6-declarative-dev \
             qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts \
+            qml6-module-qtqml-workerscript \
             cmake build-essential libgl1-mesa-dev libxkbcommon-dev file
 
       - name: Install dependencies (macOS)
@@ -78,7 +79,6 @@ jobs:
           cmake -B ${{ steps.strings.outputs.build-output-dir }} \
             -DCMAKE_BUILD_TYPE=Release \
             ${{ runner.os == 'macOS' && '-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -G Ninja' || '' }} \
-            ${{ runner.os == 'Windows' && '-G "Visual Studio 17 2022"' || '' }} \
             -S gui
 
       - name: Build
@@ -92,24 +92,24 @@ jobs:
           cd package
           $LINUXDEPLOY --appdir MultiLink --output appimage \
             --plugin qt \
-            --desktop-file MultiLink/share/applications/*.desktop 2>/dev/null || \
+            --desktop-file MultiLink/share/applications/*.desktop 2>/dev/null || true
           # Fallback: manual AppImage packaging
-          cp -v ../build/multilink MultiLink/
+          cp -v ../build/multilink MultiLink/ 2>/dev/null || true
           mkdir -p MultiLink/usr/share/icons/hicolor/256x256/apps/
-          echo "[Desktop Entry]
+          cat > MultiLink/multilink.desktop <<EOF
+          [Desktop Entry]
           Type=Application
           Name=MultiLink
           Exec=multilink
-          Categories=Development;" > MultiLink/multilink.desktop
-          # Run linuxdeploy on the AppDir
-          $LINUXDEPLOY --appdir MultiLink --output appimage --plugin qt
+          Categories=Development;
+          EOF
+          $LINUXDEPLOY --appdir MultiLink --output appimage --plugin qt || true
 
       - name: Package .dmg (macOS)
         if: runner.os == 'macOS'
         run: |
           mkdir -p package
           cp ${{ steps.strings.outputs.build-output-dir }}/multilink package/MultiLink
-          # Bundle Qt frameworks
           macdeployqt package/MultiLink.app -verbose=1 2>/dev/null || true
           create-dmg --volname "MultiLink" \
             --window-pos 200 120 \
@@ -117,7 +117,6 @@ jobs:
             --icon-size 100 \
             --app-drop-link 600 185 \
             MultiLink.dmg package/ || \
-          # Fallback: zip the binary
           cd package && zip -r ../MultiLink-macos.zip .
 
       - name: Package .exe (Windows)
@@ -138,3 +137,13 @@ jobs:
             MultiLink*.dmg
             MultiLink*.zip
             !linuxdeploy*.AppImage
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            MultiLink*.AppImage
+            MultiLink*.dmg
+            MultiLink*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

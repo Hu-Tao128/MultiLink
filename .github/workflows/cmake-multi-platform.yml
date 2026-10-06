@@ -52,6 +52,7 @@ jobs:
           sudo apt-get install -y \
             qt6-base-dev qt6-declarative-dev \
             qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts \
+            qml6-module-qtqml-workerscript \
             cmake build-essential libgl1-mesa-dev libxkbcommon-dev
 
       - name: Install dependencies (macOS)
@@ -88,7 +89,6 @@ jobs:
         run: >
           cmake -B ${{ steps.strings.outputs.build-output-dir }}
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
-          -G "Visual Studio 17 2022"
           -S gui
 
       - name: Clean stale build artifacts (macOS)
