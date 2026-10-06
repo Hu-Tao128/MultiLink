@@ -4,6 +4,8 @@ project(MultiLinkQt LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+include(GNUInstallDirs)
+
 find_package(Qt6 REQUIRED COMPONENTS Core Quick QuickControls2 Qml Network)
 
 qt_standard_project_setup()

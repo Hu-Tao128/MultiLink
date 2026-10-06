@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -13,13 +16,10 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact: MultiLink-linux-x86_64
-            pkg-ext: AppImage
           - os: macos-latest
             artifact: MultiLink-macos-arm64
-            pkg-ext: dmg
           - os: windows-latest
             artifact: MultiLink-windows-x86_64
-            pkg-ext: exe
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -64,6 +64,7 @@ jobs:
           wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy-plugin-qt-x86_64.AppImage
           echo "LINUXDEPLOY=${{ github.workspace }}/linuxdeploy-x86_64.AppImage" >> "$GITHUB_ENV"
+          echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
 
       - name: Build Rust Backend
         env:
@@ -84,40 +85,48 @@ jobs:
       - name: Build
         run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config Release
 
-      - name: Package .deb (Linux)
+      - name: Package AppImage (Linux)
         if: runner.os == 'Linux'
         run: |
-          mkdir -p package
-          cmake --install ${{ steps.strings.outputs.build-output-dir }} --prefix package/MultiLink
-          cd package
-          $LINUXDEPLOY --appdir MultiLink --output appimage \
-            --plugin qt \
-            --desktop-file MultiLink/share/applications/*.desktop 2>/dev/null || true
-          # Fallback: manual AppImage packaging
-          cp -v ../build/multilink MultiLink/ 2>/dev/null || true
-          mkdir -p MultiLink/usr/share/icons/hicolor/256x256/apps/
-          cat > MultiLink/multilink.desktop <<EOF
+          set -e
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications
+          cmake --install ${{ steps.strings.outputs.build-output-dir }} --prefix AppDir/usr
+          cat > AppDir/multilink.desktop <<'EOF'
           [Desktop Entry]
           Type=Application
           Name=MultiLink
           Exec=multilink
           Categories=Development;
           EOF
-          $LINUXDEPLOY --appdir MultiLink --output appimage --plugin qt || true
+          cp AppDir/multilink.desktop AppDir/usr/share/applications/multilink.desktop
+          $LINUXDEPLOY --appdir AppDir --plugin qt \
+            --desktop-file AppDir/multilink.desktop \
+            --output appimage || echo "AppImage build failed, falling back to tar.gz"
+          if ls MultiLink*.AppImage >/dev/null 2>&1; then
+            echo "AppImage produced"
+          else
+            tar -czf MultiLink-linux-x86_64.tar.gz -C AppDir/usr bin
+          fi
+          mkdir -p package
+          cd package
+          cpack --config ${{ steps.strings.outputs.build-output-dir }}/CPackConfig.cmake -G DEB || echo "DEB packaging failed (non-fatal)"
+          mv -v *.deb .. 2>/dev/null || true
+          cd ..
 
       - name: Package .dmg (macOS)
         if: runner.os == 'macOS'
         run: |
+          set -e
           mkdir -p package
-          cp ${{ steps.strings.outputs.build-output-dir }}/multilink package/MultiLink
-          macdeployqt package/MultiLink.app -verbose=1 2>/dev/null || true
+          cp -R ${{ steps.strings.outputs.build-output-dir }}/multilink.app package/MultiLink.app
+          macdeployqt package/MultiLink.app -verbose=1
           create-dmg --volname "MultiLink" \
             --window-pos 200 120 \
             --window-size 800 400 \
             --icon-size 100 \
             --app-drop-link 600 185 \
-            MultiLink.dmg package/ || \
-          cd package && zip -r ../MultiLink-macos.zip .
+            MultiLink-macos-arm64.dmg package/MultiLink.app || \
+            (cd package && zip -r ../MultiLink-macos-arm64.zip MultiLink.app)
 
       - name: Package .exe (Windows)
         if: runner.os == 'Windows'
@@ -126,7 +135,16 @@ jobs:
           cp ${{ steps.strings.outputs.build-output-dir }}/Release/multilink.exe package/
           windeployqt --release package/multilink.exe 2>$null || $true
           cd package
-          Compress-Archive -Path * -DestinationPath ../MultiLink-windows.zip
+          Compress-Archive -Path * -DestinationPath ../MultiLink-windows-x86_64.zip
+
+      - name: Verify packaging produced a binary
+        shell: bash
+        run: |
+          ls -la MultiLink* package 2>/dev/null || true
+          if ! ls MultiLink*.AppImage MultiLink*.dmg MultiLink*.zip MultiLink*.deb >/dev/null 2>&1; then
+            echo "ERROR: No release artifact was produced"
+            exit 1
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -136,14 +154,27 @@ jobs:
             MultiLink*.AppImage
             MultiLink*.dmg
             MultiLink*.zip
+            MultiLink*.deb
             !linuxdeploy*.AppImage
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: MultiLink-*
+          path: dist
+          merge-multiple: true
+
+      - name: List release files
+        run: ls -la dist
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            MultiLink*.AppImage
-            MultiLink*.dmg
-            MultiLink*.zip
+          files: dist/*
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
