@@ -73,10 +73,12 @@ impl ToolRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools
-            .get(name)
-            .cloned()
-            .or_else(|| self.tools.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone()))
+        self.tools.get(name).cloned().or_else(|| {
+            self.tools
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+        })
     }
 
     pub fn list(&self) -> Vec<(String, String)> {
@@ -120,14 +122,15 @@ impl ToolExecutor {
         input: ToolInput,
         project_root: &Path,
     ) -> ToolResult {
-        let check = permissions::check_tool_allowed(
-            tool_name,
-            &input,
-            project_root,
-        );
+        let check = permissions::check_tool_allowed(tool_name, &input, project_root);
         if !check.allowed {
-            let reason = check.reason.unwrap_or_else(|| "Blocked by permissions".to_string());
-            eprintln!("[permissions] DENIED: tool={} input={:?} reason={}", tool_name, input, reason);
+            let reason = check
+                .reason
+                .unwrap_or_else(|| "Blocked by permissions".to_string());
+            eprintln!(
+                "[permissions] DENIED: tool={} input={:?} reason={}",
+                tool_name, input, reason
+            );
             return ToolResult::err(reason);
         }
 
@@ -181,6 +184,7 @@ pub fn create_default_registry_with_engine(
     registry.register(Arc::new(git::GitStatus));
     registry.register(Arc::new(git::GitDiff));
     registry.register(Arc::new(system::SystemVersion));
+    registry.register(Arc::new(system::SystemInfo));
     registry.register(Arc::new(write_file::WriteFile));
     registry.register(Arc::new(patch::ApplyPatch));
     registry.register(Arc::new(command::RunCommand));

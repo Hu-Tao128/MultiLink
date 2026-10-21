@@ -1,0 +1,28 @@
+TOOL: system_info
+
+DESCRIPTION:
+Inspect the host machine (operating system, kernel, architecture, CPU, memory and root filesystem). Read-only.
+
+WHEN TO USE:
+- User asks what this computer/equipment can do
+- User asks about hardware resources (CPU, RAM, disk, GPU availability)
+- User asks for system specifications or operating system details
+- Diagnosing whether the machine has enough resources to run a model
+
+DO NOT USE WHEN:
+- User asks for installed developer tool versions (use system_version)
+- User asks about the project, its files or dependencies (use project tools)
+- User wants to change system configuration (not supported)
+
+EXAMPLES:
+User: "¿Qué puedo hacer con este equipo? (Leer recursos)"
+-> system_info()
+
+User: "show me the CPU and RAM of this machine"
+-> system_info()
+
+User: "what operating system am I running?"
+-> system_info()
+
+SCHEMA:
+{"type":"object","properties":{},"required":[]}

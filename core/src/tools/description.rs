@@ -37,10 +37,7 @@ impl ToolDescription {
 static TOOL_DESCRIPTIONS: OnceLock<HashMap<String, ToolDescription>> = OnceLock::new();
 
 fn prompts_dir() -> String {
-    format!(
-        "{}/src/tools/prompts",
-        env!("CARGO_MANIFEST_DIR")
-    )
+    format!("{}/src/tools/prompts", env!("CARGO_MANIFEST_DIR"))
 }
 
 pub fn load_all_descriptions() -> &'static HashMap<String, ToolDescription> {
@@ -60,6 +57,7 @@ pub fn load_all_descriptions() -> &'static HashMap<String, ToolDescription> {
             "git_status",
             "git_diff",
             "system_version",
+            "system_info",
         ] {
             let path = format!("{}/{}.txt", base, name);
             let content = std::fs::read_to_string(&path)
@@ -69,7 +67,10 @@ pub fn load_all_descriptions() -> &'static HashMap<String, ToolDescription> {
                     map.insert(name.to_string(), desc);
                 }
                 Err(e) => {
-                    eprintln!("[tool_descriptions] warning: failed to parse {}: {}", name, e);
+                    eprintln!(
+                        "[tool_descriptions] warning: failed to parse {}: {}",
+                        name, e
+                    );
                 }
             }
         }
@@ -126,9 +127,7 @@ fn parse_tool_description(name: &str, content: &str) -> Result<ToolDescription, 
             continue;
         }
         if in_schema {
-            if trimmed.starts_with("VALIDATION:")
-                || trimmed.starts_with("VALIDATION:")
-            {
+            if trimmed.starts_with("VALIDATION:") || trimmed.starts_with("VALIDATION:") {
                 in_schema = false;
                 current_section = String::new();
             } else {
@@ -185,7 +184,9 @@ mod tests {
     #[test]
     fn test_load_search_code_description() {
         let descriptions = load_all_descriptions();
-        let desc = descriptions.get("search_code").expect("search_code should be loaded");
+        let desc = descriptions
+            .get("search_code")
+            .expect("search_code should be loaded");
         assert!(!desc.description.is_empty());
         assert!(!desc.when_to_use.is_empty());
         assert!(!desc.when_not_to_use.is_empty());
@@ -197,9 +198,19 @@ mod tests {
     fn test_all_tools_loadable() {
         let descriptions = load_all_descriptions();
         for name in &[
-            "search_code", "open_file", "write_file", "apply_patch",
-            "run_command", "fs_grep", "fs_ls", "fs_cat",
-            "git_status", "git_diff", "system_version", "search_and_open",
+            "search_code",
+            "open_file",
+            "write_file",
+            "apply_patch",
+            "run_command",
+            "fs_grep",
+            "fs_ls",
+            "fs_cat",
+            "git_status",
+            "git_diff",
+            "system_version",
+            "system_info",
+            "search_and_open",
         ] {
             assert!(
                 descriptions.contains_key(*name),
@@ -222,7 +233,7 @@ mod tests {
     #[test]
     fn test_list_available_tools() {
         let tools = list_available_tools();
-        assert!(tools.len() >= 12);
+        assert!(tools.len() >= 13);
         assert!(tools.contains(&"search_code".to_string()));
     }
 }

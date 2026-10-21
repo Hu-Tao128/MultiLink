@@ -91,6 +91,8 @@ impl ModelSize {
                 "fs_cat",
                 "fs_grep",
                 "write_file",
+                "system_info",
+                "system_version",
             ],
             ModelSize::Medium => vec![
                 "search_code",
@@ -101,6 +103,8 @@ impl ModelSize {
                 "write_file",
                 "apply_patch",
                 "run_command",
+                "system_info",
+                "system_version",
             ],
             ModelSize::Large => vec![
                 "search_code",
@@ -115,6 +119,7 @@ impl ModelSize {
                 "git_status",
                 "git_diff",
                 "system_version",
+                "system_info",
             ],
         }
     }

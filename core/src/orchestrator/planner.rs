@@ -4,6 +4,117 @@ use std::collections::HashMap;
 use crate::orchestrator::provider_selector::RequiredCapabilities;
 use crate::tools::ToolInput;
 
+const SYSTEM_QUERY_KEYWORDS: &[&str] = &[
+    "version",
+    "system",
+    "hardware",
+    "cpu",
+    "gpu",
+    "procesador",
+    "kernel",
+    "specs",
+    "especificaciones",
+    "installed",
+    "instalado",
+    "node",
+    "java",
+    "python",
+    "cargo",
+    "git",
+];
+
+const SYSTEM_QUERY_PHRASES: &[&str] = &[
+    "sistema operativo",
+    "memoria ram",
+    "memoria del sistema",
+    "memoria disponible",
+    "recursos del sistema",
+    "recursos de la maquina",
+    "recursos de la máquina",
+    "recursos de este",
+    "recursos de esta",
+    "recursos de mi",
+    "recursos del equipo",
+    "este equipo",
+    "mi equipo",
+    "del equipo",
+    "esta maquina",
+    "esta máquina",
+    "la maquina",
+    "la máquina",
+    "mi pc",
+    "esta pc",
+    "mi computadora",
+    "esta computadora",
+    "mi ordenador",
+    "este ordenador",
+    "mi portatil",
+    "este portatil",
+    "mi portátil",
+    "este portátil",
+    "del sistema",
+    "mi sistema",
+];
+
+/// Token-aware match so `node_modules` does not look like a request for the
+/// `node` version, while `node --version` still does.
+fn contains_word(lower: &str, word: &str) -> bool {
+    lower
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|part| part == word)
+}
+
+/// Detects prompts that ask about the host machine or installed tooling.
+/// This is shared by the feature extractor and the deterministic intent
+/// classifier so both agree on what counts as a system question.
+fn is_system_query_prompt(lower: &str) -> bool {
+    if SYSTEM_QUERY_KEYWORDS
+        .iter()
+        .any(|keyword| contains_word(lower, keyword))
+    {
+        return true;
+    }
+    if SYSTEM_QUERY_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+    {
+        return true;
+    }
+
+    lower.contains("recursos")
+        && [
+            "leer", "lee", "muestra", "dame", "consulta", "mostrar", "ver", "revisa",
+        ]
+        .iter()
+        .any(|verb| lower.contains(verb))
+}
+
+/// True when the prompt is specifically about hardware/resources, which is
+/// better served by the `system_info` tool than by `system_version`.
+fn wants_system_resources(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    [
+        "hardware",
+        "cpu",
+        "gpu",
+        "memoria",
+        "procesador",
+        "disco",
+        "almacenamiento",
+        "kernel",
+        "sistema operativo",
+        "specs",
+        "especificaciones",
+        "recursos",
+        "equipo",
+        "maquina",
+        "máquina",
+        "capacidades",
+    ]
+    .iter()
+    .any(|keyword| lower.contains(keyword))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct IntentFeatures {
     pub has_file_path: bool,
@@ -113,17 +224,7 @@ impl IntentFeatures {
         let summary_keywords = ["resume", "summary", "resumen", "resume"];
         features.wants_summary = summary_keywords.iter().any(|k| p.contains(k));
 
-        let system_keywords = [
-            "version",
-            "node",
-            "java",
-            "python",
-            "cargo",
-            "git",
-            "system",
-            " installed",
-        ];
-        features.is_system_query = system_keywords.iter().any(|k| p.contains(k));
+        features.is_system_query = is_system_query_prompt(&p);
 
         let read_ops = [
             "abre",
@@ -307,9 +408,6 @@ pub fn classify_intent(prompt: &str) -> QueryIntent {
         "view",
     ];
     let search_keywords = ["busca", "find", "where is", "donde está", "donde esta"];
-    let system_keywords = [
-        "version", " node ", " node\"", " node'", " node.", "java ", " java", "python ",
-    ];
 
     let is_web_creation = features.asks_for_creation
         && (lower.contains("landing page")
@@ -352,7 +450,7 @@ pub fn classify_intent(prompt: &str) -> QueryIntent {
         QueryIntent::ReadFile
     } else if search_keywords.iter().any(|k| lower.contains(k)) {
         QueryIntent::Search
-    } else if system_keywords.iter().any(|k| lower.contains(k)) {
+    } else if is_system_query_prompt(&lower) {
         QueryIntent::SystemInfo
     } else if lower.contains("run_command")
         || lower.contains("run command")
@@ -470,22 +568,28 @@ fn select_tool_for_intent(intent: &QueryIntent, prompt: &str) -> Option<(String,
                 args: None,
             },
         )),
-        QueryIntent::SystemInfo => Some((
-            "system_version".to_string(),
-            ToolInput {
-                path: None,
-                pattern: None,
-                args: Some(HashMap::from([(
-                    "tools".to_string(),
-                    serde_json::Value::Array(
-                        extract_requested_system_tools(prompt)
-                            .into_iter()
-                            .map(serde_json::Value::String)
-                            .collect(),
-                    ),
-                )])),
-            },
-        )),
+        QueryIntent::SystemInfo => {
+            if wants_system_resources(prompt) {
+                Some(("system_info".to_string(), ToolInput::default()))
+            } else {
+                Some((
+                    "system_version".to_string(),
+                    ToolInput {
+                        path: None,
+                        pattern: None,
+                        args: Some(HashMap::from([(
+                            "tools".to_string(),
+                            serde_json::Value::Array(
+                                extract_requested_system_tools(prompt)
+                                    .into_iter()
+                                    .map(serde_json::Value::String)
+                                    .collect(),
+                            ),
+                        )])),
+                    },
+                ))
+            }
+        }
         QueryIntent::General => None,
     };
 
@@ -1079,6 +1183,45 @@ mod tests {
             classify_intent("git diff core/src/lib.rs"),
             QueryIntent::GitDiff
         );
+    }
+
+    #[test]
+    fn system_resource_prompts_select_system_info_tool() {
+        let prompt = "Que puedo hacer con este equipo? (Leer recursos)";
+        assert_eq!(classify_intent(prompt), QueryIntent::SystemInfo);
+
+        let features = IntentFeatures::extract(prompt);
+        assert!(features.is_system_query);
+        assert!(features.is_read_operation);
+
+        let steps = create_initial_steps(prompt, vec!["system_info".to_string()]);
+        match &steps[0] {
+            Step::ToolCall { name, .. } => assert_eq!(name, "system_info"),
+            other => panic!("expected system_info tool call, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn system_detection_uses_word_boundaries() {
+        assert_eq!(classify_intent("node --version"), QueryIntent::SystemInfo);
+        assert_eq!(classify_intent("cpu usage"), QueryIntent::SystemInfo);
+        assert_ne!(
+            classify_intent("revisa node_modules"),
+            QueryIntent::SystemInfo
+        );
+        assert_ne!(
+            classify_intent("conversion de formatos"),
+            QueryIntent::SystemInfo
+        );
+    }
+
+    #[test]
+    fn tool_version_prompts_still_select_system_version() {
+        let steps = create_initial_steps("python version", vec!["system_version".to_string()]);
+        match &steps[0] {
+            Step::ToolCall { name, .. } => assert_eq!(name, "system_version"),
+            other => panic!("expected system_version tool call, got {:?}", other),
+        }
     }
 
     #[test]
