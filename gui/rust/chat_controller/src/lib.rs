@@ -12,6 +12,7 @@ use multilink_core::providers::codex::CodexProvider;
 use multilink_core::providers::deepseek::DeepSeekProvider;
 use multilink_core::providers::gemini::GeminiProvider;
 use multilink_core::providers::ollama::OllamaProvider;
+use multilink_core::providers::openrouter::OpenRouterProvider;
 use multilink_core::{
     AppConfig, ChatRuntime, ProviderId, ProviderKind, ProviderRouter, StreamEvent,
 };
@@ -177,6 +178,37 @@ pub extern "C" fn chat_backend_create(
         DeepSeekProvider::new(deepseek_base_url, deepseek_api_key, deepseek_model, 0)
     {
         router.register(Arc::new(deepseek));
+    }
+
+    // OpenRouter: OpenAI-compatible Chat Completions API with access to many
+    // downstream models (Anthropic, OpenAI, etc.). Uses the same token store
+    // mechanism as DeepSeek/Gemini/Codex.
+    let openrouter_api_key = std::env::var("OPENROUTER_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| load_provider_token(&runtime, "openrouter"));
+    let openrouter_server = config
+        .servers
+        .iter()
+        .find(|server| matches!(server.provider, ProviderKind::OpenRouter))
+        .cloned();
+    let openrouter_base_url = openrouter_server
+        .as_ref()
+        .map(|server| normalize_base_url(&server.base_url))
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| OpenRouterProvider::default_base_url().to_string());
+    let openrouter_model = openrouter_server
+        .as_ref()
+        .map(|server| server.default_model.clone())
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| "anthropic/claude-sonnet-latest".to_string());
+    if let Ok(openrouter) = OpenRouterProvider::new(
+        openrouter_base_url,
+        openrouter_api_key,
+        openrouter_model,
+        0,
+    ) {
+        router.register(Arc::new(openrouter));
     }
 
     let chat_runtime = Arc::new(
@@ -1696,6 +1728,7 @@ fn provider_key_of(kind: ProviderKind) -> &'static str {
         ProviderKind::DeepSeek => "deepseek",
         ProviderKind::Gemini => "gemini",
         ProviderKind::Codex => "codex",
+        ProviderKind::OpenRouter => "openrouter",
         _ => "ollama",
     }
 }
@@ -1907,6 +1940,7 @@ fn provider_label(provider: ProviderId) -> &'static str {
         ProviderId::Gemini => "Gemini",
         ProviderId::Codex => "Codex",
         ProviderId::DeepSeek => "DeepSeek",
+        ProviderId::OpenRouter => "OpenRouter",
     }
 }
 
@@ -1917,6 +1951,7 @@ fn provider_id_from_str(provider: &str) -> ProviderId {
         "gemini" => ProviderId::Gemini,
         "codex" | "openai" => ProviderId::Codex,
         "deepseek" => ProviderId::DeepSeek,
+        "openrouter" => ProviderId::OpenRouter,
         _ => ProviderId::Ollama,
     }
 }
@@ -1931,6 +1966,11 @@ fn provider_server_defaults(provider: &str) -> Option<(&'static str, &'static st
             "gemini-2.0-flash",
         )),
         "codex" | "openai" => Some(("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini")),
+        "openrouter" => Some((
+            "OpenRouter",
+            "https://openrouter.ai/api/v1",
+            "anthropic/claude-sonnet-latest",
+        )),
         _ => None,
     }
 }
@@ -1989,6 +2029,7 @@ fn kind_to_provider_kind(id: ProviderId) -> ProviderKind {
         ProviderId::Gemini => ProviderKind::Gemini,
         ProviderId::Codex => ProviderKind::Codex,
         ProviderId::Ollama => ProviderKind::Ollama,
+        ProviderId::OpenRouter => ProviderKind::OpenRouter,
     }
 }
 

@@ -70,6 +70,7 @@ Page {
         if (provider === "deepseek") return "https://api.deepseek.com"
         if (provider === "gemini") return "https://generativelanguage.googleapis.com"
         if (provider === "codex") return "https://api.openai.com/v1"
+        if (provider === "openrouter") return "https://openrouter.ai/api/v1"
         return "http://127.0.0.1:11434"
     }
 
@@ -78,7 +79,8 @@ Page {
         const providers = [
             { key: "deepseek", label: "DeepSeek" },
             { key: "gemini", label: "Gemini" },
-            { key: "codex", label: "Codex / OpenAI" }
+            { key: "codex", label: "Codex / OpenAI" },
+            { key: "openrouter", label: "OpenRouter" }
         ]
         for (let i = 0; i < providers.length; i += 1) {
             const entry = providers[i]
@@ -224,8 +226,8 @@ Page {
                                 onTextChanged: serversModel.setProperty(index, "name", text)
                             }
                             ComboBox {
-                                model: ["ollama", "ollama_cloud", "gemini", "codex", "deepseek"]
-                                currentIndex: Math.max(0, ["ollama", "ollama_cloud", "gemini", "codex", "deepseek"].indexOf(model.provider))
+                                model: ["ollama", "ollama_cloud", "gemini", "codex", "deepseek", "openrouter"]
+                                currentIndex: Math.max(0, ["ollama", "ollama_cloud", "gemini", "codex", "deepseek", "openrouter"].indexOf(model.provider))
                                 onActivated: {
                                     const nextProvider = currentText
                                     const previousBase = model.base_url || ""
