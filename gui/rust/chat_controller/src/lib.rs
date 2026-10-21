@@ -2,6 +2,7 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -107,6 +108,10 @@ pub extern "C" fn chat_backend_create(
 
     let config_path = AppConfig::default_user_config_path();
     let (config, startup_notice) = load_config_with_recovery(&runtime, &config_path);
+    let ollama_autostarted = ensure_local_ollama_running(&runtime, &config);
+    if ollama_autostarted {
+        eprintln!("[ollama] servicio local iniciado automaticamente");
+    }
     let connectivity_notice = detect_missing_ollama_notice(&runtime, &config);
     let startup_notice = merge_startup_notices(&startup_notice, &connectivity_notice);
 
@@ -1819,6 +1824,148 @@ async fn probe_ollama_tags(base_url: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns enabled local Ollama endpoints, with the primary server first.
+fn local_ollama_urls(config: &AppConfig) -> Vec<String> {
+    let mut urls: Vec<String> = config
+        .servers
+        .iter()
+        .filter(|server| {
+            server.enabled
+                && matches!(
+                    server.provider,
+                    ProviderKind::Ollama | ProviderKind::OllamaCloud
+                )
+        })
+        .map(|server| normalize_base_url(&server.base_url))
+        .filter(|url| is_local_ollama_url(url))
+        .collect();
+    urls.sort();
+    urls.dedup();
+
+    if let Some(primary) = config.primary_server() {
+        if matches!(
+            primary.provider,
+            ProviderKind::Ollama | ProviderKind::OllamaCloud
+        ) {
+            let primary_url = normalize_base_url(&primary.base_url);
+            if is_local_ollama_url(&primary_url) {
+                urls.retain(|url| url != &primary_url);
+                urls.insert(0, primary_url);
+            }
+        }
+    }
+
+    urls
+}
+
+/// Locates the Ollama binary even when the GUI was launched with a PATH that
+/// does not include the user's shell additions.
+fn find_ollama_binary() -> Option<PathBuf> {
+    let from_path = std::process::Command::new("ollama")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if from_path {
+        return Some(PathBuf::from("ollama"));
+    }
+
+    let mut candidates = vec![
+        PathBuf::from("/usr/local/bin/ollama"),
+        PathBuf::from("/usr/bin/ollama"),
+        PathBuf::from("/snap/bin/ollama"),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(PathBuf::from(home).join(".local/bin/ollama"));
+    }
+
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+/// `OLLAMA_HOST` expects `host:port` without a scheme. Preserve IPv6 brackets.
+fn ollama_host_arg(base_url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(base_url).ok()?;
+    let host = parsed.host_str()?;
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]", host)
+    } else {
+        host.to_string()
+    };
+    Some(format!("{}:{}", host, parsed.port_or_known_default()?))
+}
+
+/// Starts `ollama serve` when the configured local endpoint is down. Returns
+/// true if a process was spawned. Set MULTILINK_NO_AUTO_START_OLLAMA=1 to
+/// disable this (useful for headless tests or externally managed services).
+fn ensure_local_ollama_running(runtime: &Runtime, config: &AppConfig) -> bool {
+    let disabled = std::env::var("MULTILINK_NO_AUTO_START_OLLAMA")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false);
+    if disabled {
+        return false;
+    }
+
+    let urls = local_ollama_urls(config);
+    if urls.is_empty() {
+        return false;
+    }
+
+    let mut down_url: Option<String> = None;
+    for base_url in urls {
+        if !runtime.block_on(probe_ollama_tags(&base_url)) {
+            down_url = Some(base_url);
+            break;
+        }
+    }
+    let Some(base_url) = down_url else {
+        return false;
+    };
+
+    let Some(binary) = find_ollama_binary() else {
+        return false;
+    };
+
+    let mut command = std::process::Command::new(binary);
+    command
+        .arg("serve")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(host) = ollama_host_arg(&base_url) {
+        command.env("OLLAMA_HOST", host);
+    }
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            eprintln!("[ollama] no se pudo iniciar el servicio local: {}", err);
+            return false;
+        }
+    };
+
+    // Reap the child when it eventually exits, without blocking the GUI.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    for _ in 0..20 {
+        if runtime.block_on(probe_ollama_tags(&base_url)) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    eprintln!(
+        "[ollama] el servicio se inicio pero {} aun no responde",
+        base_url
+    );
+    true
+}
+
 /// Resolves a provider API key from environment variables or the token store.
 async fn provider_api_key(provider: &str) -> Option<String> {
     let env_names: &[&str] = match provider {
@@ -2741,6 +2888,56 @@ mod tests {
     #[test]
     fn model_selection_empty_means_show_all() {
         assert!(model_is_selected("openai/gpt-4o-mini", &[]));
+    }
+
+    #[test]
+    fn local_ollama_urls_prefers_primary_and_ignores_remote_servers() {
+        let config: AppConfig = toml::from_str(
+            r#"
+version = 2
+
+[[servers]]
+name = "OpenRouter"
+provider = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+default_model = "anthropic/claude-sonnet-latest"
+priority = 1
+enabled = true
+
+[[servers]]
+name = "Local Ollama"
+provider = "ollama"
+base_url = "http://127.0.0.1:11434"
+default_model = "qwen2.5-coder:3b"
+priority = 2
+enabled = true
+
+[storage]
+models_dir = "/tmp/multilink-models"
+"#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(
+            local_ollama_urls(&config),
+            vec!["http://127.0.0.1:11434".to_string()]
+        );
+    }
+
+    #[test]
+    fn ollama_host_arg_preserves_ipv4_and_ipv6_ports() {
+        assert_eq!(
+            ollama_host_arg("http://127.0.0.1:11434"),
+            Some("127.0.0.1:11434".to_string())
+        );
+        assert_eq!(
+            ollama_host_arg("http://[::1]:11435"),
+            Some("[::1]:11435".to_string())
+        );
+        assert_eq!(
+            ollama_host_arg("http://localhost:11434"),
+            Some("localhost:11434".to_string())
+        );
     }
 
     #[test]
