@@ -76,6 +76,8 @@ MULTILINK_DEBUG_CONTEXT=1 QT_QPA_PLATFORM=offscreen timeout 8s ./build/gui/multi
 *   **Encrypted Token Storage**: OAuth tokens are securely stored using AES-256-GCM encryption.
 *   **Model Management**: Registry for local model detection, size tracking, migration, and deletion.
 *   **Server Configuration UI**: Manage multiple Ollama servers from the Settings page and test connectivity directly from the app.
+*   **MCP Configuration UI**: Register Model Context Protocol servers (JSON editor) with persistence in `[mcp]`; see `docs/MCP.md`.
+*   **Large Model Catalogs**: OpenRouter models are discovered automatically, with an optional per-server allow-list so you can pick which models appear in the chat selector.
 *   **Remote Diagnostics**: If a server test fails, MultiLink surfaces actionable hints (bind/firewall/network) instead of generic errors.
 *   **Model-Aware Context Budgets**: Context budgets are adjusted dynamically using `/api/show` model metadata to improve small-model quality.
 *   **Execution Metrics**: Runtime emits structured generation metrics (tokens, latency, top-k, fallback usage).
@@ -117,6 +119,7 @@ Notes:
 - You can still override key values via environment variables for CI/dev workflows.
 - `routing.remote_threshold` also supports `MULTILINK_REMOTE_THRESHOLD` (`auto|light|medium|heavy|critical`).
 - For remote/LAN/Tailscale troubleshooting, see `docs/network-troubleshooting.md`.
+- For MCP (Model Context Protocol) configuration, see `docs/MCP.md`.
 
 ## 🎨 Architecture
 
