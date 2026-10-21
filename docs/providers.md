@@ -24,6 +24,19 @@ The core also supports `stream_send(...)` for token-by-token updates.
 
 At runtime today, the GUI bootstrap registers Ollama by default. Remote provider registration and auth lifecycle wiring are tracked as next integration work.
 
+## Local Ollama lifecycle
+
+When an enabled Ollama server points to a local endpoint (`127.0.0.1`,
+`localhost` or `::1`) and `/api/tags` does not respond, the GUI backend starts
+`ollama serve` in the background and waits up to ~3 seconds for it to become
+ready. The primary server is checked first. This makes the desktop app usable
+right after login, even when the Ollama systemd unit is not enabled.
+
+Disable the behavior with `MULTILINK_NO_AUTO_START_OLLAMA=1` (useful for CI,
+headless smoke tests or when the service is managed externally). The process is
+started with `OLLAMA_HOST` set to the configured host and port, so custom ports
+keep working.
+
 ## DeepSeek
 
 DeepSeek speaks the same wire format as OpenAI, so it needs no custom SDK:
