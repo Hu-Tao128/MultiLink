@@ -89,6 +89,7 @@ pub enum ProviderKind {
     Gemini,
     Codex,
     DeepSeek,
+    OpenRouter,
 }
 
 impl ProviderKind {
@@ -103,6 +104,7 @@ impl ProviderKind {
             ProviderKind::Gemini => crate::providers::ProviderId::Gemini,
             ProviderKind::Codex => crate::providers::ProviderId::Codex,
             ProviderKind::DeepSeek => crate::providers::ProviderId::DeepSeek,
+            ProviderKind::OpenRouter => crate::providers::ProviderId::OpenRouter,
         }
     }
 }
