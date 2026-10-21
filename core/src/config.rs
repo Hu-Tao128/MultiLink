@@ -313,6 +313,37 @@ impl Default for ValidationConfig {
     }
 }
 
+/// Configuration for a single MCP (Model Context Protocol) server.
+/// Mirrors the standard MCP server config schema used by tools like Claude,
+/// Cursor, and OpenCode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    /// Display name for the server in the UI.
+    pub name: String,
+    /// Command to spawn the server (e.g., "npx", "python", "node").
+    pub command: String,
+    /// Arguments to pass to the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables for the server process.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    /// Whether this MCP server is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct McpConfig {
+    /// MCP servers configured by the user.
+    pub servers: Vec<McpServerConfig>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelTier {
     Small,
@@ -347,6 +378,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub validation: ValidationConfig,
+
+    #[serde(default)]
+    pub mcp: McpConfig,
 
     // legacy v1 fields, kept for migration only
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -591,6 +625,7 @@ impl Default for AppConfig {
             system_context_dir: None,
             agent: AgentConfig::default(),
             validation: ValidationConfig::default(),
+            mcp: McpConfig::default(),
             preferred_provider: None,
             ollama: None,
         }
