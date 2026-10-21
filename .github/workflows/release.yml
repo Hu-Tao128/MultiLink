@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional tag to publish as a GitHub Release (leave empty to only build artifacts)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -16,10 +23,13 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact: MultiLink-linux-x86_64
+            slug: linux-x86_64
           - os: macos-latest
             artifact: MultiLink-macos-arm64
+            slug: macos-arm64
           - os: windows-latest
             artifact: MultiLink-windows-x86_64
+            slug: windows-x86_64
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -71,6 +81,9 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: ${{ runner.os == 'macOS' && '14.0' || '' }}
         run: cargo build --release --manifest-path gui/rust/chat_controller/Cargo.toml
 
+      - name: Build LSP server
+        run: cargo build --release --manifest-path lsp-server/Cargo.toml
+
       - name: Clean stale build dir (macOS)
         if: runner.os == 'macOS'
         run: rm -rf ${{ steps.strings.outputs.build-output-dir }}
@@ -103,6 +116,12 @@ jobs:
             --desktop-file AppDir/multilink.desktop \
             --output appimage || echo "AppImage build failed, falling back to tar.gz"
           if ls MultiLink*.AppImage >/dev/null 2>&1; then
+            for img in MultiLink*.AppImage; do
+              [ -f "$img" ] || continue
+              if [ "$img" != "MultiLink-linux-x86_64.AppImage" ]; then
+                mv -f "$img" MultiLink-linux-x86_64.AppImage
+              fi
+            done
             echo "AppImage produced"
           else
             tar -czf MultiLink-linux-x86_64.tar.gz -C AppDir/usr bin
@@ -112,6 +131,12 @@ jobs:
           cpack --config ${{ steps.strings.outputs.build-output-dir }}/CPackConfig.cmake -G DEB || echo "DEB packaging failed (non-fatal)"
           mv -v *.deb .. 2>/dev/null || true
           cd ..
+          if ls *.deb >/dev/null 2>&1; then
+            deb=$(ls *.deb | head -n 1)
+            if [ "$deb" != "MultiLink-linux-x86_64.deb" ]; then
+              mv -f "$deb" MultiLink-linux-x86_64.deb
+            fi
+          fi
 
       - name: Package .dmg (macOS)
         if: runner.os == 'macOS'
@@ -137,12 +162,32 @@ jobs:
           cd package
           Compress-Archive -Path * -DestinationPath ../MultiLink-windows-x86_64.zip
 
+      - name: Package LSP server (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -e
+          mkdir -p lsp-package/bin
+          cp lsp-server/target/release/multilink-lsp lsp-package/bin/multilink-lsp
+          tar -czf "MultiLink-lsp-${{ matrix.slug }}.tar.gz" -C lsp-package bin
+
+      - name: Package LSP server (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force lsp-package/bin | Out-Null
+          Copy-Item lsp-server/target/release/multilink-lsp.exe lsp-package/bin/multilink-lsp.exe
+          Compress-Archive -Path lsp-package/bin -DestinationPath "MultiLink-lsp-${{ matrix.slug }}.zip"
+
       - name: Verify packaging produced a binary
         shell: bash
         run: |
           ls -la MultiLink* package 2>/dev/null || true
           if ! ls MultiLink*.AppImage MultiLink*.dmg MultiLink*.zip MultiLink*.deb >/dev/null 2>&1; then
             echo "ERROR: No release artifact was produced"
+            exit 1
+          fi
+          if ! ls MultiLink-lsp-* >/dev/null 2>&1; then
+            echo "ERROR: The LSP artifact was not produced"
             exit 1
           fi
 
@@ -155,10 +200,12 @@ jobs:
             MultiLink*.dmg
             MultiLink*.zip
             MultiLink*.deb
+            MultiLink-lsp-*
             !linuxdeploy*.AppImage
 
   release:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release_tag != ''
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -168,12 +215,24 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          rm -f SHA256SUMS
+          for file in *; do
+            [ -f "$file" ] || continue
+            [ "$file" = "SHA256SUMS" ] && continue
+            sha256sum "$file" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+
       - name: List release files
         run: ls -la dist
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
           files: dist/*
           fail_on_unmatched_files: true
         env:
