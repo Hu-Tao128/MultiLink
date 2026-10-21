@@ -437,15 +437,30 @@ fn extract_json_object(text: &str) -> Option<String> {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max])
+        return s.to_string();
     }
+
+    // Truncate on a UTF-8 character boundary. Provider responses frequently
+    // contain multi-byte characters (em dashes, accents, emoji); slicing at an
+    // arbitrary byte offset panics inside the tool-selection path.
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_respects_utf8_char_boundaries() {
+        let text = "respuesta con un caracter multibyte — y texto adicional";
+        let truncated = truncate(text, 37);
+        assert!(truncated.ends_with("..."));
+        assert!(text.starts_with(truncated.trim_end_matches('.')));
+    }
 
     #[test]
     fn test_extract_json_object_simple() {
