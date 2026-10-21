@@ -763,14 +763,31 @@ impl Executor {
         if confidence > 0.7 && !features.requires_llm() {
             let initial =
                 crate::orchestrator::planner::create_initial_steps(prompt, available_tools.clone());
+            if initial
+                .iter()
+                .any(|step| matches!(step, crate::orchestrator::planner::Step::ToolCall { .. }))
+            {
+                eprintln!(
+                    "[executor] fast_path: heuristic match with confidence={:.2} steps={}",
+                    confidence,
+                    initial.len()
+                );
+                let plan = crate::orchestrator::planner::MultiStepPlan::new(
+                    initial,
+                    prompt.to_string(),
+                    true,
+                );
+                return self.execute_multi_step(plan).await;
+            }
+
+            // High tool confidence with no deterministic tool mapping (for
+            // example a general question that happens to contain a read verb)
+            // used to fall into `DecideNext`, which silently returned "done"
+            // and answered without inspecting anything. Fall through to the
+            // dynamic loop so the model can pick a real tool instead.
             eprintln!(
-                "[executor] fast_path: heuristic match with confidence={:.2} steps={}",
-                confidence,
-                initial.len()
+                "[executor] fast_path produced no tool step; falling back to dynamic tool selection"
             );
-            let plan =
-                crate::orchestrator::planner::MultiStepPlan::new(initial, prompt.to_string(), true);
-            return self.execute_multi_step(plan).await;
         }
 
         eprintln!(
