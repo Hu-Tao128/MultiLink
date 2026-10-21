@@ -13,6 +13,34 @@ The next product direction is a local-first coding agent. The current codebase a
 
 Follow these steps to get MultiLink up and running on your local machine.
 
+### Install (Linux / Unix)
+
+The installer downloads a prebuilt release when one exists. If your platform has
+no release asset, it can trigger a GitHub Actions build through `gh` or compile
+from source:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Hu-Tao128/MultiLink/release/mvp-freeze/scripts/install.sh | bash
+```
+
+Useful variants:
+
+```bash
+# Install only the LSP server
+curl -fsSL <install-url> | bash -s -- --no-gui
+
+# System-wide prefix (the script itself never calls sudo)
+curl -fsSL <install-url> | bash -s -- --prefix /usr/local
+
+# Pin a release instead of using "latest"
+curl -fsSL <install-url> | bash -s -- --version v1.1.0
+```
+
+The GUI launcher is installed to `~/.local/bin/multilink`, the LSP server to
+`~/.local/bin/multilink-lsp`, and config is created on first run at
+`~/.config/multilink/multilink.toml`. See
+[`scripts/README.md`](scripts/README.md) for the full fallback order and options.
+
 ### Prerequisites
 
 Ensure you have the following installed:
@@ -54,6 +82,15 @@ cmake --build build/gui --config Release
 ```
 
 The executable will be located in `build/gui/multilink` (or `build/gui/Release/multilink` on Windows). You can run it directly from there.
+
+To build both the GUI and LSP binaries and package them into `dist/`, use:
+
+```bash
+./scripts/build_binaries.sh
+```
+
+If the local toolchain is incomplete, add `--via-github` to build through
+GitHub Actions with the `gh` CLI.
 
 To run with debug logs (context, embeddings, server selection):
 

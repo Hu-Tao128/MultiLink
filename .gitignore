@@ -4,6 +4,7 @@ target/
 
 # CMake/Qt build outputs
 build/
+dist/
 cmake-build-*/
 CMakeCache.txt
 CMakeFiles/

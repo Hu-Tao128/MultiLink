@@ -82,6 +82,19 @@ cmake -S gui -B build/gui -DCMAKE_BUILD_TYPE=Release
 cmake --build build/gui --config Release
 ```
 
+### Package release binaries
+
+```bash
+./scripts/build_binaries.sh            # local build, GitHub Actions fallback
+./scripts/build_binaries.sh --via-github
+```
+
+Installer (Linux/Unix):
+
+```bash
+./scripts/install.sh --from-dir ./dist
+```
+
 ### GUI tests (if present)
 
 ```bash
