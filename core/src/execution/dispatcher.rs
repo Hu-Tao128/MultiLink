@@ -298,7 +298,12 @@ pub(crate) fn is_loopback_url(url: &str) -> bool {
             .next()
             .unwrap_or(rest)
     } else {
-        rest.split('/').next().unwrap_or(rest).split(':').next().unwrap_or(rest)
+        rest.split('/')
+            .next()
+            .unwrap_or(rest)
+            .split(':')
+            .next()
+            .unwrap_or(rest)
     };
 
     matches!(host, "localhost" | "127.0.0.1" | "::1")

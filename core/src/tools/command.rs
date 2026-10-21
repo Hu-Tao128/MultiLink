@@ -269,9 +269,12 @@ mod tests {
                     path: None,
                     pattern: None,
                     args: Some(
-                        vec![("command".to_string(), Value::String("cargo build".to_string()))]
-                            .into_iter()
-                            .collect(),
+                        vec![(
+                            "command".to_string(),
+                            Value::String("cargo build".to_string()),
+                        )]
+                        .into_iter()
+                        .collect(),
                     ),
                 },
                 root.path(),
@@ -281,7 +284,11 @@ mod tests {
         assert!(result.success, "{:?}", result.error);
         // cargo build in an empty dir may fail (exit code != 0), but the tool itself ran
         assert!(
-            result.output.get("exit_code").and_then(|v| v.as_i64()).is_some(),
+            result
+                .output
+                .get("exit_code")
+                .and_then(|v| v.as_i64())
+                .is_some(),
             "exit_code should be present"
         );
     }

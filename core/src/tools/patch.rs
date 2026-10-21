@@ -82,9 +82,9 @@ impl Tool for ApplyPatch {
             return ToolResult::err(format!("Failed to write patched file: {}", e));
         }
 
-    let original_lines: Vec<&str> = original_content.lines().collect();
-    let new_lines: Vec<&str> = new_content.lines().collect();
-    // Both counts exclude trailing newline; fine for report.
+        let original_lines: Vec<&str> = original_content.lines().collect();
+        let new_lines: Vec<&str> = new_content.lines().collect();
+        // Both counts exclude trailing newline; fine for report.
 
         ToolResult::ok(json!({
             "path": target_path.to_string_lossy(),
@@ -150,7 +150,10 @@ fn parse_unified_diff(input: &str) -> Result<ParsedDiff, String> {
     }
 
     if hunks.is_empty() {
-        return Err("No hunks found in patch. A valid unified diff must contain at least one @@ hunk.".to_string());
+        return Err(
+            "No hunks found in patch. A valid unified diff must contain at least one @@ hunk."
+                .to_string(),
+        );
     }
 
     Ok(ParsedDiff { hunks })
@@ -195,9 +198,11 @@ fn parse_range(s: &str) -> Result<(usize, usize), String> {
     Ok((start, count))
 }
 
-fn build_hunk(lines: &[String], header: Option<(usize, usize, usize, usize)>) -> Result<Hunk, String> {
-    let (old_start, old_count, new_start, new_count) =
-        header.unwrap_or((1, 0, 1, 0));
+fn build_hunk(
+    lines: &[String],
+    header: Option<(usize, usize, usize, usize)>,
+) -> Result<Hunk, String> {
+    let (old_start, old_count, new_start, new_count) = header.unwrap_or((1, 0, 1, 0));
     let mut parsed_lines = Vec::new();
 
     for line in lines {
@@ -357,9 +362,12 @@ mod tests {
                     path: Some("../outside.txt".to_string()),
                     pattern: None,
                     args: Some(
-                        vec![("patch".to_string(), Value::String("@@ -1 +1 @@\n-a\n+b\n".to_string()))]
-                            .into_iter()
-                            .collect(),
+                        vec![(
+                            "patch".to_string(),
+                            Value::String("@@ -1 +1 @@\n-a\n+b\n".to_string()),
+                        )]
+                        .into_iter()
+                        .collect(),
                     ),
                 },
                 root.path(),
@@ -379,9 +387,12 @@ mod tests {
                     path: Some("/etc/passwd".to_string()),
                     pattern: None,
                     args: Some(
-                        vec![("patch".to_string(), Value::String("@@ -1 +1 @@\n-a\n+b\n".to_string()))]
-                            .into_iter()
-                            .collect(),
+                        vec![(
+                            "patch".to_string(),
+                            Value::String("@@ -1 +1 @@\n-a\n+b\n".to_string()),
+                        )]
+                        .into_iter()
+                        .collect(),
                     ),
                 },
                 root.path(),
@@ -401,9 +412,12 @@ mod tests {
                     path: Some("nope.rs".to_string()),
                     pattern: None,
                     args: Some(
-                        vec![("patch".to_string(), Value::String("@@ -1 +1 @@\n-a\n+b\n".to_string()))]
-                            .into_iter()
-                            .collect(),
+                        vec![(
+                            "patch".to_string(),
+                            Value::String("@@ -1 +1 @@\n-a\n+b\n".to_string()),
+                        )]
+                        .into_iter()
+                        .collect(),
                     ),
                 },
                 root.path(),
@@ -441,7 +455,11 @@ mod tests {
     #[tokio::test]
     async fn apply_patch_replaces_word_in_line() {
         let root = test_root();
-        write_test_file(root.path(), "greeting.rs", "fn hello() {\n    println!(\"hi\");\n}\n");
+        write_test_file(
+            root.path(),
+            "greeting.rs",
+            "fn hello() {\n    println!(\"hi\");\n}\n",
+        );
         let patch = "\
 @@ -2,1 +2,1 @@\n\
 -    println!(\"hi\");\n\

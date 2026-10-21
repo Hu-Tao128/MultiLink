@@ -458,7 +458,9 @@ impl ProviderRouter {
             }
 
             if let Some(provider) = self.providers.get(provider_id) {
-                if provider.is_available_async().await && self.check_circuit_breaker(*provider_id).await {
+                if provider.is_available_async().await
+                    && self.check_circuit_breaker(*provider_id).await
+                {
                     match self
                         .send_with_retry(provider, prompt.clone(), options.clone())
                         .await
@@ -545,7 +547,9 @@ impl ProviderRouter {
             }
 
             if let Some(provider) = self.providers.get(provider_id) {
-                if provider.is_available_async().await && self.check_circuit_breaker(*provider_id).await {
+                if provider.is_available_async().await
+                    && self.check_circuit_breaker(*provider_id).await
+                {
                     return provider.stream_send(prompt.clone(), options.clone()).await;
                 }
             }

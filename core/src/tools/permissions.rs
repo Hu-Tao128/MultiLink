@@ -37,16 +37,7 @@ static DANGEROUS_COMMAND_TOKENS: &[&str] = &[
 ];
 
 static PROTECTED_DIRS: &[&str] = &[
-    "/etc/",
-    "/sys/",
-    "/proc/",
-    "/dev/",
-    "/boot/",
-    "/usr/",
-    "/bin/",
-    "/sbin/",
-    "/lib/",
-    "/var/",
+    "/etc/", "/sys/", "/proc/", "/dev/", "/boot/", "/usr/", "/bin/", "/sbin/", "/lib/", "/var/",
 ];
 
 pub struct PermissionCheck {
@@ -194,7 +185,8 @@ mod tests {
     #[test]
     fn test_block_credentials_json() {
         let root = PathBuf::from("/home/user/project");
-        let result = check_tool_allowed("write_file", &tool_input("config/credentials.json"), &root);
+        let result =
+            check_tool_allowed("write_file", &tool_input("config/credentials.json"), &root);
         assert!(!result.allowed);
     }
 

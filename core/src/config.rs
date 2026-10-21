@@ -888,8 +888,7 @@ impl AppConfig {
             .servers
             .iter()
             .filter(|s| {
-                s.enabled
-                    && matches!(s.provider, ProviderKind::Ollama | ProviderKind::OllamaCloud)
+                s.enabled && matches!(s.provider, ProviderKind::Ollama | ProviderKind::OllamaCloud)
             })
             .map(|s| ExecutionServerRuntime {
                 name: s.name.clone(),

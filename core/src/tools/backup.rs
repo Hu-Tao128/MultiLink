@@ -25,8 +25,7 @@ pub fn save_backup(project_root: &Path, relative_path: &str) -> Result<PathBuf, 
     let backup_name = format!("{}_{}.bak", safe_name, timestamp);
     let backup_path = backup_dir.join(&backup_name);
 
-    std::fs::write(&backup_path, &content)
-        .map_err(|e| format!("Failed to write backup: {}", e))?;
+    std::fs::write(&backup_path, &content).map_err(|e| format!("Failed to write backup: {}", e))?;
 
     Ok(backup_path)
 }

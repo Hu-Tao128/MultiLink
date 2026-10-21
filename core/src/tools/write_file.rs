@@ -179,9 +179,12 @@ mod tests {
                     path: Some("new_test.txt".to_string()),
                     pattern: None,
                     args: Some(
-                        vec![("content".to_string(), Value::String("hello world".to_string()))]
-                            .into_iter()
-                            .collect(),
+                        vec![(
+                            "content".to_string(),
+                            Value::String("hello world".to_string()),
+                        )]
+                        .into_iter()
+                        .collect(),
                     ),
                 },
                 root.path(),
@@ -193,10 +196,7 @@ mod tests {
             result.output.get("is_new").and_then(|v| v.as_bool()),
             Some(true)
         );
-        assert_eq!(
-            result.output.get("size").and_then(|v| v.as_u64()),
-            Some(11)
-        );
+        assert_eq!(result.output.get("size").and_then(|v| v.as_u64()), Some(11));
         let content = fs::read_to_string(root.path().join("new_test.txt")).unwrap();
         assert_eq!(content, "hello world");
     }
@@ -214,9 +214,12 @@ mod tests {
                     path: Some("overwrite_test.txt".to_string()),
                     pattern: None,
                     args: Some(
-                        vec![("content".to_string(), Value::String("new content".to_string()))]
-                            .into_iter()
-                            .collect(),
+                        vec![(
+                            "content".to_string(),
+                            Value::String("new content".to_string()),
+                        )]
+                        .into_iter()
+                        .collect(),
                     ),
                 },
                 root.path(),
@@ -321,10 +324,12 @@ mod tests {
                     args: Some(
                         vec![(
                             "content".to_string(),
-                            Value::String("fn old() {}\nfn new_func() {}\nfn also_old() {}\n".to_string()),
+                            Value::String(
+                                "fn old() {}\nfn new_func() {}\nfn also_old() {}\n".to_string(),
+                            ),
                         )]
-                            .into_iter()
-                            .collect(),
+                        .into_iter()
+                        .collect(),
                     ),
                 },
                 root.path(),

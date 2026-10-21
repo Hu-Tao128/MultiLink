@@ -376,7 +376,8 @@ impl LanAgentServer {
             return Ok(());
         }
 
-        let response = Self::process_request(request, &runtime, tool_executor, &shared_secret).await;
+        let response =
+            Self::process_request(request, &runtime, tool_executor, &shared_secret).await;
         Self::write_response(&mut stream, &response).await?;
 
         Ok(())
@@ -435,9 +436,7 @@ impl LanAgentServer {
                         input_schema,
                     })
                     .collect();
-                LanPayload::ToolListResponse {
-                    tools: descriptors,
-                }
+                LanPayload::ToolListResponse { tools: descriptors }
             }
             LanPayload::ToolExecute {
                 tool_name,
@@ -634,7 +633,10 @@ mod tests {
             result.is_err(),
             "stale timestamp should be rejected as potential replay"
         );
-        assert_eq!(result.unwrap_err(), "message expired: replay attack window exceeded");
+        assert_eq!(
+            result.unwrap_err(),
+            "message expired: replay attack window exceeded"
+        );
     }
 
     #[test]
@@ -652,6 +654,9 @@ mod tests {
             payload: LanPayload::Ping,
         };
 
-        assert!(fresh.validate().is_ok(), "fresh timestamp should be accepted");
+        assert!(
+            fresh.validate().is_ok(),
+            "fresh timestamp should be accepted"
+        );
     }
 }

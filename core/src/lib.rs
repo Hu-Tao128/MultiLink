@@ -32,7 +32,9 @@ pub use benchmark::{BenchmarkResult, BenchmarkRunner, ReleaseChecklist, ReleaseC
 pub use chat_runtime::{
     ChatResponse, ChatRuntime, ChatRuntimeError, HandleUserMessageRequest, StreamEvent,
 };
-pub use config::{AppConfig, McpConfig, McpServerConfig, ProviderKind, RemoteThreshold, TaskWeight};
+pub use config::{
+    AppConfig, McpConfig, McpServerConfig, ProviderKind, RemoteThreshold, TaskWeight,
+};
 pub use execution::{
     ExecutionDispatchRequest, ExecutionDispatchResult, ExecutionDispatcher, ServerStatus,
 };
