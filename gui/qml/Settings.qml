@@ -423,6 +423,156 @@ Page {
                     }
                 }
             }
+
+            // ─── MCP Servers ─────────────────────────────────────────────
+            Label {
+                text: "Servidores MCP"
+                font.bold: true
+                font.pixelSize: 18
+                Layout.topMargin: 12
+            }
+
+            Label {
+                text: "Configura servidores MCP (Model Context Protocol) para dar herramientas externas al modelo. Usa formato JSON compatible con OpenCode/Claude."
+                color: "#666"
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+
+            Button {
+                text: "Abrir editor MCP"
+                Layout.fillWidth: true
+                onClicked: mcpEditorDialog.open()
+            }
+        }
+    }
+
+    // ─── MCP Config Modal ──────────────────────────────────────────────────
+    Dialog {
+        id: mcpEditorDialog
+        anchors.centerIn: parent
+        modal: true
+        focus: true
+        standardButtons: Dialog.NoButton
+        width: Math.min(settingsPage.width * 0.9, 900)
+        height: Math.min(settingsPage.height * 0.85, 700)
+        padding: 16
+
+        property string editorText: ""
+        property string statusText: ""
+        property bool statusOk: false
+
+        function loadMcpConfig() {
+            const raw = controller ? controller.mcpConfigJson() : "[]"
+            editorText = ""
+            try {
+                const obj = JSON.parse(raw)
+                const pretty = JSON.stringify(obj, null, 2)
+                editorText = pretty
+            } catch (e) {
+                editorText = raw
+            }
+            statusText = ""
+            statusOk = false
+        }
+
+        function saveMcpConfig() {
+            if (!controller) return
+            try {
+                JSON.parse(editorText)
+            } catch (e) {
+                statusText = "JSON invalid: " + e.message
+                statusOk = false
+                return
+            }
+            const ok = controller.saveMcpConfigJson(editorText)
+            statusText = ok
+                ? "Configuracion MCP guardada."
+                : "No se pudo guardar la configuracion MCP."
+            statusOk = ok
+        }
+
+        onOpened: loadMcpConfig()
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 12
+
+            Label {
+                text: "Configuracion MCP (JSON)"
+                font.bold: true
+                font.pixelSize: 16
+                Layout.fillWidth: true
+            }
+
+            Label {
+                text: "Cada servidor en el arreglo \"servers\" usa: { \"name\": \"...\", \"command\": \"npx\", \"args\": [\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/path\"], \"env\": {}, \"enabled\": true }"
+                color: "#666"
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+                font.pixelSize: 11
+            }
+
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+
+                TextArea {
+                    id: mcpTextArea
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    text: mcpEditorDialog.editorText
+                    font.family: "monospace"
+                    font.pixelSize: 12
+                    wrapMode: Text.NoWrap
+                    selectByMouse: true
+                    onTextChanged: mcpEditorDialog.editorText = text
+                }
+            }
+
+            Label {
+                text: mcpEditorDialog.statusText
+                visible: mcpEditorDialog.statusText.length > 0
+                color: mcpEditorDialog.statusOk ? "#2E7D32" : "#B3261E"
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                Button {
+                    text: "Recargar"
+                    Layout.fillWidth: true
+                    onClicked: mcpEditorDialog.loadMcpConfig()
+                }
+                Button {
+                    text: "Formatear JSON"
+                    Layout.fillWidth: true
+                    onClicked: {
+                        try {
+                            const obj = JSON.parse(mcpEditorDialog.editorText)
+                            mcpEditorDialog.editorText = JSON.stringify(obj, null, 2)
+                            mcpEditorDialog.statusText = ""
+                        } catch (e) {
+                            mcpEditorDialog.statusText = "JSON invalido: " + e.message
+                            mcpEditorDialog.statusOk = false
+                        }
+                    }
+                }
+                Button {
+                    text: "Guardar"
+                    Layout.fillWidth: true
+                    highlighted: true
+                    onClicked: mcpEditorDialog.saveMcpConfig()
+                }
+                Button {
+                    text: "Cerrar"
+                    Layout.fillWidth: true
+                    onClicked: mcpEditorDialog.close()
+                }
+            }
         }
     }
 }

@@ -48,6 +48,8 @@ void chat_backend_clear_startup_notice(void *backend);
 bool chat_backend_set_missing_ollama_notice_suppressed(void *backend, bool suppressed);
 char *chat_backend_servers_config_json(void *backend);
 bool chat_backend_save_servers_config_json(void *backend, const char *servers_json);
+char *chat_backend_mcp_config_json(void *backend);
+bool chat_backend_save_mcp_config_json(void *backend, const char *mcp_json);
 char *chat_backend_test_server_connection(void *backend, const char *base_url);
 char *chat_backend_test_provider_key(void *backend, const char *provider, const char *token);
 int chat_backend_save_provider_token(void *backend, const char *provider, const char *token);
@@ -510,6 +512,26 @@ bool ChatController::hasProviderToken(const QString &provider) {
     }
     const QByteArray providerEncoded = provider.toUtf8();
     return chat_backend_has_provider_token(m_backend, providerEncoded.constData()) != 0;
+}
+
+QString ChatController::mcpConfigJson() {
+    if (!m_backend) {
+        return "[]";
+    }
+    return takeRustString(chat_backend_mcp_config_json(m_backend));
+}
+
+bool ChatController::saveMcpConfigJson(const QString &json) {
+    if (!m_backend) {
+        return false;
+    }
+    const QByteArray encoded = json.toUtf8();
+    const bool ok = chat_backend_save_mcp_config_json(m_backend, encoded.constData());
+    if (ok) {
+        refreshSnapshot();
+        requestModels();
+    }
+    return ok;
 }
 
 

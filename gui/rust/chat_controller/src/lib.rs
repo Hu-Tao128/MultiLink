@@ -2458,6 +2458,58 @@ fn backup_invalid_config(config_path: &PathBuf) -> Result<PathBuf, std::io::Erro
     Ok(backup)
 }
 
+// ─── MCP Config FFI ───────────────────────────────────────────────────────
+
+use multilink_core::config::McpServerConfig;
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_mcp_config_json(
+    handle: *mut BackendHandle,
+) -> *mut c_char {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return into_c_string("[]".to_string());
+    };
+
+    let payload = backend.runtime.block_on(async {
+        match AppConfig::load_or_create(&backend.config_path).await {
+            Ok(cfg) => serde_json::to_string(&cfg.mcp.servers).unwrap_or_else(|_| "[]".to_string()),
+            Err(_) => "[]".to_string(),
+        }
+    });
+
+    into_c_string(payload)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_save_mcp_config_json(
+    handle: *mut BackendHandle,
+    mcp_json: *const c_char,
+) -> bool {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return false;
+    };
+    let Some(payload) = c_char_ptr_to_string(mcp_json) else {
+        return false;
+    };
+    let parsed: Vec<McpServerConfig> = match serde_json::from_str(&payload) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    backend.runtime.block_on(async {
+        let mut cfg = match AppConfig::load_or_create(&backend.config_path).await {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        cfg.mcp.servers = parsed;
+        let content = match toml::to_string_pretty(&cfg) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        std::fs::write(&backend.config_path, content).is_ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

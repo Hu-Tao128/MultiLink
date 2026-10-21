@@ -57,6 +57,8 @@ public:
     Q_INVOKABLE bool saveProviderToken(const QString &provider, const QString &token);
     Q_INVOKABLE bool clearProviderToken(const QString &provider);
     Q_INVOKABLE bool hasProviderToken(const QString &provider);
+    Q_INVOKABLE QString mcpConfigJson();
+    Q_INVOKABLE bool saveMcpConfigJson(const QString &json);
 
     void refreshSnapshot();
     void refreshCollections();
