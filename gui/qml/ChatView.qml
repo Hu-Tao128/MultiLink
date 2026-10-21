@@ -12,6 +12,8 @@ Page {
     property string pendingDeleteSessionId: ""
     property bool tokenSidebarExpanded: true
     property bool modelSelectorInitializing: true
+    property bool modelSelectorUpdating: false
+    property string modelFilterText: ""
     property int currentPromptTokens: 0
     property int currentCompletionTokens: 0
     property int currentTotalTokens: 0
@@ -247,6 +249,43 @@ Page {
         chatList.positionViewAtEnd()
     }
 
+    function rebuildModelChoices() {
+        if (!controller || !providerModelBox || !filteredModelsModel) {
+            return
+        }
+        const rows = controller.availableModelsDetailed || []
+        const needle = String(modelFilterText || "").trim().toLowerCase()
+        modelSelectorUpdating = true
+        filteredModelsModel.clear()
+        let activeIndex = -1
+        for (let i = 0; i < rows.length; i += 1) {
+            const row = rows[i]
+            if (!row) {
+                continue
+            }
+            const name = String(row.name || "")
+            const label = String(row.label || name)
+            const provider = String(row.provider || "")
+            if (needle.length > 0) {
+                const haystack = (provider + " " + name + " " + label).toLowerCase()
+                if (haystack.indexOf(needle) < 0) {
+                    continue
+                }
+            }
+            filteredModelsModel.append({
+                name: name,
+                label: label,
+                provider: provider,
+                serverUrl: String(row.serverUrl || "")
+            })
+            if (name === controller.activeModel) {
+                activeIndex = filteredModelsModel.count - 1
+            }
+        }
+        providerModelBox.currentIndex = activeIndex
+        modelSelectorUpdating = false
+    }
+
     function currentAssistantDraftIndex() {
         const lastIndex = messageModel.count - 1
         if (lastIndex < 0) {
@@ -309,6 +348,7 @@ Page {
 
     Component.onCompleted: {
         hydrateCurrentSession()
+        rebuildModelChoices()
         if (controller && controller.startupNotice.length > 0) {
             const notice = controller.startupNotice.toLowerCase()
             const isOllamaMissingNotice = notice.indexOf("ollama") >= 0
@@ -410,6 +450,8 @@ Page {
             }
         }
     }
+
+    ListModel { id: filteredModelsModel }
 
     Rectangle {
         anchors.fill: parent
@@ -773,25 +815,45 @@ Page {
 
         RowLayout {
             Layout.fillWidth: true
+            visible: controller && controller.availableModelsDetailed.length > 20
+            spacing: 6
+            TextField {
+                Layout.fillWidth: true
+                placeholderText: "Filtrar modelos (ej. claude, deepseek, gemini, free)..."
+                text: chatPage.modelFilterText
+                onTextChanged: {
+                    chatPage.modelFilterText = text
+                    chatPage.rebuildModelChoices()
+                }
+            }
+            Label {
+                text: filteredModelsModel.count + " de "
+                      + (controller ? controller.availableModelsDetailed.length : 0)
+                color: colorTextSecondary
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
             ComboBox {
                 id: providerModelBox
-                model: controller ? controller.availableModelsDetailed : []
+                model: filteredModelsModel
                 textRole: "label"
                 Layout.fillWidth: true
                 Layout.maximumWidth: 380
                 Layout.minimumWidth: 120
                 delegate: ItemDelegate {
                     width: providerModelBox.width
-                    text: modelData.provider + " - " + modelData.label
+                    text: model.provider + " - " + model.label
                 }
                 onCurrentIndexChanged: {
-                    if (modelSelectorInitializing) {
+                    if (modelSelectorInitializing || modelSelectorUpdating) {
                         return
                     }
-                    if (currentIndex < 0 || currentIndex >= controller.availableModelsDetailed.length) {
+                    if (currentIndex < 0 || currentIndex >= filteredModelsModel.count) {
                         return
                     }
-                    const selected = controller.availableModelsDetailed[currentIndex]
+                    const selected = filteredModelsModel.get(currentIndex)
                     controller.selectModel(selected.name, selected.serverUrl || "")
                 }
             }
@@ -927,13 +989,13 @@ Page {
             hydrateCurrentSession()
         }
         function onModelsChanged() {
-            for (let i = 0; i < controller.availableModelsDetailed.length; i += 1) {
-                if (controller.availableModelsDetailed[i].name === controller.activeModel) {
-                    providerModelBox.currentIndex = i
-                    break
-                }
-            }
+            rebuildModelChoices()
             modelSelectorInitializing = false
+        }
+        function onActiveModelChanged() {
+            if (!modelSelectorInitializing) {
+                rebuildModelChoices()
+            }
         }
         function onTokenUsageUpdated(sessionId, promptTokens, completionTokens, totalTokens, isEstimated) {
             if (sessionId !== currentViewSessionId()) {

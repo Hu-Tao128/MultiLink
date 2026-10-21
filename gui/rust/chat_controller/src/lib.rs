@@ -121,6 +121,7 @@ pub extern "C" fn chat_backend_create(
                 default_model: "qwen2.5-coder:3b".to_string(),
                 priority: 1,
                 enabled: true,
+                selected_models: Vec::new(),
             });
     selected_server.base_url = normalize_base_url(&selected_server.base_url);
 
@@ -202,12 +203,9 @@ pub extern "C" fn chat_backend_create(
         .map(|server| server.default_model.clone())
         .filter(|model| !model.trim().is_empty())
         .unwrap_or_else(|| "anthropic/claude-sonnet-latest".to_string());
-    if let Ok(openrouter) = OpenRouterProvider::new(
-        openrouter_base_url,
-        openrouter_api_key,
-        openrouter_model,
-        0,
-    ) {
+    if let Ok(openrouter) =
+        OpenRouterProvider::new(openrouter_base_url, openrouter_api_key, openrouter_model, 0)
+    {
         router.register(Arc::new(openrouter));
     }
 
@@ -862,8 +860,19 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
         .ok()
         .filter(|key| !key.trim().is_empty())
         .or_else(|| load_provider_token(&backend.runtime, "deepseek"));
+    let provider_hint = provider_hint_for_url(&url);
+    let api_key = match provider_hint {
+        Some(provider) => backend.runtime.block_on(provider_api_key(provider)),
+        None => deepseek_api_key,
+    };
 
     let result = backend.runtime.block_on(async move {
+        // Hosted providers have dedicated endpoints and token stores, so probe
+        // them directly instead of guessing between Ollama and OpenAI shapes.
+        if let Some(provider) = provider_hint {
+            return probe_provider_models(provider, &url, api_key.as_deref()).await;
+        }
+
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(10))
@@ -883,7 +892,7 @@ pub unsafe extern "C" fn chat_backend_test_server_connection(
             return ollama;
         }
 
-        let openai = probe_openai_models(&client, &url, deepseek_api_key.as_deref()).await;
+        let openai = probe_openai_models(&client, &url, api_key.as_deref()).await;
         if openai.ok {
             return openai;
         }
@@ -913,7 +922,8 @@ pub unsafe extern "C" fn chat_backend_test_provider_key(
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return into_c_string(provider_error_json("backend unavailable"));
     };
-    let Some(provider) = c_char_ptr_to_string(provider_cstr).map(|value| value.trim().to_ascii_lowercase())
+    let Some(provider) =
+        c_char_ptr_to_string(provider_cstr).map(|value| value.trim().to_ascii_lowercase())
     else {
         return into_c_string(provider_error_json("proveedor invalido"));
     };
@@ -961,7 +971,8 @@ pub unsafe extern "C" fn chat_backend_test_provider_key(
         let provider_for_task = provider.clone();
         backend.runtime.block_on(async {
             if let Ok(mut cfg) = AppConfig::load_or_create(&config_path).await {
-                if ensure_provider_server(&mut cfg, &provider_for_task, preferred_model.as_deref()) {
+                if ensure_provider_server(&mut cfg, &provider_for_task, preferred_model.as_deref())
+                {
                     if let Ok(body) = toml::to_string_pretty(&cfg) {
                         let _ = std::fs::write(&config_path, body);
                     }
@@ -984,6 +995,67 @@ fn provider_error_json(message: &str) -> String {
         "hint": ""
     })
     .to_string()
+}
+
+/// Lists every model exposed by one configured server. Used by the Settings
+/// model picker to let users narrow large catalogs (for example OpenRouter)
+/// without hiding the full catalog in the chat selector.
+///
+/// Returns the same payload shape as `chat_backend_test_provider_key`:
+/// `{ "ok": bool, "models": [...], "model_count": n, "error": "...", "hint": "..." }`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_list_server_models(
+    handle: *mut BackendHandle,
+    provider_cstr: *const c_char,
+    base_url_cstr: *const c_char,
+) -> *mut c_char {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return into_c_string(provider_error_json("backend unavailable"));
+    };
+    let Some(provider) =
+        c_char_ptr_to_string(provider_cstr).map(|value| value.trim().to_ascii_lowercase())
+    else {
+        return into_c_string(provider_error_json("proveedor invalido"));
+    };
+    let supported = matches!(
+        provider.as_str(),
+        "ollama" | "ollama_cloud" | "deepseek" | "gemini" | "codex" | "openai" | "openrouter"
+    );
+    if !supported {
+        return into_c_string(provider_error_json("proveedor no soportado"));
+    }
+
+    let base_url = c_char_ptr_to_string(base_url_cstr)
+        .map(|raw| normalize_base_url(&raw))
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| {
+            resolve_provider_base_url(&backend.config_path, &backend.runtime, &provider)
+        });
+
+    let token = match provider.as_str() {
+        "ollama" | "ollama_cloud" => None,
+        other => backend.runtime.block_on(provider_api_key(other)),
+    };
+
+    let mut result = backend
+        .runtime
+        .block_on(async { probe_provider_models(&provider, &base_url, token.as_deref()).await });
+    result
+        .models
+        .retain(|model| !is_embedding_like_model(model));
+    result.models.sort_unstable();
+    result.models.dedup();
+    result.model_count = result.models.len();
+    if result.ok && result.models.is_empty() {
+        result.ok = false;
+        result.error = "el proveedor no devolvio modelos".to_string();
+        result.hint = "Verifica la URL base y la API key del proveedor.".to_string();
+    }
+
+    into_c_string(
+        serde_json::to_string(&result)
+            .unwrap_or_else(|_| provider_error_json("serialization failed")),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -1530,26 +1602,62 @@ async fn build_sessions_json(chat_runtime: &ChatRuntime) -> String {
 async fn build_models_json(config_path: &PathBuf, fallback_base_url: &str) -> String {
     let mut servers = load_enabled_chat_servers(config_path);
     if servers.is_empty() {
-        servers.push((
-            "Primary".to_string(),
-            normalize_base_url(fallback_base_url),
-            ProviderKind::Ollama,
-            String::new(),
-        ));
+        servers.push(ChatServerEntry {
+            name: "Primary".to_string(),
+            base_url: normalize_base_url(fallback_base_url),
+            kind: ProviderKind::Ollama,
+            default_model: String::new(),
+            selected_models: Vec::new(),
+        });
     }
 
     let mut rows = Vec::new();
-    for (server_name, base_url, kind, default_model) in servers {
-        match kind {
-            ProviderKind::DeepSeek | ProviderKind::Codex => {
-                let key = provider_api_key(provider_key_of(kind)).await;
+    for server in servers {
+        match server.kind {
+            ProviderKind::DeepSeek => {
+                let key = provider_api_key(provider_key_of(server.kind)).await;
                 rows.extend(
                     fetch_openai_models_for_server(
-                        &server_name,
-                        &base_url,
-                        &default_model,
+                        &server.name,
+                        &server.base_url,
+                        &server.default_model,
                         key.as_deref(),
-                        kind == ProviderKind::DeepSeek,
+                        "deepseek",
+                        true,
+                        &server.selected_models,
+                    )
+                    .await,
+                );
+            }
+            ProviderKind::Codex => {
+                let key = provider_api_key(provider_key_of(server.kind)).await;
+                rows.extend(
+                    fetch_openai_models_for_server(
+                        &server.name,
+                        &server.base_url,
+                        &server.default_model,
+                        key.as_deref(),
+                        "openai",
+                        false,
+                        &server.selected_models,
+                    )
+                    .await,
+                );
+            }
+            ProviderKind::OpenRouter => {
+                // OpenRouter exposes a large OpenAI-compatible catalog. An
+                // empty `selected_models` means "show all"; otherwise only the
+                // user-picked subset is exposed to the model selector.
+                let key = provider_api_key("openrouter").await;
+                rows.extend(
+                    fetch_openai_models_for_server(
+                        &server.name,
+                        &server.base_url,
+                        &server.default_model,
+                        key.as_deref(),
+                        "openrouter",
+                        false,
+                        &server.selected_models,
                     )
                     .await,
                 );
@@ -1558,16 +1666,24 @@ async fn build_models_json(config_path: &PathBuf, fallback_base_url: &str) -> St
                 let key = provider_api_key("gemini").await;
                 rows.extend(
                     fetch_gemini_models_for_server(
-                        &server_name,
-                        &base_url,
-                        &default_model,
+                        &server.name,
+                        &server.base_url,
+                        &server.default_model,
                         key.as_deref(),
+                        &server.selected_models,
                     )
                     .await,
                 );
             }
             _ => {
-                rows.extend(fetch_models_for_server(&server_name, &base_url).await);
+                rows.extend(
+                    fetch_models_for_server(
+                        &server.name,
+                        &server.base_url,
+                        &server.selected_models,
+                    )
+                    .await,
+                );
             }
         }
     }
@@ -1575,7 +1691,15 @@ async fn build_models_json(config_path: &PathBuf, fallback_base_url: &str) -> St
     serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn load_enabled_chat_servers(config_path: &PathBuf) -> Vec<(String, String, ProviderKind, String)> {
+struct ChatServerEntry {
+    name: String,
+    base_url: String,
+    kind: ProviderKind,
+    default_model: String,
+    selected_models: Vec<String>,
+}
+
+fn load_enabled_chat_servers(config_path: &PathBuf) -> Vec<ChatServerEntry> {
     let mut out = Vec::new();
     if let Ok(raw) = std::fs::read_to_string(config_path) {
         if let Ok(cfg) = toml::from_str::<AppConfig>(&raw) {
@@ -1591,17 +1715,19 @@ fn load_enabled_chat_servers(config_path: &PathBuf) -> Vec<(String, String, Prov
                                 | ProviderKind::DeepSeek
                                 | ProviderKind::Gemini
                                 | ProviderKind::Codex
+                                | ProviderKind::OpenRouter
                         )
                 })
                 .collect::<Vec<_>>();
             servers.sort_by_key(|s| s.priority);
             for server in servers {
-                out.push((
-                    server.name,
-                    normalize_base_url(&server.base_url),
-                    server.provider,
-                    server.default_model,
-                ));
+                out.push(ChatServerEntry {
+                    name: server.name,
+                    base_url: normalize_base_url(&server.base_url),
+                    kind: server.provider,
+                    default_model: server.default_model,
+                    selected_models: server.selected_models,
+                });
             }
         }
     }
@@ -1670,10 +1796,7 @@ fn is_local_ollama_url(url: &str) -> bool {
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_string()))
         .map(|h| {
-            h.eq_ignore_ascii_case("localhost")
-                || h == "127.0.0.1"
-                || h == "::1"
-                || h == "[::1]"
+            h.eq_ignore_ascii_case("localhost") || h == "127.0.0.1" || h == "::1" || h == "[::1]"
         })
         .unwrap_or(false)
 }
@@ -1702,6 +1825,7 @@ async fn provider_api_key(provider: &str) -> Option<String> {
         "deepseek" => &["DEEPSEEK_API_KEY"],
         "gemini" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         "codex" | "openai" => &["OPENAI_API_KEY"],
+        "openrouter" => &["OPENROUTER_API_KEY"],
         _ => &[],
     };
     for name in env_names {
@@ -1752,12 +1876,15 @@ struct GeminiModelInfo {
 
 /// Lists models from an OpenAI-compatible `/models` endpoint. Falls back to
 /// known model ids when the endpoint cannot be queried (offline / bad key).
+#[allow(clippy::too_many_arguments)]
 async fn fetch_openai_models_for_server(
     server_name: &str,
     base_url: &str,
     fallback_model: &str,
     token: Option<&str>,
-    deepseek: bool,
+    provider_label: &str,
+    deepseek_fallback: bool,
+    selected_models: &[String],
 ) -> Vec<serde_json::Value> {
     let base_url = normalize_base_url(base_url);
     let client = reqwest::Client::new();
@@ -1779,7 +1906,7 @@ async fn fetch_openai_models_for_server(
         _ => Vec::new(),
     };
 
-    if deepseek && ids.is_empty() {
+    if deepseek_fallback && ids.is_empty() {
         ids.push(multilink_core::providers::deepseek::DEEPSEEK_CHAT_MODEL.to_string());
         ids.push(multilink_core::providers::deepseek::DEEPSEEK_REASONER_MODEL.to_string());
     }
@@ -1788,9 +1915,13 @@ async fn fetch_openai_models_for_server(
     }
     dedupe_preserving_order(&mut ids);
 
-    let provider_label = if deepseek { "deepseek" } else { "openai" };
     ids.into_iter()
         .filter(|id| !is_embedding_like_model(id))
+        .filter(|id| {
+            model_is_selected(id, selected_models)
+                || (!fallback_model.trim().is_empty()
+                    && id.eq_ignore_ascii_case(fallback_model.trim()))
+        })
         .map(|id| {
             json!({
                 "provider": format!("{}@{}", provider_label, server_name),
@@ -1804,12 +1935,22 @@ async fn fetch_openai_models_for_server(
         .collect()
 }
 
+/// An empty allow-list means "show every model". Otherwise compare
+/// case-insensitively so config edits are forgiving.
+fn model_is_selected(model_id: &str, selected_models: &[String]) -> bool {
+    selected_models.is_empty()
+        || selected_models
+            .iter()
+            .any(|candidate| candidate.trim().eq_ignore_ascii_case(model_id))
+}
+
 /// Lists models from the Gemini `models.list` endpoint.
 async fn fetch_gemini_models_for_server(
     server_name: &str,
     base_url: &str,
     fallback_model: &str,
     token: Option<&str>,
+    selected_models: &[String],
 ) -> Vec<serde_json::Value> {
     let base_url = normalize_base_url(base_url);
     let client = reqwest::Client::new();
@@ -1849,6 +1990,11 @@ async fn fetch_gemini_models_for_server(
 
     ids.into_iter()
         .filter(|id| !is_embedding_like_model(id))
+        .filter(|id| {
+            model_is_selected(id, selected_models)
+                || (!fallback_model.trim().is_empty()
+                    && id.eq_ignore_ascii_case(fallback_model.trim()))
+        })
         .map(|id| {
             json!({
                 "provider": format!("gemini@{}", server_name),
@@ -1862,7 +2008,11 @@ async fn fetch_gemini_models_for_server(
         .collect()
 }
 
-async fn fetch_models_for_server(server_name: &str, base_url: &str) -> Vec<serde_json::Value> {
+async fn fetch_models_for_server(
+    server_name: &str,
+    base_url: &str,
+    selected_models: &[String],
+) -> Vec<serde_json::Value> {
     let base_url = normalize_base_url(base_url);
     let client = reqwest::Client::new();
     let response = match client
@@ -1886,6 +2036,7 @@ async fn fetch_models_for_server(server_name: &str, base_url: &str) -> Vec<serde
     tags.models
         .into_iter()
         .filter(|m| !is_embedding_like_model(&m.name))
+        .filter(|m| model_is_selected(&m.name, selected_models))
         .map(|m| {
             let size_bytes = m.size.unwrap_or(0);
             let size_label = if size_bytes > 0 {
@@ -2019,6 +2170,7 @@ fn ensure_provider_server(
         default_model: chosen_model.to_string(),
         priority: next_priority,
         enabled: true,
+        selected_models: Vec::new(),
     });
     true
 }
@@ -2035,7 +2187,11 @@ fn kind_to_provider_kind(id: ProviderId) -> ProviderKind {
 
 /// Resolves the base URL to probe for a provider: the configured server if any,
 /// otherwise the provider default.
-fn resolve_provider_base_url(config_path: &std::path::Path, runtime: &Runtime, provider: &str) -> String {
+fn resolve_provider_base_url(
+    config_path: &std::path::Path,
+    runtime: &Runtime,
+    provider: &str,
+) -> String {
     let kind = provider_id_from_str(provider);
     if let Ok(cfg) = runtime.block_on(AppConfig::load_or_create(config_path)) {
         if let Some(server) = cfg
@@ -2052,6 +2208,26 @@ fn resolve_provider_base_url(config_path: &std::path::Path, runtime: &Runtime, p
     provider_server_defaults(provider)
         .map(|(_, base_url, _)| base_url.to_string())
         .unwrap_or_else(|| "http://127.0.0.1:11434".to_string())
+}
+
+/// Maps a base URL to the provider whose token store should be used when
+/// probing it. Returns `None` for unknown/self-hosted endpoints.
+fn provider_hint_for_url(url: &str) -> Option<&'static str> {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(|host| host.to_ascii_lowercase()))
+        .unwrap_or_default();
+    if host.ends_with("openrouter.ai") {
+        Some("openrouter")
+    } else if host.ends_with("deepseek.com") {
+        Some("deepseek")
+    } else if host.ends_with("googleapis.com") {
+        Some("gemini")
+    } else if host.ends_with("openai.com") {
+        Some("codex")
+    } else {
+        None
+    }
 }
 
 fn primary_token_store_root() -> std::path::PathBuf {
@@ -2086,6 +2262,8 @@ async fn probe_provider_models(
 
     if provider == "gemini" {
         probe_gemini_models(&client, base_url, token).await
+    } else if provider == "ollama" || provider == "ollama_cloud" {
+        probe_ollama_tags_detailed(&client, base_url).await
     } else {
         probe_openai_models(&client, base_url, token).await
     }
@@ -2504,9 +2682,7 @@ fn backup_invalid_config(config_path: &PathBuf) -> Result<PathBuf, std::io::Erro
 use multilink_core::config::McpServerConfig;
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chat_backend_mcp_config_json(
-    handle: *mut BackendHandle,
-) -> *mut c_char {
+pub unsafe extern "C" fn chat_backend_mcp_config_json(handle: *mut BackendHandle) -> *mut c_char {
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return into_c_string("[]".to_string());
     };
@@ -2560,6 +2736,56 @@ mod tests {
     fn c_char_ptr_to_string_returns_none_for_null_ptr() {
         let ptr: *const c_char = std::ptr::null();
         assert!(c_char_ptr_to_string(ptr).is_none());
+    }
+
+    #[test]
+    fn model_selection_empty_means_show_all() {
+        assert!(model_is_selected("openai/gpt-4o-mini", &[]));
+    }
+
+    #[test]
+    fn model_selection_matches_case_insensitively_and_ignores_padding() {
+        let selected = vec![
+            "OpenAI/GPT-4o-mini".to_string(),
+            "  anthropic/claude-sonnet-latest  ".to_string(),
+        ];
+        assert!(model_is_selected("openai/gpt-4o-mini", &selected));
+        assert!(model_is_selected(
+            "anthropic/claude-sonnet-latest",
+            &selected
+        ));
+        assert!(!model_is_selected("google/gemini-2.0-flash-001", &selected));
+    }
+
+    #[test]
+    fn load_enabled_chat_servers_includes_openrouter_with_selection() {
+        let config_path = std::env::temp_dir().join(format!(
+            "multilink-openrouter-test-{}.toml",
+            std::process::id()
+        ));
+        let contents = r#"
+version = 2
+
+[[servers]]
+name = "OpenRouter"
+provider = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+default_model = "anthropic/claude-sonnet-latest"
+priority = 1
+enabled = true
+selected_models = ["openai/gpt-4o-mini", "anthropic/claude-sonnet-latest"]
+
+[storage]
+models_dir = "/tmp/multilink-models"
+"#;
+        std::fs::write(&config_path, contents).expect("write temp config");
+
+        let servers = load_enabled_chat_servers(&config_path);
+        let _ = std::fs::remove_file(&config_path);
+
+        assert_eq!(servers.len(), 1);
+        assert!(matches!(servers[0].kind, ProviderKind::OpenRouter));
+        assert_eq!(servers[0].selected_models.len(), 2);
     }
 
     #[test]

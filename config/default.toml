@@ -23,6 +23,23 @@ enabled = true
 # priority = 2
 # enabled = true
 
+# OpenRouter (catalogo OpenAI-compatible con cientos de modelos). Guarda la
+# clave desde Configuracion > Claves de API para registrar el servidor solo.
+# selected_models limita que modelos aparecen en el selector; vacio = todos.
+#
+# [[servers]]
+# name = "OpenRouter"
+# provider = "openrouter"
+# base_url = "https://openrouter.ai/api/v1"
+# default_model = "anthropic/claude-sonnet-latest"
+# priority = 3
+# enabled = true
+# selected_models = [
+#   "anthropic/claude-sonnet-latest",
+#   "openai/gpt-4o-mini",
+#   "google/gemini-2.0-flash-001",
+# ]
+
 [context]
 embeddings_enabled = true
 embed_model = "embeddinggemma"

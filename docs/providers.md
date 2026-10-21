@@ -50,6 +50,56 @@ enabled = true
 `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` and `DEEPSEEK_MODEL` are read directly
 by `DeepSeekProvider::from_env()`.
 
+## OpenRouter
+
+OpenRouter exposes an OpenAI-compatible Chat Completions API with access to many
+downstream models (Anthropic, OpenAI, Google, Meta, ...):
+
+- Base URL: `https://openrouter.ai/api/v1`
+- Auth: `Authorization: Bearer <OPENROUTER_API_KEY>` (also storable from the GUI)
+- Endpoint: `POST /chat/completions`
+- Model catalog: `GET /models` (hundreds of ids, including `:free` variants)
+
+Add a server or save the key from **Configuración → Claves de API → OpenRouter**.
+Saving the key validates it, stores it, and registers an `openrouter` server
+automatically. `OPENROUTER_API_KEY` is also read at startup for headless/CI use:
+
+```toml
+[[servers]]
+name = "OpenRouter"
+provider = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+default_model = "anthropic/claude-sonnet-latest"
+priority = 2
+enabled = true
+```
+
+### Selecting a subset of models
+
+Because the catalog is large, each server supports an optional allow-list. An
+empty list means **show every model**:
+
+```toml
+[[servers]]
+name = "OpenRouter"
+provider = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+default_model = "anthropic/claude-sonnet-latest"
+priority = 2
+enabled = true
+selected_models = [
+  "anthropic/claude-sonnet-latest",
+  "openai/gpt-4o-mini",
+  "google/gemini-2.0-flash-001",
+  "deepseek/deepseek-chat",
+]
+```
+
+From the GUI, open **Configuración → Servidores → Modelos** on any server:
+the picker lists every detected model, lets you search/filter, and saves the
+selection into `selected_models`. The chat selector also has a filter box so a
+large catalog stays usable. Removing all selections restores "show all".
+
 ## Tooling strategy by model size
 
 The orchestrator adapts its tool loop to the selected model:

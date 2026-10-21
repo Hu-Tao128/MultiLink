@@ -35,9 +35,19 @@ Page {
                 default_model: row.default_model || "auto",
                 priority: Number(row.priority || (i + 1)),
                 enabled: row.enabled === undefined ? true : !!row.enabled,
+                selected_models: JSON.stringify(Array.isArray(row.selected_models) ? row.selected_models : []),
                 test_result: "",
                 testing: false
             })
+        }
+    }
+
+    function parseSelectedModels(raw) {
+        try {
+            const parsed = JSON.parse(raw || "[]")
+            return Array.isArray(parsed) ? parsed : []
+        } catch (e) {
+            return []
         }
     }
 
@@ -51,7 +61,8 @@ Page {
                 base_url: item.base_url,
                 default_model: item.default_model,
                 priority: Math.max(1, Number(item.priority || (i + 1))),
-                enabled: !!item.enabled
+                enabled: !!item.enabled,
+                selected_models: parseSelectedModels(item.selected_models)
             })
         }
         return JSON.stringify(arr)
@@ -64,6 +75,31 @@ Page {
         statusText = ok
             ? "Configuracion guardada. Reinicia la app para aplicar cambios de servidor activos."
             : "No se pudo guardar la configuracion"
+    }
+
+    function openModelPicker(index) {
+        if (!controller || index < 0 || index >= serversModel.count) {
+            return
+        }
+        const item = serversModel.get(index)
+        modelPickerDialog.serverIndex = index
+        modelPickerDialog.serverName = item.name
+        modelPickerDialog.provider = item.provider
+        modelPickerDialog.baseUrl = item.base_url
+        modelPickerDialog.previousSelection = parseSelectedModels(item.selected_models)
+        const preselected = ({})
+        for (let i = 0; i < modelPickerDialog.previousSelection.length; i += 1) {
+            preselected[modelPickerDialog.previousSelection[i]] = true
+        }
+        modelPickerDialog.searchText = ""
+        modelPickerDialog.statusText = ""
+        modelPickerDialog.statusOk = true
+        modelPickerDialog.loaded = false
+        modelPickerDialog.allModels = []
+        modelPickerDialog.selectedSet = preselected
+        pickerModel.clear()
+        modelPickerDialog.open()
+        modelPickerDialog.startLoad()
     }
 
     function defaultBaseUrlFor(provider) {
@@ -128,7 +164,8 @@ Page {
             providerKeysModel.setProperty(index, "hasToken", true)
             providerKeysModel.setProperty(index, "inputText", "")
             providerKeysModel.setProperty(index, "statusText",
-                "Clave valida. Modelos detectados: " + parsed.model_count)
+                "Clave valida. Modelos detectados: " + parsed.model_count
+                + ". Pulsa \"Recargar\" en Servidores y luego \"Modelos\" para elegir cuales ver en el chat.")
         } else {
             providerKeysModel.setProperty(index, "statusText",
                 "Error: " + parsed.error
@@ -156,6 +193,13 @@ Page {
 
     ListModel { id: serversModel }
     ListModel { id: providerKeysModel }
+    ListModel { id: pickerModel }
+    Timer {
+        id: pickerLoadTimer
+        interval: 60
+        repeat: false
+        onTriggered: modelPickerDialog.loadModels()
+    }
 
     ScrollView {
         id: settingsScroll
@@ -203,6 +247,13 @@ Page {
                                 text: "Activo"
                                 checked: model.enabled
                                 onToggled: serversModel.setProperty(index, "enabled", checked)
+                            }
+                            Button {
+                                text: {
+                                    const count = settingsPage.parseSelectedModels(model.selected_models).length
+                                    return count > 0 ? ("Modelos (" + count + ")") : "Modelos"
+                                }
+                                onClicked: settingsPage.openModelPicker(index)
                             }
                             Button {
                                 text: "Eliminar"
@@ -289,6 +340,14 @@ Page {
                                     serversModel.setProperty(index, "testing", false)
                                 }
                             }
+                        }
+
+                        Label {
+                            text: "Usa \"Modelos\" para elegir que modelos de este servidor aparecen en el chat. Sin seleccion se muestran todos."
+                            color: "#666"
+                            font.pixelSize: 11
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
                         }
 
                         Label {
@@ -515,6 +574,14 @@ Page {
                 font.pixelSize: 11
             }
 
+            Label {
+                text: "Guia completa con ejemplos y seguridad: docs/MCP.md"
+                color: "#1565C0"
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+                font.pixelSize: 11
+            }
+
             ScrollView {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -573,6 +640,234 @@ Page {
                     text: "Cerrar"
                     Layout.fillWidth: true
                     onClicked: mcpEditorDialog.close()
+                }
+            }
+        }
+    }
+
+    // ─── Model selection modal ─────────────────────────────────────────────
+    Dialog {
+        id: modelPickerDialog
+        anchors.centerIn: parent
+        modal: true
+        focus: true
+        standardButtons: Dialog.NoButton
+        width: Math.min(settingsPage.width * 0.92, 720)
+        height: Math.min(settingsPage.height * 0.85, 640)
+        padding: 16
+
+        property int serverIndex: -1
+        property string serverName: ""
+        property string provider: ""
+        property string baseUrl: ""
+        property string searchText: ""
+        property string statusText: ""
+        property bool statusOk: true
+        property bool loaded: false
+        property var allModels: []
+        property var selectedSet: ({})
+        property var previousSelection: []
+
+        onClosed: pickerLoadTimer.stop()
+
+        function startLoad() {
+            loaded = false
+            statusOk = true
+            statusText = "Cargando modelos del servidor..."
+            pickerModel.clear()
+            pickerLoadTimer.restart()
+        }
+
+        function loadModels() {
+            const raw = controller
+                ? controller.listServerModels(provider, baseUrl)
+                : "{\"ok\":false,\"models\":[],\"error\":\"controller no disponible\",\"hint\":\"\"}"
+            let parsed = { ok: false, models: [], error: "respuesta invalida", hint: "" }
+            try {
+                parsed = JSON.parse(raw)
+            } catch (e) {
+            }
+            if (!parsed.ok) {
+                loaded = false
+                statusOk = false
+                statusText = "Error: " + (parsed.error || "respuesta invalida")
+                    + (parsed.hint && parsed.hint.length > 0 ? "\n" + parsed.hint : "")
+                return
+            }
+            allModels = Array.isArray(parsed.models) ? parsed.models : []
+            loaded = true
+            rebuildRows()
+            statusOk = true
+            statusText = allModels.length + " modelos detectados. Marca los que quieras ver en el chat."
+        }
+
+        function rebuildRows() {
+            pickerModel.clear()
+            const needle = String(searchText || "").trim().toLowerCase()
+            for (let i = 0; i < allModels.length; i += 1) {
+                const modelId = String(allModels[i] || "")
+                if (modelId.length === 0) {
+                    continue
+                }
+                if (needle.length > 0 && modelId.toLowerCase().indexOf(needle) < 0) {
+                    continue
+                }
+                pickerModel.append({
+                    modelId: modelId,
+                    checked: selectedSet[modelId] === true
+                })
+            }
+        }
+
+        function setChecked(modelId, checked) {
+            const next = ({})
+            for (const key in selectedSet) {
+                if (selectedSet[key] === true) {
+                    next[key] = true
+                }
+            }
+            if (checked) {
+                next[modelId] = true
+            } else {
+                delete next[modelId]
+            }
+            selectedSet = next
+            for (let i = 0; i < pickerModel.count; i += 1) {
+                if (pickerModel.get(i).modelId === modelId) {
+                    pickerModel.setProperty(i, "checked", checked)
+                    break
+                }
+            }
+        }
+
+        function setVisibleChecked(checked) {
+            const next = ({})
+            for (const key in selectedSet) {
+                if (selectedSet[key] === true) {
+                    next[key] = true
+                }
+            }
+            for (let i = 0; i < pickerModel.count; i += 1) {
+                const modelId = pickerModel.get(i).modelId
+                if (checked) {
+                    next[modelId] = true
+                } else {
+                    delete next[modelId]
+                }
+            }
+            selectedSet = next
+            rebuildRows()
+        }
+
+        function saveSelection() {
+            const ids = []
+            for (const key in selectedSet) {
+                if (selectedSet[key] === true) {
+                    ids.push(key)
+                }
+            }
+            ids.sort()
+            serversModel.setProperty(serverIndex, "selected_models", JSON.stringify(ids))
+            settingsPage.saveServers()
+            statusOk = true
+            statusText = ids.length === 0
+                ? "Guardado: se mostraran todos los modelos del servidor."
+                : ("Guardado: " + ids.length + " modelos seleccionados.")
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 10
+
+            Label {
+                text: "Modelos de " + modelPickerDialog.serverName
+                font.bold: true
+                font.pixelSize: 16
+                Layout.fillWidth: true
+                elide: Label.ElideRight
+            }
+
+            Label {
+                text: modelPickerDialog.provider + " - " + modelPickerDialog.baseUrl
+                color: "#666"
+                font.pixelSize: 11
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+
+            TextField {
+                Layout.fillWidth: true
+                placeholderText: "Buscar modelo (ej. claude, gpt, free)..."
+                text: modelPickerDialog.searchText
+                onTextChanged: {
+                    modelPickerDialog.searchText = text
+                    modelPickerDialog.rebuildRows()
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                Label {
+                    Layout.fillWidth: true
+                    text: pickerModel.count + " visibles de " + modelPickerDialog.allModels.length
+                    color: "#666"
+                    font.pixelSize: 11
+                }
+                Button {
+                    text: "Seleccionar visibles"
+                    enabled: modelPickerDialog.loaded && pickerModel.count > 0
+                    onClicked: modelPickerDialog.setVisibleChecked(true)
+                }
+                Button {
+                    text: "Quitar visibles"
+                    enabled: modelPickerDialog.loaded && pickerModel.count > 0
+                    onClicked: modelPickerDialog.setVisibleChecked(false)
+                }
+            }
+
+            ListView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                model: pickerModel
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                delegate: CheckBox {
+                    width: ListView.view.width
+                    text: model.modelId
+                    checked: model.checked
+                    onToggled: modelPickerDialog.setChecked(model.modelId, checked)
+                }
+            }
+
+            Label {
+                text: modelPickerDialog.statusText
+                visible: modelPickerDialog.statusText.length > 0
+                color: modelPickerDialog.statusOk ? "#2E7D32" : "#B3261E"
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                Button {
+                    text: "Recargar"
+                    Layout.fillWidth: true
+                    onClicked: modelPickerDialog.startLoad()
+                }
+                Button {
+                    text: "Guardar seleccion"
+                    Layout.fillWidth: true
+                    highlighted: true
+                    enabled: modelPickerDialog.loaded
+                    onClicked: modelPickerDialog.saveSelection()
+                }
+                Button {
+                    text: "Cerrar"
+                    Layout.fillWidth: true
+                    onClicked: modelPickerDialog.close()
                 }
             }
         }

@@ -117,6 +117,12 @@ pub struct ServerConfig {
     pub default_model: String,
     pub priority: u8,
     pub enabled: bool,
+    /// Optional allow-list of model ids to expose from this server. An empty
+    /// list means "show every model the provider reports". Providers such as
+    /// OpenRouter expose hundreds of models, so the GUI lets users narrow the
+    /// list without hiding the catalog by default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -614,6 +620,7 @@ impl Default for AppConfig {
                 default_model: "qwen2.5-coder:3b".to_string(),
                 priority: 1,
                 enabled: true,
+                selected_models: Vec::new(),
             }],
             context: ContextConfig::default(),
             performance: PerformanceConfig::default(),
@@ -1003,6 +1010,7 @@ impl AppConfig {
                     default_model: legacy_ollama.default_model,
                     priority: 1,
                     enabled: true,
+                    selected_models: Vec::new(),
                 }];
             }
 

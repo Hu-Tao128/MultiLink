@@ -54,6 +54,7 @@ public:
     Q_INVOKABLE bool saveServersConfigJson(const QString &json);
     Q_INVOKABLE QString testServerConnection(const QString &baseUrl);
     Q_INVOKABLE QString testProviderKey(const QString &provider, const QString &token);
+    Q_INVOKABLE QString listServerModels(const QString &provider, const QString &baseUrl);
     Q_INVOKABLE bool saveProviderToken(const QString &provider, const QString &token);
     Q_INVOKABLE bool clearProviderToken(const QString &provider);
     Q_INVOKABLE bool hasProviderToken(const QString &provider);

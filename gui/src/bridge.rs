@@ -45,6 +45,7 @@ impl Default for ChatBridge {
                 default_model: "qwen2.5-coder:3b".to_string(),
                 priority: 1,
                 enabled: true,
+                selected_models: Vec::new(),
             };
             let model = server.default_model.clone();
             (server, model)

@@ -52,6 +52,7 @@ char *chat_backend_mcp_config_json(void *backend);
 bool chat_backend_save_mcp_config_json(void *backend, const char *mcp_json);
 char *chat_backend_test_server_connection(void *backend, const char *base_url);
 char *chat_backend_test_provider_key(void *backend, const char *provider, const char *token);
+char *chat_backend_list_server_models(void *backend, const char *provider, const char *base_url);
 int chat_backend_save_provider_token(void *backend, const char *provider, const char *token);
 int chat_backend_clear_provider_token(void *backend, const char *provider);
 int chat_backend_has_provider_token(void *backend, const char *provider);
@@ -482,6 +483,19 @@ QString ChatController::testProviderKey(const QString &provider, const QString &
         m_backend,
         providerEncoded.constData(),
         tokenEncoded.constData()
+    ));
+}
+
+QString ChatController::listServerModels(const QString &provider, const QString &baseUrl) {
+    if (!m_backend || provider.trimmed().isEmpty()) {
+        return QStringLiteral("{\"ok\":false,\"error\":\"backend unavailable\",\"hint\":\"\",\"models\":[],\"model_count\":0}");
+    }
+    const QByteArray providerEncoded = provider.toUtf8();
+    const QByteArray baseUrlEncoded = baseUrl.toUtf8();
+    return takeRustString(chat_backend_list_server_models(
+        m_backend,
+        providerEncoded.constData(),
+        baseUrlEncoded.constData()
     ));
 }
 
