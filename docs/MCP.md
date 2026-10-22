@@ -2,21 +2,24 @@
 
 Guía práctica para configurar y usar servidores **MCP (Model Context Protocol)** en MultiLink.
 
-> **Estado actual (importante)**
+> **Estado actual**
 >
 > MultiLink ya incluye:
 >
 > - Un **editor de configuración MCP** en `Configuración → Servidores MCP`.
 > - Persistencia de esa configuración en `multilink.toml` bajo `[mcp]`.
+> - Un **cliente MCP por `stdio`** (`core/src/mcp_client.rs`) que lanza los
+>   servidores habilitados, hace el handshake `initialize` + `tools/list` y
+>   ejecuta `tools/call`.
+> - Inyección automática de las tools MCP descubiertas en el bucle del agente.
+>   Cada tool aparece como `mcp__<servidor>__<tool>` y el modelo puede elegirla
+>   junto con las tools locales.
 > - Un **adaptador MCP delgado** (`core/src/mcp_adapter.rs`) que traduce llamadas
 >   tipo MCP a envelopes del protocolo LAN de MultiLink y viceversa.
 >
-> Todavía **no** se lanzan procesos MCP locales por `stdio` desde la app ni se
-> inyectan automáticamente sus tools en el bucle del agente. Es decir: la UI
-> registra y guarda los servidores, y el adaptador define el contrato de
-> herramientas, pero la ejecución completa de servidores MCP externos es trabajo
-> pendiente (ver `docs/ROADMAP_V3_STATE.md`). Esta guía documenta lo que funciona
-> hoy y cómo preparar la configuración para cuando se conecte el runtime.
+> Al guardar la configuración desde la GUI, MultiLink refresca el catálogo sin
+> reiniciar la aplicación. El primer mensaje tras arrancar descubre las tools;
+> después se reutiliza el catálogo en caché.
 
 ---
 
@@ -296,19 +299,54 @@ La respuesta se normaliza a:
 }
 ```
 
-### 6.3 Qué falta para ejecutar servidores MCP externos
+### 6.3 Ejecución de servidores MCP externos
 
-El siguiente paso pendiente es un cliente MCP local que:
+`core/src/mcp_client.rs` implementa el cliente MCP local:
 
-1. Lea `[mcp].servers` al iniciar.
-2. Lance cada servidor habilitado por `stdio`.
-3. Haga el handshake `initialize` y `tools/list`.
-4. Registre esas tools en el registro del agente.
-5. Cierre los procesos de forma ordenada al salir.
+1. Lee `[mcp].servers` al iniciar (o al guardar desde la GUI).
+2. Lanza cada servidor habilitado por `stdio` con `command`, `args` y `env`.
+3. Hace el handshake `initialize` / `notifications/initialized`.
+4. Descubre tools con `tools/list` (incluyendo paginación por cursor).
+5. Expone cada tool al selector del agente como `mcp__<servidor>__<tool>`.
+6. Ejecuta `tools/call` cuando el modelo elige una de esas tools.
+7. Cierra el proceso al terminar cada descubrimiento o llamada.
 
-Hasta que eso exista, el editor MCP sirve para **preparar y versionar** la
-configuración, y el adaptador LAN cubre los casos de dispatch y tools expuestas
-por MultiLink.
+Consideraciones prácticas:
+
+- El catálogo se descubre una vez y se reutiliza. Si cambias servidores en la
+  GUI, se limpia y se vuelve a descubrir en el siguiente mensaje.
+- Las tools MCP tienen prioridad sobre la heurística de "chat personal": aunque
+  la sesión no tenga carpeta de proyecto, el agente puede usar MCP.
+- Los errores de arranque o de protocolo se registran en stderr con el prefijo
+  `[mcp]`. Si un servidor falla, el resto sigue disponible.
+- Los procesos se lanzan por operación (descubrimiento o llamada), no se
+  mantiene un daemon persistente entre mensajes.
+
+### 6.4 Limitaciones conocidas
+
+- **Modelos locales pequeños**: pueden omitir campos obligatorios del schema o
+  devolver JSON incompleto. El selector refuerza las reglas y ya no ejecuta
+  tools MCP con `args={}` cuando hay campos requeridos, pero puede necesitar
+  varios pasos para completar la tarea.
+- **Fallback heurístico**: si el modelo no produce JSON válido y la tool MCP
+  requiere argumentos, el agente se detiene y pide los datos en lugar de
+  inventarlos. Solo se eligen automáticamente tools MCP sin argumentos
+  obligatorios.
+- **Cantidad de operaciones**: para "crea N elementos" se cuentan las llamadas
+  `create` exitosas y se fuerza a continuar hasta N. Es una heurística: no
+  entiende objetivos más complejos ni cantidades expresadas de forma ambigua.
+- **Concurrencia**: enviar un segundo mensaje mientras el primero sigue en el
+  bucle de tools puede mezclar el contexto visible y las respuestas finales.
+  Envía un mensaje y espera a que termine.
+- **Descubrimiento**: el catálogo se descubre en el primer mensaje. Guardar la
+  configuración limpia la caché, pero no hay reconexión en caliente de procesos
+  ya lanzados.
+- **Recuperación de configuración**: si `multilink.toml` es inválido, el
+  arranque restaura los valores por defecto y puede perder `[mcp]`. Conserva el
+  respaldo `multilink.invalid-*.toml` y vuelve a añadir los servidores.
+- **`think=false`**: depende de una versión de Ollama que soporte el campo
+  `think`; en versiones antiguas se ignora y el modelo puede tardar más en el
+  selector.
 
 ---
 
