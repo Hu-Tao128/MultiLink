@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, watch, Mutex, RwLock, Semaphore};
 use walkdir::WalkDir;
 
-use crate::config::{ModelTier, RuntimeConfig};
+use crate::config::{McpServerConfig, ModelTier, RuntimeConfig};
 use crate::context_engine::{
     ContextEngine, ContextEngineV1, ContextEngineV2, ContextEngineV2Plus, ContextEngineVersion,
     ContextRetrievalConfig, RetrievalResult,
@@ -25,6 +25,7 @@ use crate::execution::{ExecutionDispatchRequest, ExecutionDispatcher};
 use crate::hardware_profile::{HardwareCaps, HardwareProfile};
 use crate::intent_budget::{budget_for_intent, detect_query_intent, task_weight_for_prompt};
 use crate::lan_agent::LanAgentServer;
+use crate::mcp_client::McpRuntime;
 use crate::model_profile::{ModelClass, ModelProfile};
 use crate::observability::{ContextRetrievalMetrics, ExecutionMetrics};
 use crate::orchestrator::executor::Executor;
@@ -75,6 +76,7 @@ pub struct ChatRuntime {
     runtime_config: RuntimeConfig,
     system_context_dir: Option<PathBuf>,
     tool_executor: Arc<ToolExecutor>,
+    mcp_runtime: Arc<McpRuntime>,
 }
 
 impl ChatRuntime {
@@ -140,7 +142,10 @@ impl ChatRuntime {
             project_root,
             Arc::new(ContextEngineV1) as Arc<dyn ContextEngine>,
         );
-        let tool_executor = Arc::new(ToolExecutor::new(Arc::new(tool_registry)));
+        let mcp_runtime = Arc::new(McpRuntime::new(Vec::new()));
+        let tool_executor = Arc::new(
+            ToolExecutor::new(Arc::new(tool_registry)).with_mcp_runtime(mcp_runtime.clone()),
+        );
 
         Self {
             router: router.clone(),
@@ -158,7 +163,21 @@ impl ChatRuntime {
             runtime_config,
             system_context_dir,
             tool_executor,
+            mcp_runtime,
         }
+    }
+
+    pub fn with_mcp_servers(self, servers: Vec<McpServerConfig>) -> Self {
+        self.mcp_runtime.set_servers(servers);
+        self
+    }
+
+    pub fn set_mcp_servers(&self, servers: Vec<McpServerConfig>) {
+        self.mcp_runtime.set_servers(servers);
+    }
+
+    pub async fn refresh_mcp_catalog(&self) -> usize {
+        self.tool_executor.ensure_mcp_catalog().await.len()
     }
 
     pub fn tool_executor(&self) -> Option<Arc<ToolExecutor>> {
@@ -755,6 +774,12 @@ impl ChatRuntime {
         let model_name = model.as_deref().unwrap_or("unknown");
         let model_size =
             crate::orchestrator::model_strategy::ModelSize::from_model_name(model_name);
+        let mcp_tools = self.tool_executor.ensure_mcp_catalog().await;
+        eprintln!(
+            "[mcp] servidores_configurados={} herramientas_disponibles={}",
+            self.mcp_runtime.configured_server_count(),
+            mcp_tools.len()
+        );
         let skill_orchestrator = Arc::new(SkillOrchestrator::new(Vec::new()));
         let mut executor = Executor::new(
             self.router.clone(),

@@ -10,6 +10,7 @@ pub mod hardware_profile;
 pub mod intent_budget;
 pub mod lan_agent;
 pub mod mcp_adapter;
+pub mod mcp_client;
 pub mod model_manager;
 pub mod model_profile;
 pub mod observability;
@@ -49,6 +50,7 @@ pub use lan_agent::{
 pub use mcp_adapter::{
     McpContent, McpError, McpResult, McpToolCall, McpToolResponse, ThinMcpAdapter,
 };
+pub use mcp_client::{McpCatalogEntry, McpRuntime};
 pub use model_manager::{ModelInfo, ModelManager, ModelStatus, ProviderType};
 pub use model_profile::{ModelClass, ModelProfile, RetrievalBudget};
 pub use observability::{

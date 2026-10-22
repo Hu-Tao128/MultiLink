@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::mcp_client::{McpCatalogEntry, McpRuntime};
+
 pub mod backup;
 pub mod command;
 pub mod description;
@@ -104,16 +106,77 @@ impl ToolRegistry {
 
 pub struct ToolExecutor {
     registry: Arc<ToolRegistry>,
+    mcp: Option<Arc<McpRuntime>>,
 }
 
 impl ToolExecutor {
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            mcp: None,
+        }
+    }
+
+    pub fn with_mcp_runtime(mut self, mcp: Arc<McpRuntime>) -> Self {
+        self.mcp = Some(mcp);
+        self
+    }
+
+    pub async fn ensure_mcp_catalog(&self) -> Vec<McpCatalogEntry> {
+        match self.mcp.as_ref() {
+            Some(mcp) => mcp.ensure_catalog().await,
+            None => Vec::new(),
+        }
+    }
+
+    pub fn mcp_tool_names(&self) -> Vec<String> {
+        self.mcp
+            .as_ref()
+            .map(|mcp| {
+                mcp.catalog()
+                    .into_iter()
+                    .map(|entry| entry.exposed_name)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn mcp_tool_descriptions(&self) -> Vec<description::ToolDescription> {
+        self.mcp
+            .as_ref()
+            .map(|mcp| {
+                mcp.catalog()
+                    .into_iter()
+                    .map(|entry| entry.to_tool_description())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub async fn execute(&self, tool_name: &str, input: ToolInput) -> ToolResult {
         self.execute_with_root(tool_name, input, &self.registry.project_root)
             .await
+    }
+
+    pub async fn execute_json(&self, tool_name: &str, arguments: serde_json::Value) -> ToolResult {
+        self.execute_json_with_root(tool_name, arguments, &self.registry.project_root)
+            .await
+    }
+
+    pub async fn execute_json_with_root(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        project_root: &Path,
+    ) -> ToolResult {
+        if let Some(mcp) = self.mcp.as_ref() {
+            if mcp.is_mcp_tool(tool_name) {
+                return mcp.call_tool(tool_name, arguments).await;
+            }
+        }
+
+        let input = tool_input_from_json(arguments);
+        self.execute_with_root(tool_name, input, project_root).await
     }
 
     pub async fn execute_with_root(
@@ -122,6 +185,12 @@ impl ToolExecutor {
         input: ToolInput,
         project_root: &Path,
     ) -> ToolResult {
+        if let Some(mcp) = self.mcp.as_ref() {
+            if mcp.is_mcp_tool(tool_name) {
+                return mcp.call_tool(tool_name, tool_input_to_json(input)).await;
+            }
+        }
+
         let check = permissions::check_tool_allowed(tool_name, &input, project_root);
         if !check.allowed {
             let reason = check
@@ -141,11 +210,18 @@ impl ToolExecutor {
     }
 
     pub fn list_tools(&self) -> Vec<(String, String)> {
-        self.registry.list()
+        let mut tools = self.registry.list();
+        if let Some(mcp) = self.mcp.as_ref() {
+            for entry in mcp.catalog() {
+                tools.push((entry.exposed_name, entry.description));
+            }
+        }
+        tools
     }
 
     pub fn list_tools_with_schemas(&self) -> Vec<(String, String, serde_json::Value)> {
-        self.registry
+        let mut tools: Vec<(String, String, serde_json::Value)> = self
+            .registry
             .tool_schemas()
             .into_iter()
             .filter_map(|s| {
@@ -154,12 +230,73 @@ impl ToolExecutor {
                 let schema = s.get("input_schema").cloned().unwrap_or_default();
                 Some((name, desc, schema))
             })
-            .collect()
+            .collect();
+
+        if let Some(mcp) = self.mcp.as_ref() {
+            for entry in mcp.catalog() {
+                tools.push((entry.exposed_name, entry.description, entry.input_schema));
+            }
+        }
+
+        tools
     }
 
     pub fn schemas(&self) -> Vec<serde_json::Value> {
-        self.registry.tool_schemas()
+        let mut schemas = self.registry.tool_schemas();
+        if let Some(mcp) = self.mcp.as_ref() {
+            for entry in mcp.catalog() {
+                schemas.push(serde_json::json!({
+                    "name": entry.exposed_name,
+                    "description": entry.description,
+                    "input_schema": entry.input_schema
+                }));
+            }
+        }
+        schemas
     }
+}
+
+fn tool_input_to_json(input: ToolInput) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    if let Some(path) = input.path {
+        object.insert("path".to_string(), serde_json::Value::String(path));
+    }
+    if let Some(pattern) = input.pattern {
+        object.insert("pattern".to_string(), serde_json::Value::String(pattern));
+    }
+    if let Some(args) = input.args {
+        for (key, value) in args {
+            object.insert(key, value);
+        }
+    }
+    serde_json::Value::Object(object)
+}
+
+fn tool_input_from_json(arguments: serde_json::Value) -> ToolInput {
+    let mut input = ToolInput::default();
+    let Some(object) = arguments.as_object() else {
+        return input;
+    };
+
+    input.path = object
+        .get("path")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    input.pattern = object
+        .get("pattern")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    let args: HashMap<String, serde_json::Value> = object
+        .iter()
+        .filter(|(key, _)| key.as_str() != "path" && key.as_str() != "pattern")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if !args.is_empty() {
+        input.args = Some(args);
+    }
+
+    input
 }
 
 pub fn create_default_registry(project_root: PathBuf) -> ToolRegistry {
