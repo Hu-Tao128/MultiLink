@@ -88,6 +88,7 @@ impl Executor {
                 .values()
                 .cloned()
                 .collect();
+        tool_descriptions.extend(tool_executor.mcp_tool_descriptions());
         tool_descriptions.sort_by(|a, b| a.name.cmp(&b.name));
         Self {
             router,
@@ -119,6 +120,52 @@ impl Executor {
     pub fn with_working_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.working_dir = Some(dir);
         self
+    }
+
+    fn available_tools_for(&self, model_size: ModelSize) -> Vec<String> {
+        let mut tools: Vec<String> = model_size
+            .allowed_tools()
+            .into_iter()
+            .map(String::from)
+            .collect();
+        for name in self.tool_executor.mcp_tool_names() {
+            if !tools.contains(&name) {
+                tools.push(name);
+            }
+        }
+        tools
+    }
+
+    fn rank_mcp_tools(&self, prompt: &str) -> (Vec<String>, usize) {
+        let terms = mcp_prompt_terms(prompt);
+        let mut scored: Vec<(usize, &ToolDescription)> = self
+            .tool_descriptions
+            .iter()
+            .filter(|tool| tool.name.starts_with("mcp__"))
+            .map(|tool| (mcp_tool_score(tool, &terms), tool))
+            .collect();
+
+        let max_score = scored.iter().map(|(score, _)| *score).max().unwrap_or(0);
+        if max_score == 0 {
+            let mut all = scored
+                .into_iter()
+                .map(|(_, tool)| tool.name.clone())
+                .collect::<Vec<_>>();
+            all.sort();
+            return (all, 0);
+        }
+
+        scored.sort_by(|(score_a, tool_a), (score_b, tool_b)| {
+            score_b
+                .cmp(score_a)
+                .then_with(|| tool_a.name.cmp(&tool_b.name))
+        });
+        let ranked = scored
+            .into_iter()
+            .take(6)
+            .map(|(_, tool)| tool.name.clone())
+            .collect();
+        (ranked, max_score)
     }
 
     pub async fn execute(&self, plan: Plan) -> Result<String, String> {
@@ -465,6 +512,29 @@ impl Executor {
                     .await?;
 
                 if tool_call.tool.is_empty() {
+                    if mcp_prompt_terms(initial_goal)
+                        .iter()
+                        .any(|term| term == "create")
+                    {
+                        if let Some(expected) = requested_operation_count(initial_goal) {
+                            let completed = successful_mcp_create_count(&step_results);
+                            if completed < expected && iterations + 1 < max_steps {
+                                step_results.push(crate::orchestrator::planner::StepResult {
+                                    step_index: iterations,
+                                    step_id: format!("step_{}", iterations),
+                                    output: format!(
+                                        "Task is not complete: {} of {} requested MCP creations succeeded. Continue with the MCP create tool and use a different unique username/email for the next item.",
+                                        completed, expected
+                                    ),
+                                    tool_name: None,
+                                    metadata: None,
+                                });
+                                iterations += 1;
+                                continue;
+                            }
+                        }
+                    }
+
                     if !successful_write_paths.is_empty()
                         && missing_required_assets(initial_goal, &successful_write_paths).is_empty()
                     {
@@ -490,7 +560,15 @@ impl Executor {
                         continue;
                     }
 
-                    return Ok(format!("Goal achieved: {}", tool_call.reasoning));
+                    let summary = format!("Goal achieved: {}", tool_call.reasoning);
+                    let last_output = step_results
+                        .last()
+                        .map(|result| result.output.trim().to_string())
+                        .unwrap_or_default();
+                    if last_output.is_empty() {
+                        return Ok(summary);
+                    }
+                    return Ok(format!("{}\n\n{}", last_output, summary));
                 }
 
                 let tool_signature = write_tool_signature(&tool_call.tool, &tool_call.args);
@@ -563,7 +641,8 @@ impl Executor {
                     })
                     .collect();
 
-                if recent_tools.len() >= doom_window
+                if !tool_call.tool.starts_with("mcp__")
+                    && recent_tools.len() >= doom_window
                     && recent_tools.iter().all(|&t| t == tool_call.tool)
                 {
                     eprintln!(
@@ -587,14 +666,13 @@ impl Executor {
                     ));
                 }
 
-                let tool_input = self.json_to_tool_input(&tool_call.args);
                 let result = if let Some(ref dir) = self.working_dir {
                     self.tool_executor
-                        .execute_with_root(&tool_call.tool, tool_input, dir)
+                        .execute_json_with_root(&tool_call.tool, tool_call.args.clone(), dir)
                         .await
                 } else {
                     self.tool_executor
-                        .execute(&tool_call.tool, tool_input)
+                        .execute_json(&tool_call.tool, tool_call.args.clone())
                         .await
                 };
                 let raw_output = serde_json::to_string(&result).unwrap_or_default();
@@ -735,24 +813,34 @@ impl Executor {
         let features = crate::orchestrator::planner::IntentFeatures::extract(prompt);
         let confidence = features.tool_confidence();
         let no_custom_session_root = self.working_dir.is_none();
-        let available_tools = model_size
-            .allowed_tools()
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>();
+        let mut available_tools = self.available_tools_for(model_size);
+        let has_mcp_tools = !self.tool_executor.mcp_tool_names().is_empty();
+        let mcp_requested = has_mcp_tools && prompt_mentions_mcp(prompt);
+        let (ranked_mcp_tools, mcp_match_score) = if has_mcp_tools {
+            self.rank_mcp_tools(prompt)
+        } else {
+            (Vec::new(), 0)
+        };
+        let use_mcp_tools = mcp_requested || mcp_match_score >= 2;
+        if mcp_requested && !ranked_mcp_tools.is_empty() {
+            available_tools = ranked_mcp_tools.clone();
+        }
 
         eprintln!(
-            "[executor] execute_hybrid model_size={:?} confidence={:.2} is_read={} is_write={} needs_llm={} tools={} no_custom_session_root={}",
+            "[executor] execute_hybrid model_size={:?} confidence={:.2} is_read={} is_write={} needs_llm={} tools={} no_custom_session_root={} has_mcp_tools={} mcp_requested={} mcp_score={}",
             model_size,
             confidence,
             features.is_read_operation,
             features.is_write_operation,
             features.requires_llm(),
             available_tools.len(),
-            no_custom_session_root
+            no_custom_session_root,
+            has_mcp_tools,
+            mcp_requested,
+            mcp_match_score
         );
 
-        if no_custom_session_root {
+        if no_custom_session_root && !use_mcp_tools {
             eprintln!(
                 "[executor] personal_chat_mode: skipping dynamic tool loop (no session root)"
             );
@@ -760,7 +848,7 @@ impl Executor {
             return self.execute_multi_step(plan).await;
         }
 
-        if confidence > 0.7 && !features.requires_llm() {
+        if !use_mcp_tools && confidence > 0.7 && !features.requires_llm() {
             let initial =
                 crate::orchestrator::planner::create_initial_steps(prompt, available_tools.clone());
             if initial
@@ -800,33 +888,13 @@ impl Executor {
             let mut exec_ctx = crate::orchestrator::executor::ExecutionContext::new();
             exec_ctx.tool_selector = Some(selector);
             exec_ctx.available_tools = available_tools;
+            if use_mcp_tools {
+                exec_ctx.max_steps = exec_ctx.max_steps.max(20);
+            }
             self.execute_with_dynamic_loop(prompt, &mut exec_ctx).await
         } else {
             let plan = MinimalPlanner::plan_multi_step(prompt);
             self.execute_multi_step(plan).await
-        }
-    }
-
-    fn json_to_tool_input(&self, args: &serde_json::Value) -> crate::tools::ToolInput {
-        use std::collections::HashMap;
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let pattern = args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let args_map: Option<HashMap<String, serde_json::Value>> = args.as_object().map(|obj| {
-            obj.iter()
-                .filter(|(k, _)| *k != "path" && *k != "pattern")
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        });
-        crate::tools::ToolInput {
-            path,
-            pattern,
-            args: args_map.filter(|m| !m.is_empty()),
         }
     }
 
@@ -1140,6 +1208,148 @@ fn render_open_file_result(output: &serde_json::Value) -> String {
     }
 
     format!("Path: {}\n\n{}", path, limit_tool_text(content))
+}
+
+const SPANISH_OPERATION_COUNTS: &[(&str, usize)] = &[
+    ("uno", 1),
+    ("dos", 2),
+    ("tres", 3),
+    ("cuatro", 4),
+    ("cinco", 5),
+    ("seis", 6),
+    ("siete", 7),
+    ("ocho", 8),
+    ("nueve", 9),
+    ("diez", 10),
+];
+
+fn requested_operation_count(goal: &str) -> Option<usize> {
+    let lower = goal.to_ascii_lowercase();
+    for token in lower.split(|c: char| !c.is_alphanumeric()) {
+        if let Ok(value) = token.parse::<usize>() {
+            if (1..=50).contains(&value) {
+                return Some(value);
+            }
+        }
+        if let Some((_, value)) = SPANISH_OPERATION_COUNTS
+            .iter()
+            .find(|(word, _)| *word == token)
+        {
+            return Some(*value);
+        }
+    }
+    None
+}
+
+fn successful_mcp_create_count(step_results: &[crate::orchestrator::planner::StepResult]) -> usize {
+    step_results
+        .iter()
+        .filter(|step| {
+            let Some(tool) = step
+                .tool_name
+                .as_deref()
+                .and_then(|name| name.strip_prefix("Tool: "))
+            else {
+                return false;
+            };
+            if !tool.starts_with("mcp__") || !tool.contains("create") {
+                return false;
+            }
+            serde_json::from_str::<serde_json::Value>(&step.output)
+                .ok()
+                .and_then(|value| value.get("success").and_then(serde_json::Value::as_bool))
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+const MCP_INTENT_SYNONYMS: &[(&str, &[&str])] = &[
+    (
+        "create",
+        &[
+            "crea", "crear", "genera", "generar", "create", "add", "new", "nuevo",
+        ],
+    ),
+    ("user", &["usuario", "usuarios", "user", "users"]),
+    (
+        "list",
+        &[
+            "lista",
+            "listar",
+            "list",
+            "muestra",
+            "mostrar",
+            "dame",
+            "informacion",
+            "información",
+            "info",
+            "datos",
+        ],
+    ),
+    ("all", &["todos", "todas", "all"]),
+    (
+        "delete",
+        &["borra", "borrar", "elimina", "eliminar", "delete", "remove"],
+    ),
+    (
+        "update",
+        &[
+            "actualiza",
+            "actualizar",
+            "modifica",
+            "modificar",
+            "update",
+            "edit",
+        ],
+    ),
+    ("login", &["login", "inicia", "iniciar", "sesion", "token"]),
+    ("health", &["health", "salud", "estado", "status"]),
+];
+
+pub(crate) fn prompt_contains_word(lower: &str, word: &str) -> bool {
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|part| part == word)
+}
+
+pub(crate) fn prompt_mentions_mcp(prompt: &str) -> bool {
+    prompt_contains_word(&prompt.to_ascii_lowercase(), "mcp")
+}
+
+pub(crate) fn mcp_prompt_terms(prompt: &str) -> Vec<String> {
+    let lower = prompt.to_ascii_lowercase();
+    let mut terms = Vec::new();
+    for (canonical, variants) in MCP_INTENT_SYNONYMS {
+        if variants
+            .iter()
+            .any(|variant| prompt_contains_word(&lower, variant))
+        {
+            terms.push((*canonical).to_string());
+        }
+    }
+    terms
+}
+
+pub(crate) fn mcp_tool_score(tool: &ToolDescription, terms: &[String]) -> usize {
+    let haystack = format!(
+        "{} {}",
+        tool.name.to_ascii_lowercase(),
+        tool.description.to_ascii_lowercase()
+    );
+    let name = tool.name.to_ascii_lowercase();
+    terms
+        .iter()
+        .map(|term| {
+            let mut score = 0;
+            if haystack.contains(term.as_str()) {
+                score += 2;
+            }
+            if name.contains(term.as_str()) {
+                score += 1;
+            }
+            score
+        })
+        .sum()
 }
 
 fn is_write_tool(tool: &str) -> bool {
@@ -1547,5 +1757,52 @@ mod tests {
 
         assert_eq!(paths.css, "styles.css");
         assert_eq!(paths.js, "scripts.js");
+    }
+    #[test]
+    fn detects_explicit_mcp_requests() {
+        assert!(prompt_mentions_mcp("Usando el MCP crea 5 usuarios"));
+        assert!(prompt_mentions_mcp("usa mcp para listar"));
+        assert!(!prompt_mentions_mcp("mcpclient is not a word"));
+    }
+
+    #[test]
+    fn mcp_terms_detect_create_users_in_spanish() {
+        let terms = mcp_prompt_terms("Usando el MCP crea 5 usuarios nuevos");
+        assert!(terms.contains(&"create".to_string()));
+        assert!(terms.contains(&"user".to_string()));
+    }
+    #[test]
+    fn requested_operation_count_reads_digits_and_spanish() {
+        assert_eq!(requested_operation_count("crea 5 usuarios"), Some(5));
+        assert_eq!(requested_operation_count("crea cinco usuarios"), Some(5));
+        assert_eq!(requested_operation_count("lista usuarios"), None);
+    }
+
+    #[test]
+    fn successful_mcp_create_count_ignores_failures() {
+        let results = vec![
+            crate::orchestrator::planner::StepResult {
+                step_index: 0,
+                step_id: "0".to_string(),
+                output: r#"{"success":true,"output":"ok"}"#.to_string(),
+                tool_name: Some("Tool: mcp__fastapi_users__create_user".to_string()),
+                metadata: None,
+            },
+            crate::orchestrator::planner::StepResult {
+                step_index: 1,
+                step_id: "1".to_string(),
+                output: r#"{"success":false,"error":"bad"}"#.to_string(),
+                tool_name: Some("Tool: mcp__fastapi_users__create_user".to_string()),
+                metadata: None,
+            },
+            crate::orchestrator::planner::StepResult {
+                step_index: 2,
+                step_id: "2".to_string(),
+                output: r#"{"success":true,"output":"ok"}"#.to_string(),
+                tool_name: Some("Tool: mcp__fastapi_users__list_users".to_string()),
+                metadata: None,
+            },
+        ];
+        assert_eq!(successful_mcp_create_count(&results), 1);
     }
 }

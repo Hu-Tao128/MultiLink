@@ -109,7 +109,9 @@ impl OllamaProvider {
             options: Some(OllamaOptions {
                 num_ctx: Some(128),
                 temperature: Some(0.0),
+                num_predict: None,
             }),
+            think: None,
         };
 
         let timeout = Duration::from_secs(Self::model_load_timeout_secs());
@@ -514,6 +516,8 @@ struct OllamaOptions {
     num_ctx: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_predict: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -523,6 +527,8 @@ struct OllamaRequest {
     messages: Vec<OllamaMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<OllamaOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -652,6 +658,7 @@ impl LLMProvider for OllamaProvider {
         let ollama_options = OllamaOptions {
             num_ctx: options.num_ctx,
             temperature: options.temperature,
+            num_predict: options.num_predict.map(|value| value as i32),
         };
 
         let messages = if let Some(chat_messages) = options.messages {
@@ -685,6 +692,7 @@ impl LLMProvider for OllamaProvider {
             stream: false,
             messages,
             options: Some(ollama_options),
+            think: options.think,
         };
 
         let response = self.post_chat_with_retry(&body).await?;
@@ -720,6 +728,7 @@ impl LLMProvider for OllamaProvider {
         let ollama_options = OllamaOptions {
             num_ctx: options.num_ctx,
             temperature: options.temperature,
+            num_predict: options.num_predict.map(|value| value as i32),
         };
 
         let messages = if let Some(chat_messages) = options.messages {
@@ -773,6 +782,7 @@ impl LLMProvider for OllamaProvider {
                 stream: true,
                 messages: ollama_messages.clone(),
                 options: Some(ollama_options.clone()),
+                think: options.think,
             };
 
             let response = match self.post_chat_with_retry(&body).await {

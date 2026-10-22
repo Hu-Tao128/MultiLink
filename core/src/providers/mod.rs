@@ -39,6 +39,14 @@ pub struct PromptOptions {
     pub temperature: Option<f32>,
     pub system_prompt: Option<String>,
     pub num_ctx: Option<usize>,
+    /// Maximum number of tokens to generate for this request. `None` leaves
+    /// the provider/model default. Short internal calls (tool selection,
+    /// classification) should set this to avoid runaway generations.
+    pub num_predict: Option<usize>,
+    /// Ask thinking-capable providers to skip the reasoning phase. Used by
+    /// internal structured-output calls (e.g. tool selection) that only need
+    /// a small JSON object.
+    pub think: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<super::session::ChatMessage>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,6 +61,8 @@ impl Default for PromptOptions {
             temperature: Some(0.7),
             system_prompt: None,
             num_ctx: None,
+            num_predict: None,
+            think: None,
             messages: None,
             system_context_dir: None,
         }

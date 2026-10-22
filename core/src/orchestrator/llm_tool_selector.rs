@@ -3,6 +3,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::orchestrator::executor::{mcp_prompt_terms, mcp_tool_score, prompt_mentions_mcp};
 use crate::orchestrator::model_strategy::ModelSize;
 use crate::orchestrator::planner::StepResult;
 use crate::providers::{PromptOptions, ProviderId};
@@ -78,23 +79,71 @@ impl LlmToolSelector {
         );
 
         match decision {
-            Ok(call) => Ok(call),
-            Err(_) => {
+            Ok(call) => self.accept_tool_call(call, available_tools),
+            Err(err) => {
                 eprintln!(
-                    "[llm_tool_selector] first parse failed, retrying with lower temperature"
+                    "[llm_tool_selector] first parse failed: {}; retrying with lower temperature",
+                    err
                 );
                 let decision = self.send_and_parse(&provider, &prompt, &system, 0.01).await;
                 match decision {
-                    Ok(call) => Ok(call),
-                    Err(_e) => {
+                    Ok(call) => self.accept_tool_call(call, available_tools),
+                    Err(err) => {
                         eprintln!(
-                            "[llm_tool_selector] retry also failed, falling back to heuristic"
+                            "[llm_tool_selector] retry also failed: {}; falling back to heuristic",
+                            err
                         );
-                        self.heuristic_fallback(goal)
+                        self.heuristic_fallback(goal, available_tools)
                     }
                 }
             }
         }
+    }
+
+    fn accept_tool_call(
+        &self,
+        call: ToolCall,
+        available_tools: &[String],
+    ) -> Result<ToolCall, String> {
+        let call = self.resolve_tool_name(call, available_tools);
+        if call.tool.is_empty()
+            || available_tools.is_empty()
+            || available_tools.iter().any(|tool| tool == &call.tool)
+        {
+            return Ok(call);
+        }
+
+        Err(format!(
+            "Tool '{}' is not in the available tool list",
+            call.tool
+        ))
+    }
+
+    fn resolve_tool_name(&self, mut call: ToolCall, available_tools: &[String]) -> ToolCall {
+        if call.tool.is_empty() {
+            return call;
+        }
+
+        let normalized = call.tool.trim().to_ascii_lowercase().replace(' ', "_");
+        if let Some(exact) = available_tools
+            .iter()
+            .find(|tool| tool.eq_ignore_ascii_case(&normalized))
+        {
+            call.tool = exact.clone();
+            return call;
+        }
+
+        let suffix = format!("__{}", normalized);
+        if let Some(matched) = available_tools
+            .iter()
+            .find(|tool| tool.to_ascii_lowercase().ends_with(&suffix))
+        {
+            call.tool = matched.clone();
+            return call;
+        }
+
+        call.tool = normalized;
+        call
     }
 
     async fn send_and_parse(
@@ -108,6 +157,8 @@ impl LlmToolSelector {
             system_prompt: Some(system.to_string()),
             temperature: Some(temperature),
             model: self.current_model.clone(),
+            num_predict: Some(384),
+            think: Some(false),
             ..PromptOptions::default()
         };
 
@@ -174,8 +225,71 @@ impl LlmToolSelector {
         }
     }
 
-    fn heuristic_fallback(&self, goal: &str) -> Result<ToolCall, String> {
+    fn required_fields(schema: &Value) -> Vec<String> {
+        schema
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter_map(|field| field.as_str().map(ToString::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn heuristic_fallback(
+        &self,
+        goal: &str,
+        available_tools: &[String],
+    ) -> Result<ToolCall, String> {
         let lower = goal.to_lowercase();
+        let mcp_only = !available_tools.is_empty()
+            && available_tools.iter().all(|tool| tool.starts_with("mcp__"));
+        if mcp_only || prompt_mentions_mcp(goal) {
+            let terms = mcp_prompt_terms(goal);
+            let mut candidates: Vec<&ToolDescription> = available_tools
+                .iter()
+                .filter(|name| name.starts_with("mcp__"))
+                .filter_map(|name| {
+                    self.tool_descriptions
+                        .iter()
+                        .find(|tool| &tool.name == name)
+                })
+                .collect();
+
+            let best = if terms.is_empty() {
+                candidates
+                    .iter()
+                    .find(|tool| Self::required_fields(&tool.schema).is_empty())
+                    .copied()
+            } else {
+                candidates
+                    .sort_by(|a, b| mcp_tool_score(b, &terms).cmp(&mcp_tool_score(a, &terms)));
+                candidates.first().copied()
+            };
+
+            if let Some(tool) = best {
+                let required = Self::required_fields(&tool.schema);
+                if required.is_empty() {
+                    return Ok(ToolCall {
+                        tool: tool.name.clone(),
+                        args: serde_json::json!({}),
+                        reasoning: "heuristic fallback: explicit MCP request".to_string(),
+                    });
+                }
+                return Ok(ToolCall {
+                    tool: String::new(),
+                    args: Value::Null,
+                    reasoning: format!(
+                        "MCP tool {} requires arguments ({}). Provide them and retry.",
+                        tool.name,
+                        required.join(", ")
+                    ),
+                });
+            }
+        }
+
         if lower.contains("search")
             || lower.contains("find")
             || lower.contains("busca")
@@ -266,6 +380,20 @@ impl LlmToolSelector {
             parts.join("\n")
         };
 
+        let mcp_only = !available_tools.is_empty()
+            && available_tools.iter().all(|tool| tool.starts_with("mcp__"));
+        let mcp_rules = if mcp_only {
+            "\nMCP MODE RULES:\n\
+- The user explicitly asked to use MCP. You MUST choose exactly one MCP tool from the list.\n\
+- Use the exact tool name shown (it starts with mcp__).\n\
+- Arguments MUST include every property listed in the schema's \"required\" array, with the exact field names. Never send empty args when the schema requires fields.\n\
+- Do not invent fields that are not in the schema.\n\
+- Never return null unless no MCP tool can possibly satisfy the goal.\n\
+- If the goal asks for N items (for example 5 users), call the tool once per item with different unique values (username/email) before returning null.\n"
+        } else {
+            ""
+        };
+
         format!(
             "GOAL: {}\n\n\
 CURRENT STATE:\n{}\n\n\
@@ -275,7 +403,8 @@ INSTRUCTIONS:\n\
 2. Choose the NEXT tool to call (only ONE)\n\
 3. Provide valid arguments matching the tool's schema\n\
 4. Explain your reasoning briefly\n\n\
-STRATEGY:\n{}\n\n\
+STRATEGY:\n{}\n\
+{}\n\
 COMPLETION RULES:\n\
 - Do not repeat write_file/apply_patch for the same path.\n\
 - For requests that ask for HTML, CSS and JS, create the missing files before returning null.\n\
@@ -287,7 +416,8 @@ IF NO MORE TOOLS NEEDED (goal achieved or blocked):\n\
             goal,
             context_str,
             tools_desc,
-            self.strategy_guidance()
+            self.strategy_guidance(),
+            mcp_rules
         )
     }
 
@@ -358,6 +488,8 @@ IF NO MORE TOOLS NEEDED (goal achieved or blocked):\n\
         r"You are a coding assistant that selects tools to accomplish tasks.
 
 RULES:
+- Tools whose names start with mcp__ are live MCP tools. When the goal asks to use MCP, you MUST select one of those tools.
+- For MCP tools, copy every required field from the schema into args with the exact name; never call an MCP tool with an empty args object if it has required fields.
 - Use search_code before write_file ONLY if the project has existing files to examine
 - If search_code returns empty results, proceed directly to write_file
 - Never call the same tool more than once with similar arguments
@@ -539,7 +671,7 @@ mod tests {
             current_model: None,
         };
         let result = selector
-            .heuristic_fallback("find the router implementation")
+            .heuristic_fallback("find the router implementation", &[])
             .unwrap();
         assert_eq!(result.tool, "search_code");
     }
@@ -552,8 +684,76 @@ mod tests {
             model_size: ModelSize::Medium,
             current_model: None,
         };
-        let result = selector.heuristic_fallback("open main.rs").unwrap();
+        let result = selector.heuristic_fallback("open main.rs", &[]).unwrap();
         assert_eq!(result.tool, "open_file");
+    }
+
+    #[test]
+    fn test_resolve_mcp_tool_without_prefix() {
+        let selector = LlmToolSelector {
+            router: Arc::new(ProviderRouter::new()),
+            tool_descriptions: vec![],
+            model_size: ModelSize::Small,
+            current_model: None,
+        };
+        let available = vec!["mcp__fastapi_users__create_user".to_string()];
+        let call = selector.resolve_tool_name(
+            ToolCall {
+                tool: "create_user".to_string(),
+                args: serde_json::json!({}),
+                reasoning: String::new(),
+            },
+            &available,
+        );
+        assert_eq!(call.tool, "mcp__fastapi_users__create_user");
+    }
+
+    #[test]
+    fn test_heuristic_fallback_prefers_mcp_when_explicit() {
+        let selector = LlmToolSelector {
+            router: Arc::new(ProviderRouter::new()),
+            tool_descriptions: vec![ToolDescription {
+                name: "mcp__fastapi_users__health_check".to_string(),
+                description: "Comprueba la salud del servidor".to_string(),
+                when_to_use: String::new(),
+                when_not_to_use: String::new(),
+                examples: vec![],
+                schema: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+            model_size: ModelSize::Small,
+            current_model: None,
+        };
+        let available = vec!["mcp__fastapi_users__health_check".to_string()];
+        let result = selector
+            .heuristic_fallback("Usando el MCP revisa la salud del servidor", &available)
+            .unwrap();
+        assert_eq!(result.tool, "mcp__fastapi_users__health_check");
+    }
+
+    #[test]
+    fn test_heuristic_fallback_does_not_call_mcp_without_required_args() {
+        let selector = LlmToolSelector {
+            router: Arc::new(ProviderRouter::new()),
+            tool_descriptions: vec![ToolDescription {
+                name: "mcp__fastapi_users__create_user".to_string(),
+                description: "Crea un usuario".to_string(),
+                when_to_use: String::new(),
+                when_not_to_use: String::new(),
+                examples: vec![],
+                schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["username", "email", "password"]
+                }),
+            }],
+            model_size: ModelSize::Small,
+            current_model: None,
+        };
+        let available = vec!["mcp__fastapi_users__create_user".to_string()];
+        let result = selector
+            .heuristic_fallback("Usando el MCP crea 5 usuarios", &available)
+            .unwrap();
+        assert!(result.tool.is_empty());
+        assert!(result.reasoning.contains("requires arguments"));
     }
 
     #[test]
