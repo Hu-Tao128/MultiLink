@@ -31,12 +31,12 @@ impl Default for ChatBridge {
             .build()
             .ok();
 
-        let (selected_server, default_model) = if let Some(rt) = runtime.as_ref() {
+        let (selected_server, default_model, mcp_servers) = if let Some(rt) = runtime.as_ref() {
             let config_path = AppConfig::default_user_config_path();
             let config = rt.block_on(async { AppConfig::load_or_create(&config_path).await.unwrap_or_default() });
             let server = config.primary_server().cloned().unwrap_or_default();
             let model = server.default_model.clone();
-            (server, model)
+            (server, model, config.mcp.servers.clone())
         } else {
             let server = multilink_core::config::ServerConfig {
                 name: "Local Ollama".to_string(),
@@ -48,7 +48,7 @@ impl Default for ChatBridge {
                 selected_models: Vec::new(),
             };
             let model = server.default_model.clone();
-            (server, model)
+            (server, model, Vec::new())
         };
 
         let mut router = ProviderRouter::new();
@@ -64,6 +64,7 @@ impl Default for ChatBridge {
             rt.block_on(async {
                 let chat_runtime = Arc::new(
                     ChatRuntime::new_portable(Arc::new(router), PERSIST_INTERVAL)
+                        .map(|runtime| runtime.with_mcp_servers(mcp_servers.clone()))
                         .unwrap_or_else(|_| {
                             ChatRuntime::new(
                                 Arc::new(ProviderRouter::new()),

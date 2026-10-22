@@ -221,6 +221,7 @@ pub extern "C" fn chat_backend_create(
             config.runtime.clone(),
             config.system_context_dir.clone(),
         )
+        .map(|runtime| runtime.with_mcp_servers(config.mcp.servers.clone()))
         .unwrap_or_else(|_| {
             ChatRuntime::new(
                 Arc::new(ProviderRouter::new()),
@@ -2860,7 +2861,8 @@ pub unsafe extern "C" fn chat_backend_save_mcp_config_json(
         Err(_) => return false,
     };
 
-    backend.runtime.block_on(async {
+    let servers_for_runtime = parsed.clone();
+    let saved = backend.runtime.block_on(async {
         let mut cfg = match AppConfig::load_or_create(&backend.config_path).await {
             Ok(v) => v,
             Err(_) => return false,
@@ -2871,7 +2873,12 @@ pub unsafe extern "C" fn chat_backend_save_mcp_config_json(
             Err(_) => return false,
         };
         std::fs::write(&backend.config_path, content).is_ok()
-    })
+    });
+
+    if saved {
+        backend.chat_runtime.set_mcp_servers(servers_for_runtime);
+    }
+    saved
 }
 
 #[cfg(test)]
