@@ -18,6 +18,7 @@ pub mod deepseek;
 pub mod gemini;
 pub mod ollama;
 pub mod openrouter;
+pub mod qwen;
 
 pub type TokenStream = Pin<Box<dyn Stream<Item = Result<TokenEvent, LLMError>> + Send>>;
 
@@ -29,6 +30,7 @@ pub enum ProviderId {
     Codex,
     DeepSeek,
     OpenRouter,
+    Qwen,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
