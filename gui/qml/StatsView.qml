@@ -2,11 +2,23 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import MultiLink 1.0
-import Theme 1.0
 
 Page {
     id: statsPage
     required property ChatController controller
+
+    // Colores del tema (inyectados desde Main.qml)
+    property color colorBackground: "#F5F6F7"
+    property color colorSurface: "#FFFFFF"
+    property color colorSurfaceAlt: "#F0F0F0"
+    property color colorBorder: "#E0E0E0"
+    property color colorTextPrimary: "#1E1E1E"
+    property color colorTextSecondary: "#6B6B6B"
+    property color colorTextMuted: "#999999"
+    property color colorAccentLocal: "#2E7D32"
+    property color colorAccentRemote: "#1565C0"
+    property color colorAccentWarning: "#ED6C02"
+    property color colorAccentError: "#C62828"
 
     property var globalUsage: ({})
     property var sessionUsage: ({})

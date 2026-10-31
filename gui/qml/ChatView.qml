@@ -3,11 +3,32 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
 import MultiLink 1.0
-import Theme 1.0
 
 Page {
     id: chatPage
     required property ChatController controller
+    
+    // Colores del tema (inyectados desde Main.qml)
+    property color colorBackground: "#F5F6F7"
+    property color colorSurface: "#FFFFFF"
+    property color colorBorder: "#E0E0E0"
+    property color colorTextPrimary: "#1E1E1E"
+    property color colorTextSecondary: "#6B6B6B"
+    property color colorLocal: "#2E7D32"
+    property color colorRemote: "#1565C0"
+    property color colorWarning: "#ED6C02"
+    property color colorError: "#C62828"
+    property color colorBubbleUser: "#E8F5E9"
+    property color colorBubbleAssistant: "#FFFFFF"
+    property color colorBubbleThinking: "#ECEFF1"
+    property color colorBubbleThinkingText: "#455A64"
+    property color colorCodeBackground: "#1E2A32"
+    property color colorCodeBorder: "#3D4F5F"
+    property color colorCodeText: "#D8DEE9"
+    property color colorCodeLanguage: "#61AFEF"
+    property color colorInputBackground: "#FAFAFA"
+    property color colorHoverOverlay: "#E0E0E0"
+
     property string pendingAssistantText: ""
     property bool pendingSelectNewestSession: false
     property string pendingDeleteSessionId: ""
@@ -22,20 +43,9 @@ Page {
     property int contextMaxTokens: 4096
     property bool suppressStartupWarning: false
 
-    // Alias para compatibilidad con codigo existente
-    readonly property color colorBackground:      Theme.background
-    readonly property color colorSurface:         Theme.surface
-    readonly property color colorBorder:          Theme.border
-    readonly property color colorTextPrimary:     Theme.textPrimary
-    readonly property color colorTextSecondary:   Theme.textSecondary
-    readonly property color colorLocal:           Theme.accentLocal
-    readonly property color colorRemote:          Theme.accentRemote
-    readonly property color colorWarning:         Theme.accentWarning
-    readonly property color colorError:           Theme.accentError
-
     function currentAccent() {
-        if (!controller) return Theme.accentLocal
-        return controller.providerScope === "LOCAL" ? Theme.accentLocal : Theme.accentRemote
+        if (!controller) return colorLocal
+        return controller.providerScope === "LOCAL" ? colorLocal : colorRemote
     }
 
     function sessionIdAt(index) {

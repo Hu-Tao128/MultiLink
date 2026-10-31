@@ -73,7 +73,12 @@ qt_add_qml_module(multilink
         qml/Main.qml
         qml/ChatView.qml
         qml/Settings.qml
+        qml/StatsView.qml
+        qml/Theme.qml
 )
+
+# Register Theme.qml as a singleton type for Qt6
+set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 target_link_libraries(multilink PRIVATE Qt6::Core Qt6::Quick Qt6::Qml Qt6::Network chat_controller)
 
