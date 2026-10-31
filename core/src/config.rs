@@ -90,6 +90,7 @@ pub enum ProviderKind {
     Codex,
     DeepSeek,
     OpenRouter,
+    Qwen,
 }
 
 impl ProviderKind {
@@ -105,6 +106,7 @@ impl ProviderKind {
             ProviderKind::Codex => crate::providers::ProviderId::Codex,
             ProviderKind::DeepSeek => crate::providers::ProviderId::DeepSeek,
             ProviderKind::OpenRouter => crate::providers::ProviderId::OpenRouter,
+            ProviderKind::Qwen => crate::providers::ProviderId::Qwen,
         }
     }
 }
@@ -390,6 +392,9 @@ pub struct AppConfig {
     #[serde(default)]
     pub mcp: McpConfig,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_dark: Option<bool>,
+
     // legacy v1 fields, kept for migration only
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_provider: Option<String>,
@@ -635,6 +640,7 @@ impl Default for AppConfig {
             agent: AgentConfig::default(),
             validation: ValidationConfig::default(),
             mcp: McpConfig::default(),
+            theme_dark: None,
             preferred_provider: None,
             ollama: None,
         }
@@ -749,6 +755,26 @@ impl AppConfig {
                 .servers
                 .iter_mut()
                 .find(|s| matches!(s.provider, ProviderKind::DeepSeek))
+            {
+                server.default_model = value;
+            }
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_QWEN_BASE_URL") {
+            if let Some(server) = self
+                .servers
+                .iter_mut()
+                .find(|s| matches!(s.provider, ProviderKind::Qwen))
+            {
+                server.base_url = value;
+            }
+        }
+
+        if let Ok(value) = std::env::var("MULTILINK_QWEN_MODEL") {
+            if let Some(server) = self
+                .servers
+                .iter_mut()
+                .find(|s| matches!(s.provider, ProviderKind::Qwen))
             {
                 server.default_model = value;
             }

@@ -21,6 +21,7 @@ pub mod session;
 pub mod skills;
 pub mod system;
 pub mod tools;
+pub mod usage;
 pub mod web_assets;
 
 pub use context_engine::{

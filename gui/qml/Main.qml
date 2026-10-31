@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Theme 1.0
 
 ApplicationWindow {
     id: root
@@ -10,6 +11,9 @@ ApplicationWindow {
     minimumWidth: 480
     minimumHeight: 400
     title: "MultiLink"
+
+    // Fondo de la ventana según tema
+    color: Theme.background
 
     header: ToolBar {
         implicitHeight: Math.max(40, tabLayout.implicitHeight + 12)
@@ -21,16 +25,29 @@ ApplicationWindow {
             Label {
                 text: "MultiLink"
                 font.bold: true
+                color: Theme.textPrimary
                 font.pixelSize: Math.max(12, Math.min(18, root.width * 0.018))
             }
 
             Item { Layout.fillWidth: true }
+
+            // Toggle de tema
+            Button {
+                text: Theme.isDark ? "☀️ Claro" : "🌙 Oscuro"
+                flat: true
+                onClicked: {
+                    Theme.isDark = !Theme.isDark
+                    // Persistir en config via bridge
+                    if (chatController) chatController.setThemeDark(Theme.isDark)
+                }
+            }
 
             TabBar {
                 id: topTabs
                 currentIndex: pages.currentIndex
                 TabButton { text: "Chat" }
                 TabButton { text: "Opciones" }
+                TabButton { text: "Stats" }
             }
         }
     }
@@ -47,6 +64,13 @@ ApplicationWindow {
         Loader {
             active: topTabs.currentIndex === 1
             sourceComponent: Settings {
+                controller: chatController
+            }
+        }
+
+        Loader {
+            active: topTabs.currentIndex === 2
+            sourceComponent: StatsView {
                 controller: chatController
             }
         }

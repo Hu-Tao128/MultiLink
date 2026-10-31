@@ -14,6 +14,7 @@ use multilink_core::providers::deepseek::DeepSeekProvider;
 use multilink_core::providers::gemini::GeminiProvider;
 use multilink_core::providers::ollama::OllamaProvider;
 use multilink_core::providers::openrouter::OpenRouterProvider;
+use multilink_core::providers::qwen::QwenProvider;
 use multilink_core::{
     AppConfig, ChatRuntime, ProviderId, ProviderKind, ProviderRouter, StreamEvent,
 };
@@ -212,6 +213,37 @@ pub extern "C" fn chat_backend_create(
         OpenRouterProvider::new(openrouter_base_url, openrouter_api_key, openrouter_model, 0)
     {
         router.register(Arc::new(openrouter));
+    }
+
+    // Qwen (DashScope / Alibaba Cloud Model Studio): OpenAI-compatible Chat
+    // Completions API. Uses the same token store mechanism as other remote
+    // providers. Base URL / model come from the configured server when present,
+    // otherwise from DashScope defaults.
+    let qwen_api_key = std::env::var("QWEN_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| std::env::var("DASHSCOPE_API_KEY").ok())
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| load_provider_token(&runtime, "qwen"));
+    let qwen_server = config
+        .servers
+        .iter()
+        .find(|server| matches!(server.provider, ProviderKind::Qwen))
+        .cloned();
+    let qwen_base_url = qwen_server
+        .as_ref()
+        .map(|server| normalize_base_url(&server.base_url))
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| QwenProvider::default_base_url().to_string());
+    let qwen_model = qwen_server
+        .as_ref()
+        .map(|server| server.default_model.clone())
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| "qwen-plus".to_string());
+    if let Ok(qwen) =
+        QwenProvider::new(qwen_base_url, qwen_api_key, qwen_model, 0)
+    {
+        router.register(Arc::new(qwen));
     }
 
     let chat_runtime = Arc::new(
@@ -428,6 +460,7 @@ fn spawn_send_prompt(
                             total_tokens,
                             is_estimated,
                         } => {
+                            // Callback a la UI (QML)
                             if let Some(callback) = callbacks.on_token_usage {
                                 if let Ok(session_cstr) = CString::new(stream_session.clone()) {
                                     callback(
@@ -440,6 +473,27 @@ fn spawn_send_prompt(
                                     );
                                 }
                             }
+
+                            // Persistir en usage.jsonl
+                            let model_for_record = {
+                                let sessions = chat_runtime.list_sessions().await;
+                                sessions
+                                    .iter()
+                                    .find(|s| s.id == stream_session)
+                                    .and_then(|s| s.model.clone())
+                                    .unwrap_or_else(|| "unknown".to_string())
+                            };
+                            let now = chrono::Utc::now();
+                            let record = multilink_core::usage::UsageRecord {
+                                session_id: stream_session.clone(),
+                                model: model_for_record,
+                                prompt_tokens,
+                                completion_tokens,
+                                total_tokens,
+                                is_estimated,
+                                timestamp: now.to_rfc3339(),
+                            };
+                            let _ = chat_runtime.record_usage(record).await;
                         }
                         StreamEvent::Finished => {
                             if let Ok(mut ui) = ui_state.lock() {
@@ -2240,6 +2294,7 @@ fn provider_label(provider: ProviderId) -> &'static str {
         ProviderId::Codex => "Codex",
         ProviderId::DeepSeek => "DeepSeek",
         ProviderId::OpenRouter => "OpenRouter",
+        ProviderId::Qwen => "Qwen",
     }
 }
 
@@ -2330,6 +2385,7 @@ fn kind_to_provider_kind(id: ProviderId) -> ProviderKind {
         ProviderId::Codex => ProviderKind::Codex,
         ProviderId::Ollama => ProviderKind::Ollama,
         ProviderId::OpenRouter => ProviderKind::OpenRouter,
+        ProviderId::Qwen => ProviderKind::Qwen,
     }
 }
 
@@ -2879,6 +2935,109 @@ pub unsafe extern "C" fn chat_backend_save_mcp_config_json(
         backend.chat_runtime.set_mcp_servers(servers_for_runtime);
     }
     saved
+}
+
+// ─── Theme Persistence ───────────────────────────────────────────────
+
+/// Persistir preferencia de tema oscuro en config.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_set_theme_dark(handle: *mut BackendHandle, dark: i32) {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return;
+    };
+    let is_dark = dark != 0;
+    if let Ok(cfg_str) = std::fs::read_to_string(&backend.config_path) {
+        if let Ok(mut config) = toml::from_str::<AppConfig>(&cfg_str) {
+            config.theme_dark = Some(is_dark);
+            if let Ok(serialized) = toml::to_string(&config) {
+                let _ = std::fs::write(&backend.config_path, serialized);
+            }
+        }
+    }
+}
+
+// ─── Usage Summary ───────────────────────────────────────────────────
+
+/// Devolver resumen global de uso de tokens como JSON.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_usage_summary_json(
+    handle: *mut BackendHandle,
+) -> *mut c_char {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    let runtime = backend.runtime.handle().clone();
+    let chat_runtime = backend.chat_runtime.clone();
+
+    let summary = runtime.block_on(async { chat_runtime.usage_summary().await });
+
+    match summary {
+        Ok(s) => {
+            let json = serde_json::json!({
+                "total_prompt_tokens": s.total_prompt_tokens,
+                "total_completion_tokens": s.total_completion_tokens,
+                "total_tokens": s.total_tokens,
+                "session_count": s.session_count,
+                "model_breakdown": s.model_breakdown.iter().map(|m| serde_json::json!({
+                    "model": m.model,
+                    "prompt_tokens": m.prompt_tokens,
+                    "completion_tokens": m.completion_tokens,
+                    "total_tokens": m.total_tokens,
+                    "request_count": m.request_count,
+                })).collect::<Vec<_>>(),
+            });
+            into_c_string(serde_json::to_string(&json).unwrap_or_default())
+        }
+        Err(_) => into_c_string("{}".to_string()),
+    }
+}
+
+/// Devolver resumen de uso de la sesión activa como JSON.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_session_usage_json(
+    handle: *mut BackendHandle,
+) -> *mut c_char {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    let active_session = backend
+        .active_session_id
+        .lock()
+        .map(|v| v.clone())
+        .unwrap_or_default();
+
+    if active_session.is_empty() {
+        return into_c_string("{}".to_string());
+    }
+
+    let runtime = backend.runtime.handle().clone();
+    let chat_runtime = backend.chat_runtime.clone();
+    let session_id = active_session.clone();
+
+    let by_session = runtime.block_on(async { chat_runtime.usage_by_session().await });
+
+    match by_session {
+        Ok(list) => {
+            if let Some((_, summary)) = list.iter().find(|(sid, _)| sid == &session_id) {
+                let json = serde_json::json!({
+                    "session_id": session_id,
+                    "total_prompt_tokens": summary.total_prompt_tokens,
+                    "total_completion_tokens": summary.total_completion_tokens,
+                    "total_tokens": summary.total_tokens,
+                    "model_breakdown": summary.model_breakdown.iter().map(|m| serde_json::json!({
+                        "model": m.model,
+                        "prompt_tokens": m.prompt_tokens,
+                        "completion_tokens": m.completion_tokens,
+                        "total_tokens": m.total_tokens,
+                        "request_count": m.request_count,
+                    })).collect::<Vec<_>>(),
+                });
+                return into_c_string(serde_json::to_string(&json).unwrap_or_default());
+            }
+            into_c_string("{}".to_string())
+        }
+        Err(_) => into_c_string("{}".to_string()),
+    }
 }
 
 #[cfg(test)]

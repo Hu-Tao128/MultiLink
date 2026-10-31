@@ -38,6 +38,7 @@ use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
 use crate::skills::{Skill, SkillLoader, SkillOrchestrator};
 use crate::tools::{create_default_registry_with_engine, ToolExecutor};
+use crate::usage::{UsageRecord, UsageStore};
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -77,6 +78,7 @@ pub struct ChatRuntime {
     system_context_dir: Option<PathBuf>,
     tool_executor: Arc<ToolExecutor>,
     mcp_runtime: Arc<McpRuntime>,
+    usage_store: Arc<UsageStore>,
 }
 
 impl ChatRuntime {
@@ -146,6 +148,7 @@ impl ChatRuntime {
         let tool_executor = Arc::new(
             ToolExecutor::new(Arc::new(tool_registry)).with_mcp_runtime(mcp_runtime.clone()),
         );
+        let usage_store = Arc::new(UsageStore::new(&storage_dir));
 
         Self {
             router: router.clone(),
@@ -164,6 +167,7 @@ impl ChatRuntime {
             system_context_dir,
             tool_executor,
             mcp_runtime,
+            usage_store,
         }
     }
 
@@ -2177,6 +2181,25 @@ impl ChatRuntime {
                     .unwrap_or(0)
             );
         }
+    }
+
+    // ─── Token Usage Persistence ─────────────────────────────────────
+
+    /// Persistir un registro de uso de tokens.
+    pub async fn record_usage(&self, record: UsageRecord) -> Result<(), std::io::Error> {
+        self.usage_store.append(&record)
+    }
+
+    /// Resumen global de uso de tokens.
+    pub async fn usage_summary(&self) -> Result<crate::usage::UsageSummary, std::io::Error> {
+        self.usage_store.summary()
+    }
+
+    /// Resumen de uso por sesión.
+    pub async fn usage_by_session(
+        &self,
+    ) -> Result<Vec<(String, crate::usage::UsageSummary)>, std::io::Error> {
+        self.usage_store.summary_by_session()
     }
 }
 

@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
 import MultiLink 1.0
+import Theme 1.0
 
 Page {
     id: chatPage
@@ -21,19 +22,20 @@ Page {
     property int contextMaxTokens: 4096
     property bool suppressStartupWarning: false
 
-    readonly property color colorBackground: "#F5F6F7"
-    readonly property color colorSurface: "#FFFFFF"
-    readonly property color colorBorder: "#E0E0E0"
-    readonly property color colorTextPrimary: "#1E1E1E"
-    readonly property color colorTextSecondary: "#6B6B6B"
-    readonly property color colorLocal: "#2E7D32"
-    readonly property color colorRemote: "#1565C0"
-    readonly property color colorWarning: "#ED6C02"
-    readonly property color colorError: "#C62828"
+    // Alias para compatibilidad con codigo existente
+    readonly property color colorBackground:      Theme.background
+    readonly property color colorSurface:         Theme.surface
+    readonly property color colorBorder:          Theme.border
+    readonly property color colorTextPrimary:     Theme.textPrimary
+    readonly property color colorTextSecondary:   Theme.textSecondary
+    readonly property color colorLocal:           Theme.accentLocal
+    readonly property color colorRemote:          Theme.accentRemote
+    readonly property color colorWarning:         Theme.accentWarning
+    readonly property color colorError:           Theme.accentError
 
     function currentAccent() {
-        if (!controller) return colorLocal
-        return controller.providerScope === "LOCAL" ? colorLocal : colorRemote
+        if (!controller) return Theme.accentLocal
+        return controller.providerScope === "LOCAL" ? Theme.accentLocal : Theme.accentRemote
     }
 
     function sessionIdAt(index) {
@@ -582,8 +584,8 @@ Page {
                         implicitHeight: bubbleContent.implicitHeight + 14
                         anchors.right: model.role === "user" ? parent.right : undefined
                         anchors.left: model.role === "assistant" ? parent.left : undefined
-                        color: model.role === "user" ? "#E8F5E9" : "#FFFFFF"
-                        border.color: colorBorder
+                        color: model.role === "user" ? Theme.bubbleUser : Theme.bubbleAssistant
+                        border.color: Theme.border
                         radius: 8
 
                         Column {
@@ -622,7 +624,7 @@ Page {
                                             property int headingLevel: Number(segment.level || 2)
                                             property int listIndent: Number(segment.indent || 0)
                                             property string listBullet: String(segment.bullet || "-")
-                                            color: isThinking ? "#455A64" : (isInlineCode ? "#E53935" : (model.role === "user" ? colorTextPrimary : baseColor))
+                                            color: isThinking ? Theme.bubbleThinkingText : (isInlineCode ? "#E53935" : (model.role === "user" ? Theme.textPrimary : baseColor))
                                             text: isListItem
                                                   ? inlineMarkdownToHtml(Array(listIndent + 1).join("  ") + listBullet + " " + String(segment.value || ""))
                                                   : (isThinking
@@ -649,9 +651,9 @@ Page {
                                             font.italic: isItalic || isThinking
                                             background: Rectangle {
                                                 visible: textBlock.isInlineCode || textBlock.isThinking
-                                                color: textBlock.isThinking ? "#ECEFF1" : "#F5F5F5"
+                                                color: textBlock.isThinking ? Theme.bubbleThinking : "#F5F5F5"
                                                 radius: 3
-                                                border.color: textBlock.isThinking ? "#CFD8DC" : "#E0E0E0"
+                                                border.color: textBlock.isThinking ? Theme.border : "#E0E0E0"
                                             }
                                         }
 
@@ -660,11 +662,11 @@ Page {
                                                 visible: segment.kind === "code"
                                                 width: parent.width
                                                 gradient: Gradient {
-                                                    GradientStop { position: 0; color: "#1E2A32" }
-                                                    GradientStop { position: 1; color: "#1F2933" }
+                                                    GradientStop { position: 0; color: Theme.codeBackground }
+                                                    GradientStop { position: 1; color: Theme.codeBackground }
                                                 }
                                                 radius: 8
-                                                border.color: "#3D4F5F"
+                                                border.color: Theme.codeBorder
                                                 implicitHeight: codeHeader.implicitHeight + codeFlick.implicitHeight + 10
 
                                                 Column {
@@ -679,7 +681,7 @@ Page {
                                                             text: segment.language && segment.language.length > 0
                                                                   ? segment.language.toLowerCase()
                                                                   : "text"
-                                                            color: "#61AFEF"
+                                                            color: Theme.codeLanguage
                                                             font.pixelSize: 11
                                                             font.bold: true
                                                             font.family: "Monospace"
@@ -689,12 +691,12 @@ Page {
                                                             width: copyLabel.implicitWidth + 16
                                                             height: copyLabel.implicitHeight + 6
                                                             radius: 4
-                                                            color: copyMa.containsMouse ? "#4A5A6A" : "#2F3E4D"
+                                                            color: copyMa.containsMouse ? Theme.hoverOverlay : Theme.codeBackground
                                                             Label {
                                                             id: copyLabel
                                                             anchors.centerIn: parent
                                                             text: "⎘ Copiar Código"
-                                                            color: "#D8DEE9"
+                                                            color: Theme.codeText
                                                             font.pixelSize: 11
                                                         }
                                                         MouseArea {
@@ -737,7 +739,7 @@ Page {
                                                     TextArea {
                                                         id: codeText
                                                         text: segment.value
-                                                        color: "#D8DEE9"
+                                                        color: Theme.codeText
                                                         font.family: "Monospace"
                                                         font.pixelSize: 13
                                                         wrapMode: TextArea.NoWrap
@@ -762,8 +764,8 @@ Page {
                                     width: 26
                                     height: 22
                                     radius: 4
-                                    color: modelCopyMouse.containsMouse ? "#E0E0E0" : "#F5F5F5"
-                                    border.color: "#D0D0D0"
+                                    color: modelCopyMouse.containsMouse ? Theme.hoverOverlay : Theme.surfaceAlt
+                                    border.color: Theme.border
                                     border.width: 1
 
                                     Label {
