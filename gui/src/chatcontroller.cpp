@@ -63,10 +63,12 @@ void chat_backend_set_theme_dark(void *backend, int dark);
 // Usage stats
 char *chat_backend_usage_summary_json(void *backend);
 char *chat_backend_session_usage_json(void *backend);
-char *chat_backend_list_server_models(void *backend, const char *provider, const char *base_url);
-int chat_backend_save_provider_token(void *backend, const char *provider, const char *token);
-int chat_backend_clear_provider_token(void *backend, const char *provider);
-int chat_backend_has_provider_token(void *backend, const char *provider);
+
+// Token budget
+void chat_backend_set_token_budget(void *backend, size_t budget);
+char *chat_backend_token_budget_json(void *backend);
+
+char *chat_backend_mcp_config_json(void *backend);
 void chat_backend_string_free(char *ptr);
 }
 
@@ -661,6 +663,22 @@ QString ChatController::usageSummaryJson() {
 QString ChatController::sessionUsageJson() {
     if (!m_backend) return "{}";
     char *raw = chat_backend_session_usage_json(m_backend);
+    if (!raw) return "{}";
+    QString result = QString::fromUtf8(raw);
+    std::free(raw);
+    return result;
+}
+
+// ─── Token Budget ────────────────────────────────────────────────────
+
+void ChatController::setTokenBudget(quint64 tokens) {
+    if (!m_backend) return;
+    chat_backend_set_token_budget(m_backend, static_cast<size_t>(tokens));
+}
+
+QString ChatController::tokenBudgetJson() {
+    if (!m_backend) return "{}";
+    char *raw = chat_backend_token_budget_json(m_backend);
     if (!raw) return "{}";
     QString result = QString::fromUtf8(raw);
     std::free(raw);

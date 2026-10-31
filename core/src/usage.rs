@@ -15,6 +15,49 @@ pub struct UsageRecord {
     pub timestamp: String, // ISO 8601
 }
 
+/// Presupuesto de tokens definido por el usuario.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenBudget {
+    /// Pool total de tokens (0 = sin límite)
+    pub total_pool: usize,
+    /// Tokens consumidos (calculado)
+    pub consumed: usize,
+    /// Fecha de inicio del período (ISO 8601)
+    pub period_start: String,
+    /// Fecha de fin del período (ISO 8601, vacío = sin fin)
+    pub period_end: Option<String>,
+}
+
+impl TokenBudget {
+    pub fn new(total_pool: usize) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            total_pool,
+            consumed: 0,
+            period_start: now,
+            period_end: None,
+        }
+    }
+
+    pub fn remaining(&self) -> usize {
+        if self.total_pool == 0 {
+            return usize::MAX; // Sin límite
+        }
+        self.total_pool.saturating_sub(self.consumed)
+    }
+
+    pub fn usage_percent(&self) -> f64 {
+        if self.total_pool == 0 {
+            return 0.0;
+        }
+        (self.consumed as f64 / self.total_pool as f64) * 100.0
+    }
+
+    pub fn is_exceeded(&self) -> bool {
+        self.total_pool > 0 && self.consumed >= self.total_pool
+    }
+}
+
 /// Resumen agregado de uso.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageSummary {

@@ -2956,6 +2956,75 @@ pub unsafe extern "C" fn chat_backend_set_theme_dark(handle: *mut BackendHandle,
     }
 }
 
+// ─── Token Budget ────────────────────────────────────────────────────
+
+/// Establecer presupuesto de tokens en config.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_set_token_budget(handle: *mut BackendHandle, budget: usize) {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return;
+    };
+    if let Ok(cfg_str) = std::fs::read_to_string(&backend.config_path) {
+        if let Ok(mut config) = toml::from_str::<AppConfig>(&cfg_str) {
+            config.token_budget = if budget == 0 { None } else { Some(budget) };
+            if let Ok(serialized) = toml::to_string(&config) {
+                let _ = std::fs::write(&backend.config_path, serialized);
+            }
+        }
+    }
+}
+
+/// Devolver presupuesto de tokens como JSON.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_token_budget_json(
+    handle: *mut BackendHandle,
+) -> *mut c_char {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    let runtime = backend.runtime.handle().clone();
+    let chat_runtime = backend.chat_runtime.clone();
+
+    // Leer presupuesto de config
+    let budget = if let Ok(cfg_str) = std::fs::read_to_string(&backend.config_path) {
+        if let Ok(config) = toml::from_str::<AppConfig>(&cfg_str) {
+            config.token_budget.unwrap_or(0)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    // Leer uso actual
+    let summary = runtime.block_on(async { chat_runtime.usage_summary().await });
+    let consumed = match summary {
+        Ok(s) => s.total_tokens,
+        Err(_) => 0,
+    };
+
+    let remaining = if budget == 0 {
+        -1i64 // Sin límite
+    } else {
+        (budget as i64).saturating_sub(consumed as i64)
+    };
+
+    let percent = if budget == 0 {
+        0.0
+    } else {
+        (consumed as f64 / budget as f64) * 100.0
+    };
+
+    let json = serde_json::json!({
+        "total_pool": budget,
+        "consumed": consumed,
+        "remaining": remaining,
+        "usage_percent": percent.round(),
+        "is_exceeded": budget > 0 && consumed >= budget,
+    });
+    into_c_string(serde_json::to_string(&json).unwrap_or_default())
+}
+
 // ─── Usage Summary ───────────────────────────────────────────────────
 
 /// Devolver resumen global de uso de tokens como JSON.

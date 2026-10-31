@@ -395,6 +395,10 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme_dark: Option<bool>,
 
+    /// Presupuesto de tokens (0 = sin límite).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<usize>,
+
     // legacy v1 fields, kept for migration only
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_provider: Option<String>,
@@ -641,6 +645,7 @@ impl Default for AppConfig {
             validation: ValidationConfig::default(),
             mcp: McpConfig::default(),
             theme_dark: None,
+            token_budget: None,
             preferred_provider: None,
             ollama: None,
         }

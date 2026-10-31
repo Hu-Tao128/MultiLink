@@ -10,6 +10,7 @@ Page {
 
     property var globalUsage: ({})
     property var sessionUsage: ({})
+    property var budgetInfo: ({})
     property bool dataLoaded: false
 
     function loadUsageData() {
@@ -29,6 +30,14 @@ Page {
             sessionUsage = JSON.parse(sessionRaw)
         } catch (e) {
             sessionUsage = {}
+        }
+
+        // Cargar información de presupuesto
+        const budgetRaw = controller.tokenBudgetJson()
+        try {
+            budgetInfo = JSON.parse(budgetRaw)
+        } catch (e) {
+            budgetInfo = {}
         }
 
         dataLoaded = true
@@ -67,6 +76,142 @@ Page {
                 color: Theme.textSecondary
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
+            }
+
+            // ─── Presupuesto / Créditos ──────────────────────────────
+            Frame {
+                Layout.fillWidth: true
+                padding: 14
+                visible: budgetInfo.total_pool > 0
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    spacing: 10
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label {
+                            text: "💳 Presupuesto de Tokens"
+                            font.bold: true
+                            font.pixelSize: 16
+                            color: Theme.textPrimary
+                            Layout.fillWidth: true
+                        }
+                        Label {
+                            text: budgetInfo.is_exceeded ? "⚠️ Excedido" : ""
+                            color: Theme.accentError
+                            font.bold: true
+                            visible: budgetInfo.is_exceeded
+                        }
+                    }
+
+                    // Barra de progreso principal
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: 24
+                        radius: 12
+                        color: Theme.surfaceAlt
+
+                        Rectangle {
+                            height: parent.height
+                            radius: parent.radius
+                            width: {
+                                const pct = Math.min(budgetInfo.usage_percent || 0, 100) / 100
+                                return parent.width * pct
+                            }
+                            color: {
+                                const pct = budgetInfo.usage_percent || 0
+                                if (pct >= 90) return Theme.accentError
+                                if (pct >= 75) return Theme.accentWarning
+                                return Theme.accentLocal
+                            }
+
+                            Label {
+                                anchors.centerIn: parent
+                                text: Math.round(budgetInfo.usage_percent || 0) + "%"
+                                color: "#FFFFFF"
+                                font.bold: true
+                                font.pixelSize: 12
+                            }
+                        }
+                    }
+
+                    // Estadísticas de presupuesto
+                    GridLayout {
+                        columns: 2
+                        columnSpacing: 24
+                        rowSpacing: 8
+                        Layout.fillWidth: true
+
+                        Label { text: "Pool total"; color: Theme.textSecondary }
+                        Label {
+                            text: formatNumber(budgetInfo.total_pool || 0)
+                            font.bold: true
+                            color: Theme.textPrimary
+                        }
+
+                        Label { text: "Consumido"; color: Theme.textSecondary }
+                        Label {
+                            text: formatNumber(budgetInfo.consumed || 0)
+                            font.bold: true
+                            color: budgetInfo.is_exceeded ? Theme.accentError : Theme.accentRemote
+                        }
+
+                        Label { text: "Restante"; color: Theme.textSecondary }
+                        Label {
+                            text: budgetInfo.remaining < 0 ? "∞ Sin límite" : formatNumber(budgetInfo.remaining)
+                            font.bold: true
+                            color: budgetInfo.remaining < 0 ? Theme.textMuted : Theme.accentLocal
+                        }
+                    }
+
+                    // Control para ajustar presupuesto
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Label {
+                            text: "Ajustar límite:"
+                            color: Theme.textSecondary
+                            font.pixelSize: 12
+                        }
+
+                        SpinBox {
+                            id: budgetSpinBox
+                            Layout.preferredWidth: 120
+                            from: 0
+                            to: 10000000
+                            value: budgetInfo.total_pool || 0
+                            stepSize: 10000
+                            editable: true
+
+                            textFromValue: function(value) {
+                                return formatNumber(value)
+                            }
+                        }
+
+                        Button {
+                            text: "Aplicar"
+                            enabled: budgetSpinBox.value !== (budgetInfo.total_pool || 0)
+                            onClicked: {
+                                if (controller) {
+                                    controller.setTokenBudget(budgetSpinBox.value)
+                                    loadUsageData()
+                                }
+                            }
+                        }
+
+                        Button {
+                            text: "Sin límite"
+                            onClicked: {
+                                if (controller) {
+                                    controller.setTokenBudget(0)
+                                    loadUsageData()
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // ─── Resumen Global ───────────────────────────────────────

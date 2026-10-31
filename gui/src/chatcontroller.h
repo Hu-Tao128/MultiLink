@@ -68,6 +68,10 @@ public:
     Q_INVOKABLE QString usageSummaryJson();
     Q_INVOKABLE QString sessionUsageJson();
 
+    // Token budget / credits
+    Q_INVOKABLE void setTokenBudget(quint64 tokens);
+    Q_INVOKABLE QString tokenBudgetJson();
+
     void refreshSnapshot();
     void refreshCollections();
     void handleStreamFinishedState();
