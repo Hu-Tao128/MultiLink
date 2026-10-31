@@ -48,10 +48,21 @@ void chat_backend_clear_startup_notice(void *backend);
 bool chat_backend_set_missing_ollama_notice_suppressed(void *backend, bool suppressed);
 char *chat_backend_servers_config_json(void *backend);
 bool chat_backend_save_servers_config_json(void *backend, const char *servers_json);
-char *chat_backend_mcp_config_json(void *backend);
-bool chat_backend_save_mcp_config_json(void *backend, const char *mcp_json);
 char *chat_backend_test_server_connection(void *backend, const char *base_url);
 char *chat_backend_test_provider_key(void *backend, const char *provider, const char *token);
+char *chat_backend_list_server_models(void *backend, const char *provider, const char *base_url);
+bool chat_backend_save_provider_token(void *backend, const char *provider, const char *token);
+bool chat_backend_clear_provider_token(void *backend, const char *provider);
+bool chat_backend_has_provider_token(void *backend, const char *provider);
+char *chat_backend_mcp_config_json(void *backend);
+bool chat_backend_save_mcp_config_json(void *backend, const char *json);
+
+// Theme
+void chat_backend_set_theme_dark(void *backend, int dark);
+
+// Usage stats
+char *chat_backend_usage_summary_json(void *backend);
+char *chat_backend_session_usage_json(void *backend);
 char *chat_backend_list_server_models(void *backend, const char *provider, const char *base_url);
 int chat_backend_save_provider_token(void *backend, const char *provider, const char *token);
 int chat_backend_clear_provider_token(void *backend, const char *provider);
@@ -627,4 +638,31 @@ QString ChatController::projectRootForSession(const QString &sessionId) const {
     }
 
     return QString();
+}
+
+// ─── Theme ───────────────────────────────────────────────────────────
+
+void ChatController::setThemeDark(bool dark) {
+    if (!m_backend) return;
+    chat_backend_set_theme_dark(m_backend, dark ? 1 : 0);
+}
+
+// ─── Usage Stats ─────────────────────────────────────────────────────
+
+QString ChatController::usageSummaryJson() {
+    if (!m_backend) return "{}";
+    char *raw = chat_backend_usage_summary_json(m_backend);
+    if (!raw) return "{}";
+    QString result = QString::fromUtf8(raw);
+    std::free(raw);
+    return result;
+}
+
+QString ChatController::sessionUsageJson() {
+    if (!m_backend) return "{}";
+    char *raw = chat_backend_session_usage_json(m_backend);
+    if (!raw) return "{}";
+    QString result = QString::fromUtf8(raw);
+    std::free(raw);
+    return result;
 }

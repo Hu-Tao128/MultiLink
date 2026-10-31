@@ -61,6 +61,13 @@ public:
     Q_INVOKABLE QString mcpConfigJson();
     Q_INVOKABLE bool saveMcpConfigJson(const QString &json);
 
+    // Theme
+    Q_INVOKABLE void setThemeDark(bool dark);
+
+    // Usage stats
+    Q_INVOKABLE QString usageSummaryJson();
+    Q_INVOKABLE QString sessionUsageJson();
+
     void refreshSnapshot();
     void refreshCollections();
     void handleStreamFinishedState();
