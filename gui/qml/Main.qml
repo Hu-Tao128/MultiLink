@@ -70,9 +70,21 @@ ApplicationWindow {
             TabBar {
                 id: topTabs
                 currentIndex: pages.currentIndex
-                TabButton { text: "Chat" }
-                TabButton { text: "Opciones" }
-                TabButton { text: "Stats" }
+                Layout.minimumWidth: implicitWidth
+                TabButton {
+                    text: "Chat"
+                    implicitWidth: 64
+                }
+                TabButton {
+                    text: "Opciones"
+                    implicitWidth: 110
+                    leftPadding: 16
+                    rightPadding: 16
+                }
+                TabButton {
+                    text: "Stats"
+                    implicitWidth: 64
+                }
             }
         }
     }

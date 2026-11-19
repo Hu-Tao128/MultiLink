@@ -174,6 +174,7 @@ impl ChatBridge {
                                 callbacks.on_error(&message);
                                 callbacks.on_loading_changed(false);
                             }
+                            _ => {}
                         }
                     }
                 }

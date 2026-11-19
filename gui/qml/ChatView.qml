@@ -43,6 +43,241 @@ Page {
     property int contextMaxTokens: 4096
     property bool suppressStartupWarning: false
 
+    // Composer: attachments + @file completion + live telemetry
+    property var pendingImages: []
+    property var pendingContextFiles: []
+    property var pendingWriteOps: []
+    property var projectFiles: []
+    property var mentionResults: []
+    property bool mentionOpen: false
+    property int mentionIndex: 0
+    property string mentionQuery: ""
+    property var liveExecutorStatus: ({ tool: "", file: "", validation: "" })
+    property int contextEstimatedTokens: 0
+    property int contextNumCtx: 0
+
+    onMentionQueryChanged: refreshMentionResults()
+    onProjectFilesChanged: refreshMentionResults()
+
+    function formatTokenCount(value) {
+        const n = Math.max(0, Math.round(Number(value) || 0))
+        return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+    }
+
+    function imageSource(pathValue) {
+        const raw = String(pathValue || "")
+        if (raw.length === 0) {
+            return ""
+        }
+        if (raw.startsWith("file:")) {
+            return raw
+        }
+        const normalized = raw.replace(/\\/g, "/")
+        return normalized.startsWith("/") ? "file://" + normalized : "file:///" + normalized
+    }
+
+    function addPendingImage(pathValue) {
+        const path = String(pathValue || "")
+        if (path.length === 0) {
+            return
+        }
+        const extension = path.split(".").pop().toLowerCase()
+        if (["png", "jpg", "jpeg", "webp"].indexOf(extension) < 0) {
+            return
+        }
+        if (pendingImages.some(entry => entry.path === path)) {
+            return
+        }
+        const next = pendingImages.slice()
+        const parts = path.split(/[\\/]/)
+        next.push({
+            path: path,
+            sourceUrl: imageSource(path),
+            name: parts.length > 0 ? parts[parts.length - 1] : path
+        })
+        pendingImages = next
+    }
+
+    function removePendingImage(targetIndex) {
+        if (targetIndex < 0 || targetIndex >= pendingImages.length) {
+            return
+        }
+        const next = pendingImages.slice()
+        next.splice(targetIndex, 1)
+        pendingImages = next
+    }
+
+    function refreshProjectFiles() {
+        if (!controller) {
+            projectFiles = []
+            return
+        }
+        const sessionId = currentViewSessionId()
+        const files = sessionId.length > 0
+            ? controller.listProjectFiles(sessionId)
+            : controller.listProjectFilesForActiveSession()
+        projectFiles = files ? files : []
+    }
+
+    function refreshMentionResults() {
+        const query = String(mentionQuery || "").toLowerCase()
+        const source = projectFiles || []
+        const results = []
+        for (let i = 0; i < source.length && results.length < 8; i += 1) {
+            const file = String(source[i] || "")
+            if (query.length === 0 || file.toLowerCase().indexOf(query) >= 0) {
+                results.push(file)
+            }
+        }
+        mentionResults = results
+        if (mentionIndex >= results.length) {
+            mentionIndex = Math.max(0, results.length - 1)
+        }
+    }
+
+    function updateMentionFromInput() {
+        if (!promptInput) {
+            return
+        }
+        const text = promptInput.text
+        const cursor = promptInput.cursorPosition
+        const before = text.substring(0, cursor)
+        const at = before.lastIndexOf("@")
+        if (at < 0) {
+            mentionOpen = false
+            mentionQuery = ""
+            return
+        }
+        const token = before.substring(at + 1)
+        if (token.indexOf(" ") >= 0 || token.indexOf("\n") >= 0 || token.indexOf("\t") >= 0) {
+            mentionOpen = false
+            mentionQuery = ""
+            return
+        }
+        const opening = !mentionOpen
+        if (opening) {
+            refreshProjectFiles()
+            mentionIndex = 0
+        }
+        mentionQuery = token
+        mentionOpen = true
+        refreshMentionResults()
+    }
+
+    function acceptMention(targetIndex) {
+        if (targetIndex < 0 || targetIndex >= mentionResults.length) {
+            return
+        }
+        const path = String(mentionResults[targetIndex])
+        const text = promptInput.text
+        const cursor = promptInput.cursorPosition
+        const before = text.substring(0, cursor)
+        const at = before.lastIndexOf("@")
+        if (at < 0) {
+            mentionOpen = false
+            return
+        }
+        const after = text.substring(cursor)
+        const insertion = "@" + path + " "
+        promptInput.text = text.substring(0, at) + insertion + after
+        promptInput.cursorPosition = at + insertion.length
+        mentionOpen = false
+        mentionQuery = ""
+    }
+
+    function recordExecutorStatus(tool, file, validation) {
+        const toolName = String(tool || "")
+        const fileName = String(file || "")
+        const validationText = String(validation || "")
+        liveExecutorStatus = { tool: toolName, file: fileName, validation: validationText }
+
+        const isWrite = toolName === "write_file" || toolName === "apply_patch"
+        if (!isWrite && toolName !== "auto_validate" && toolName !== "run_command") {
+            return
+        }
+
+        let ops = (pendingWriteOps || []).slice()
+        if (isWrite) {
+            const existing = ops.findIndex(op => op.tool === toolName && op.file === fileName)
+            const previousValidation = existing >= 0 ? String(ops[existing].validation || "") : ""
+            const entry = {
+                tool: toolName,
+                file: fileName,
+                toolStatus: validationText,
+                validation: previousValidation
+            }
+            if (existing >= 0) {
+                ops[existing] = entry
+            } else {
+                ops.push(entry)
+            }
+        } else if (toolName === "auto_validate") {
+            for (let i = ops.length - 1; i >= 0; i -= 1) {
+                if (ops[i].tool === "write_file" || ops[i].tool === "apply_patch") {
+                    ops[i] = {
+                        tool: ops[i].tool,
+                        file: ops[i].file,
+                        toolStatus: ops[i].toolStatus || "",
+                        validation: validationText.length > 0 ? validationText : (ops[i].validation || "")
+                    }
+                    break
+                }
+            }
+        } else if (toolName === "run_command") {
+            for (let i = ops.length - 1; i >= 0; i -= 1) {
+                const isWriteOp = ops[i].tool === "write_file" || ops[i].tool === "apply_patch"
+                if (isWriteOp && String(ops[i].validation || "").startsWith("running:")) {
+                    ops[i] = {
+                        tool: ops[i].tool,
+                        file: ops[i].file,
+                        toolStatus: ops[i].toolStatus || "",
+                        validation: validationText
+                    }
+                    break
+                }
+            }
+        }
+        pendingWriteOps = ops
+    }
+
+    function validationColor(value) {
+        const text = String(value || "").toLowerCase()
+        if (text.length === 0) {
+            return colorTextSecondary
+        }
+        if (text.indexOf("running:") === 0) {
+            return colorWarning
+        }
+        if (text === "success" || text.indexOf("ok") === 0) {
+            return colorLocal
+        }
+        return colorError
+    }
+
+    function validationLabel(value) {
+        const text = String(value || "")
+        if (text.length === 0) {
+            return "Sin validación automática"
+        }
+        if (text.indexOf("running:") === 0) {
+            return "Validando " + text.substring("running:".length).trim()
+        }
+        if (text === "success") {
+            return "Validación OK"
+        }
+        return "Validación: " + text
+    }
+
+    function resetComposerTransients() {
+        pendingImages = []
+        pendingContextFiles = []
+        pendingWriteOps = []
+        liveExecutorStatus = { tool: "", file: "", validation: "" }
+        mentionOpen = false
+        mentionQuery = ""
+        mentionResults = []
+    }
+
     function currentAccent() {
         if (!controller) return colorLocal
         return controller.providerScope === "LOCAL" ? colorLocal : colorRemote
@@ -354,6 +589,9 @@ Page {
             return
         }
         pendingAssistantText = ""
+        resetComposerTransients()
+        contextEstimatedTokens = 0
+        contextNumCtx = 0
         messageModel.clear()
         controller.selectSessionAtIndex(index)
     }
@@ -386,6 +624,19 @@ Page {
         currentFolder: "file:///"
         onAccepted: {
             controller.setSelectedSessionProjectRoot(urlToLocalPath(selectedFolder))
+        }
+    }
+
+    FileDialog {
+        id: imagePickerDialog
+        title: "Adjuntar imágenes"
+        fileMode: FileDialog.OpenFiles
+        nameFilters: ["Imágenes (*.png *.jpg *.jpeg *.webp)"]
+        onAccepted: {
+            const files = selectedFiles || []
+            for (let i = 0; i < files.length; i += 1) {
+                chatPage.addPendingImage(chatPage.urlToLocalPath(files[i]))
+            }
         }
     }
 
@@ -509,6 +760,17 @@ Page {
 
         RowLayout {
             Layout.fillWidth: true
+            Label {
+                text: "🗂 Sesión"
+                color: colorTextSecondary
+                font.pixelSize: 12
+                font.bold: true
+                ToolTip.visible: sessionHover.hovered
+                ToolTip.text: "Sesiones del proyecto (distinto del modelo activo)"
+                HoverHandler {
+                    id: sessionHover
+                }
+            }
             ComboBox {
                 id: sessionBox
                 textRole: "title"
@@ -603,6 +865,55 @@ Page {
                             anchors.fill: parent
                             anchors.margins: 7
                             spacing: 6
+
+                            Rectangle {
+                                width: parent.width
+                                height: visible ? contextColumn.implicitHeight + 10 : 0
+                                visible: model.role === "assistant" && (model.contextFiles || []).length > 0
+                                radius: 5
+                                color: Theme.surfaceAlt
+                                border.color: Theme.border
+
+                                Column {
+                                    id: contextColumn
+                                    anchors.fill: parent
+                                    anchors.margins: 5
+                                    spacing: 2
+
+                                    RowLayout {
+                                        width: parent.width
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: "📚 Contexto usado (" + ((model.contextFiles || []).length) + ")"
+                                            color: Theme.textSecondary
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                        }
+                                        Label {
+                                            text: model.contextExpanded === true ? "▾" : "▸"
+                                            color: Theme.textSecondary
+                                            font.pixelSize: 11
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: messageModel.setProperty(index, "contextExpanded", !(model.contextExpanded === true))
+                                        }
+                                    }
+
+                                    Repeater {
+                                        model: model.contextExpanded === true ? (model.contextFiles || []) : []
+                                        delegate: Label {
+                                            required property var modelData
+                                            width: contextColumn.width
+                                            text: "• " + modelData
+                                            color: Theme.textSecondary
+                                            font.pixelSize: 11
+                                            elide: Text.ElideMiddle
+                                        }
+                                    }
+                                }
+                            }
 
                             Column {
                                 id: segmentColumn
@@ -765,6 +1076,99 @@ Page {
                                 }
                             }
 
+
+                            Rectangle {
+                                width: parent.width
+                                height: visible ? operationsColumn.implicitHeight + 10 : 0
+                                visible: model.role === "assistant" && (model.writeOps || []).length > 0
+                                radius: 5
+                                color: Theme.surfaceAlt
+                                border.color: Theme.border
+
+                                Column {
+                                    id: operationsColumn
+                                    anchors.fill: parent
+                                    anchors.margins: 5
+                                    spacing: 4
+
+                                    RowLayout {
+                                        width: parent.width
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: "🔧 Operaciones (" + ((model.writeOps || []).length) + ")"
+                                                  + (((model.writeOps || []).length > 0)
+                                                     ? " · " + model.writeOps[0].tool + " " + (model.writeOps[0].file || "")
+                                                     : "")
+                                            color: Theme.textSecondary
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                        }
+                                        Label {
+                                            text: model.writeExpanded === true ? "▾" : "▸"
+                                            color: Theme.textSecondary
+                                            font.pixelSize: 11
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: messageModel.setProperty(index, "writeExpanded", !(model.writeExpanded === true))
+                                        }
+                                    }
+
+                                    Repeater {
+                                        model: model.writeExpanded === true ? (model.writeOps || []) : []
+                                        delegate: Column {
+                                            required property var modelData
+                                            width: operationsColumn.width
+                                            spacing: 2
+
+                                            Label {
+                                                width: parent.width
+                                                text: "• " + modelData.tool + " · " + (modelData.file && modelData.file.length > 0 ? modelData.file : "(sin archivo)")
+                                                color: Theme.textPrimary
+                                                font.pixelSize: 11
+                                                font.bold: true
+                                                elide: Text.ElideMiddle
+                                            }
+
+                                            Rectangle {
+                                                width: parent.width
+                                                height: previewLabel.implicitHeight + 6
+                                                radius: 3
+                                                color: Theme.codeBackground
+                                                Label {
+                                                    id: previewLabel
+                                                    anchors.fill: parent
+                                                    anchors.margins: 4
+                                                    text: "path: " + (modelData.file && modelData.file.length > 0 ? modelData.file : "-")
+                                                        + "\ntool: " + (modelData.toolStatus && modelData.toolStatus.length > 0 ? modelData.toolStatus : "running")
+                                                        + "\nvalidation: " + (modelData.validation && modelData.validation.length > 0 ? modelData.validation : "not run")
+                                                    color: Theme.codeText
+                                                    font.family: "Monospace"
+                                                    font.pixelSize: 10
+                                                    wrapMode: Text.WrapAnywhere
+                                                }
+                                            }
+
+                                            Label {
+                                                width: parent.width
+                                                text: "Herramienta: " + (modelData.toolStatus && modelData.toolStatus.length > 0 ? modelData.toolStatus : "en ejecución")
+                                                color: chatPage.validationColor(modelData.toolStatus)
+                                                font.pixelSize: 11
+                                            }
+
+                                            Label {
+                                                width: parent.width
+                                                text: chatPage.validationLabel(modelData.validation)
+                                                color: chatPage.validationColor(modelData.validation)
+                                                font.pixelSize: 11
+                                                font.bold: modelData.validation === "success"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             Row {
                                 width: parent.width
                                 visible: model.role === "assistant"
@@ -847,6 +1251,89 @@ Page {
 
         RowLayout {
             Layout.fillWidth: true
+            visible: chatPage.pendingImages.length > 0
+            spacing: 8
+
+            Label {
+                text: "Adjuntos:"
+                color: colorTextSecondary
+                font.pixelSize: 11
+            }
+
+            Row {
+                spacing: 6
+                Repeater {
+                    model: chatPage.pendingImages
+                    delegate: Rectangle {
+                        required property var modelData
+                        required property int index
+                        width: 54
+                        height: 54
+                        radius: 5
+                        color: Theme.surfaceAlt
+                        border.color: Theme.border
+
+                        Image {
+                            anchors.fill: parent
+                            anchors.margins: 2
+                            source: modelData.sourceUrl || ""
+                            fillMode: Image.PreserveAspectCrop
+                            asynchronous: true
+                            cache: false
+                        }
+
+                        Rectangle {
+                            width: 16
+                            height: 16
+                            radius: 8
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.rightMargin: -4
+                            anchors.topMargin: -4
+                            color: colorError
+                            Label {
+                                anchors.centerIn: parent
+                                text: "×"
+                                color: "white"
+                                font.pixelSize: 12
+                                font.bold: true
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: chatPage.removePendingImage(index)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            height: visible ? 28 : 0
+            visible: chatPage.liveExecutorStatus.tool.length > 0 && controller && controller.isLoading
+            radius: 5
+            color: Theme.surfaceAlt
+            border.color: Theme.border
+
+            Label {
+                anchors.fill: parent
+                anchors.margins: 6
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideRight
+                color: colorTextSecondary
+                font.pixelSize: 11
+                text: "🔧 " + chatPage.liveExecutorStatus.tool
+                      + (chatPage.liveExecutorStatus.file.length > 0 ? " → " + chatPage.liveExecutorStatus.file : "")
+                      + (chatPage.liveExecutorStatus.validation.length > 0 ? "  ·  " + chatPage.liveExecutorStatus.validation : "")
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
             ComboBox {
                 id: providerModelBox
                 model: filteredModelsModel
@@ -870,25 +1357,100 @@ Page {
                 }
             }
 
+            Button {
+                id: attachImageButton
+                text: "📎"
+                enabled: !isStreamingActiveScope()
+                ToolTip.visible: attachImageHover.hovered
+                ToolTip.text: "Adjuntar imagen (PNG/JPG/WEBP)"
+                onClicked: imagePickerDialog.open()
+                HoverHandler {
+                    id: attachImageHover
+                }
+            }
+
             TextField {
                 id: promptInput
                 Layout.fillWidth: true
                 Layout.minimumWidth: 80
-                placeholderText: "Escribe tu mensaje..."
+                placeholderText: "Escribe tu mensaje...  (@ para archivos)"
                 enabled: !isStreamingActiveScope()
                 onAccepted: sendButton.clicked()
+                onTextChanged: chatPage.updateMentionFromInput()
+                onCursorPositionChanged: chatPage.updateMentionFromInput()
+                onActiveFocusChanged: {
+                    if (!activeFocus) {
+                        chatPage.mentionOpen = false
+                    }
+                }
+                Keys.onPressed: (event) => {
+                    const isPaste = event.key === Qt.Key_V
+                        && (event.modifiers & (Qt.ControlModifier | Qt.MetaModifier))
+                    if (isPaste) {
+                        const path = controller ? controller.saveClipboardImageToTemp() : ""
+                        if (path && path.length > 0) {
+                            chatPage.addPendingImage(path)
+                            event.accepted = true
+                            return
+                        }
+                    }
+
+                    if (!chatPage.mentionOpen) {
+                        return
+                    }
+
+                    if (event.key === Qt.Key_Down) {
+                        chatPage.mentionIndex = Math.min(chatPage.mentionIndex + 1, chatPage.mentionResults.length - 1)
+                        event.accepted = true
+                        return
+                    }
+                    if (event.key === Qt.Key_Up) {
+                        chatPage.mentionIndex = Math.max(chatPage.mentionIndex - 1, 0)
+                        event.accepted = true
+                        return
+                    }
+                    if (event.key === Qt.Key_Escape) {
+                        chatPage.mentionOpen = false
+                        event.accepted = true
+                        return
+                    }
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Tab) {
+                        chatPage.acceptMention(chatPage.mentionIndex)
+                        event.accepted = true
+                    }
+                }
+            }
+
+            Label {
+                id: tokenCounter
+                text: chatPage.formatTokenCount(chatPage.contextEstimatedTokens)
+                      + " / "
+                      + chatPage.formatTokenCount(chatPage.contextNumCtx > 0 ? chatPage.contextNumCtx : chatPage.contextMaxTokens)
+                color: (chatPage.contextNumCtx > 0 && chatPage.contextEstimatedTokens > chatPage.contextNumCtx * 0.9)
+                       ? colorWarning
+                       : colorTextSecondary
+                font.pixelSize: 11
+                font.family: "Monospace"
+                ToolTip.visible: tokenCounterHover.hovered
+                ToolTip.text: "Tokens estimados frente al num_ctx configurado"
+                HoverHandler {
+                    id: tokenCounterHover
+                }
             }
 
             Button {
                 id: sendButton
                 text: "Enviar"
-                enabled: !isStreamingActiveScope() && !pendingSelectNewestSession
+                enabled: !isStreamingActiveScope()
+                         && !pendingSelectNewestSession
+                         && (promptInput.text.trim().length > 0 || chatPage.pendingImages.length > 0)
                 onClicked: {
                     if (pendingSelectNewestSession) {
                         return
                     }
                     const prompt = promptInput.text.trim()
-                    if (prompt.length === 0) {
+                    const imagePaths = chatPage.pendingImages.map(entry => entry.path)
+                    if (prompt.length === 0 && imagePaths.length === 0) {
                         return
                     }
                     const viewSessionId = currentViewSessionId()
@@ -898,11 +1460,26 @@ Page {
                     if (controller.selectedSessionId !== viewSessionId) {
                         controller.selectSession(viewSessionId)
                     }
-                    messageModel.append({ role: "user", text: prompt })
+
+                    const outboundPrompt = prompt.length > 0 ? prompt : "Describe la imagen adjunta."
+                    messageModel.append({
+                        role: "user",
+                        text: prompt.length > 0 ? prompt : "(imagen adjunta)",
+                        contextFiles: [],
+                        contextExpanded: false,
+                        writeOps: [],
+                        writeExpanded: false
+                    })
                     scrollToBottom()
                     promptInput.text = ""
                     pendingAssistantText = ""
-                    controller.sendPromptForSession(viewSessionId, prompt)
+
+                    if (imagePaths.length > 0) {
+                        controller.sendPromptForSessionWithImages(viewSessionId, outboundPrompt, imagePaths)
+                    } else {
+                        controller.sendPromptForSession(viewSessionId, outboundPrompt)
+                    }
+                    resetComposerTransients()
                 }
             }
 
@@ -920,6 +1497,69 @@ Page {
         }
     }
 
+    Rectangle {
+        id: mentionPopup
+        visible: chatPage.mentionOpen && chatPage.mentionResults.length > 0
+        z: 20
+        width: Math.min(420, chatPage.width - 32)
+        height: Math.min(260, Math.max(36, mentionList.contentHeight + 8))
+        radius: 6
+        color: Theme.surface
+        border.color: Theme.border
+        border.width: 1
+        x: {
+            if (!promptInput) {
+                return 16
+            }
+            const reference = mentionPopup.parent ? mentionPopup.parent : chatPage
+            const point = promptInput.mapToItem(reference, 0, 0)
+            return Math.max(12, Math.min(chatPage.width - width - 12, point.x))
+        }
+        y: {
+            if (!promptInput) {
+                return 120
+            }
+            const reference = mentionPopup.parent ? mentionPopup.parent : chatPage
+            const point = promptInput.mapToItem(reference, 0, 0)
+            return Math.max(12, point.y - height - 6)
+        }
+
+        ListView {
+            id: mentionList
+            anchors.fill: parent
+            anchors.margins: 4
+            clip: true
+            model: chatPage.mentionResults
+            currentIndex: chatPage.mentionIndex
+            delegate: Rectangle {
+                required property var modelData
+                required property int index
+                width: mentionList.width
+                height: 28
+                radius: 4
+                color: index === chatPage.mentionIndex ? Theme.hoverOverlay : "transparent"
+
+                Label {
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    verticalAlignment: Text.AlignVCenter
+                    text: "@" + modelData
+                    color: Theme.textPrimary
+                    font.pixelSize: 12
+                    elide: Text.ElideMiddle
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onEntered: chatPage.mentionIndex = index
+                    onClicked: chatPage.acceptMention(index)
+                }
+            }
+        }
+    }
+
     Connections {
         target: controller
         function onStreamStarted(sessionId) {
@@ -927,10 +1567,21 @@ Page {
                 return
             }
             pendingAssistantText = ""
-            if (currentAssistantDraftIndex() < 0) {
-                messageModel.append({ role: "assistant", text: "", isStreaming: true })
+            const draftIndex = currentAssistantDraftIndex()
+            if (draftIndex < 0) {
+                messageModel.append({
+                    role: "assistant",
+                    text: "",
+                    isStreaming: true,
+                    contextFiles: chatPage.pendingContextFiles,
+                    contextExpanded: false,
+                    writeOps: chatPage.pendingWriteOps,
+                    writeExpanded: false
+                })
             } else {
-                messageModel.setProperty(currentAssistantDraftIndex(), "isStreaming", true)
+                messageModel.setProperty(draftIndex, "isStreaming", true)
+                messageModel.setProperty(draftIndex, "contextFiles", chatPage.pendingContextFiles)
+                messageModel.setProperty(draftIndex, "writeOps", chatPage.pendingWriteOps)
             }
             scrollToBottom()
         }
@@ -940,7 +1591,15 @@ Page {
             }
             let draftIndex = currentAssistantDraftIndex()
             if (draftIndex < 0) {
-                messageModel.append({ role: "assistant", text: "", isStreaming: true })
+                messageModel.append({
+                    role: "assistant",
+                    text: "",
+                    isStreaming: true,
+                    contextFiles: chatPage.pendingContextFiles,
+                    contextExpanded: false,
+                    writeOps: chatPage.pendingWriteOps,
+                    writeExpanded: false
+                })
                 draftIndex = currentAssistantDraftIndex()
                 pendingAssistantText = ""
             }
@@ -969,7 +1628,15 @@ Page {
             if (sessionId !== currentViewSessionId()) {
                 return
             }
-            messageModel.append({ role: "assistant", text: "Error: " + message })
+            messageModel.append({
+                role: "assistant",
+                text: "Error: " + message,
+                isStreaming: false,
+                contextFiles: chatPage.pendingContextFiles,
+                contextExpanded: false,
+                writeOps: chatPage.pendingWriteOps,
+                writeExpanded: false
+            })
             scrollToBottom()
         }
         function onMessagesHydrated(messages) {
@@ -977,10 +1644,20 @@ Page {
             for (let i = 0; i < messages.length; i += 1) {
                 messageModel.append({
                     role: messages[i].role,
-                    text: messages[i].text
+                    text: messages[i].text,
+                    isStreaming: false,
+                    contextFiles: [],
+                    contextExpanded: false,
+                    writeOps: [],
+                    writeExpanded: false
                 })
             }
             scrollToBottom()
+        }
+        function onSelectedSessionIdChanged() {
+            chatPage.resetComposerTransients()
+            chatPage.contextEstimatedTokens = 0
+            chatPage.contextNumCtx = 0
         }
         function onSessionsChanged() {
             if (!controller || controller.sessions.length === 0) {
@@ -1008,6 +1685,33 @@ Page {
             if (!modelSelectorInitializing) {
                 rebuildModelChoices()
             }
+        }
+        function onContextFilesUpdated(sessionId, files) {
+            if (sessionId !== currentViewSessionId()) {
+                return
+            }
+            chatPage.pendingContextFiles = files ? files : []
+            const draftIndex = currentAssistantDraftIndex()
+            if (draftIndex >= 0 && messageModel.get(draftIndex).isStreaming === true) {
+                messageModel.setProperty(draftIndex, "contextFiles", chatPage.pendingContextFiles)
+            }
+        }
+        function onExecutorStatusUpdated(sessionId, tool, file, validationResult) {
+            if (sessionId !== currentViewSessionId()) {
+                return
+            }
+            chatPage.recordExecutorStatus(tool, file, validationResult)
+            const draftIndex = currentAssistantDraftIndex()
+            if (draftIndex >= 0 && messageModel.get(draftIndex).isStreaming === true) {
+                messageModel.setProperty(draftIndex, "writeOps", chatPage.pendingWriteOps)
+            }
+        }
+        function onTokenBudgetUpdated(sessionId, estimatedTokens, numCtx) {
+            if (sessionId !== currentViewSessionId()) {
+                return
+            }
+            chatPage.contextEstimatedTokens = estimatedTokens
+            chatPage.contextNumCtx = numCtx
         }
         function onTokenUsageUpdated(sessionId, promptTokens, completionTokens, totalTokens, isEstimated) {
             if (sessionId !== currentViewSessionId()) {

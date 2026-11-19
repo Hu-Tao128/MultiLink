@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QStringList>
 #include <QVariantList>
 
 class ChatController : public QObject {
@@ -35,6 +36,11 @@ public:
 
     Q_INVOKABLE void sendPrompt(const QString &text);
     Q_INVOKABLE void sendPromptForSession(const QString &sessionId, const QString &text);
+    Q_INVOKABLE QString saveClipboardImageToTemp();
+    Q_INVOKABLE void sendPromptWithImages(const QString &text, const QStringList &imagePaths);
+    Q_INVOKABLE void sendPromptForSessionWithImages(const QString &sessionId,
+                                                    const QString &text,
+                                                    const QStringList &imagePaths);
     Q_INVOKABLE void stopGeneration();
     Q_INVOKABLE void newSession();
     Q_INVOKABLE void selectSession(const QString &id);
@@ -61,6 +67,10 @@ public:
     Q_INVOKABLE QString mcpConfigJson();
     Q_INVOKABLE bool saveMcpConfigJson(const QString &json);
 
+    // @file autocompletion: relative paths in the current ProjectSnapshot.
+    Q_INVOKABLE QStringList listProjectFiles(const QString &sessionId);
+    Q_INVOKABLE QStringList listProjectFilesForActiveSession();
+
     // Theme
     Q_INVOKABLE void setThemeDark(bool dark);
 
@@ -86,6 +96,10 @@ signals:
     void streamFinished(const QString &sessionId);
     void streamError(const QString &sessionId, const QString &message);
     void tokenUsageUpdated(const QString &sessionId, int promptTokens, int completionTokens, int totalTokens, bool isEstimated);
+    void contextFilesUpdated(const QString &sessionId, const QVariantList &files);
+    void executorStatusUpdated(const QString &sessionId, const QString &tool, const QString &file,
+                               const QString &validationResult);
+    void tokenBudgetUpdated(const QString &sessionId, int estimatedTokens, int numCtx);
 
     void activeProviderChanged();
     void activeModelChanged();

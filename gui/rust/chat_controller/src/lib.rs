@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use multilink_core::auth::TokenStore;
 use multilink_core::config::ServerConfig;
 use multilink_core::providers::codex::CodexProvider;
@@ -26,6 +27,7 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(2);
 type SessionCallback = extern "C" fn(*mut c_void, *const c_char);
 type SessionStringCallback = extern "C" fn(*mut c_void, *const c_char, *const c_char);
 type SessionUsageCallback = extern "C" fn(*mut c_void, *const c_char, usize, usize, usize, bool);
+type SessionTokenBudgetCallback = extern "C" fn(*mut c_void, *const c_char, usize, usize);
 type StringCallback = extern "C" fn(*mut c_void, *const c_char);
 
 #[repr(C)]
@@ -39,6 +41,9 @@ pub struct BackendCallbacks {
     pub on_sessions_updated: Option<StringCallback>,
     pub on_models_updated: Option<StringCallback>,
     pub on_messages_updated: Option<StringCallback>,
+    pub on_context_files: Option<SessionStringCallback>,
+    pub on_executor_status: Option<SessionStringCallback>,
+    pub on_token_budget: Option<SessionTokenBudgetCallback>,
 }
 
 #[derive(Clone)]
@@ -240,9 +245,7 @@ pub extern "C" fn chat_backend_create(
         .map(|server| server.default_model.clone())
         .filter(|model| !model.trim().is_empty())
         .unwrap_or_else(|| "qwen-plus".to_string());
-    if let Ok(qwen) =
-        QwenProvider::new(qwen_base_url, qwen_api_key, qwen_model, 0)
-    {
+    if let Ok(qwen) = QwenProvider::new(qwen_base_url, qwen_api_key, qwen_model, 0) {
         router.register(Arc::new(qwen));
     }
 
@@ -379,6 +382,7 @@ pub unsafe extern "C" fn chat_backend_send_prompt(handle: *mut BackendHandle, te
         backend.ui_state.clone(),
         active_session,
         prompt,
+        None,
     );
 }
 
@@ -419,7 +423,139 @@ pub unsafe extern "C" fn chat_backend_send_prompt_for_session(
         backend.ui_state.clone(),
         target_session,
         prompt,
+        None,
     );
+}
+
+fn parse_image_paths(raw: Option<String>) -> Vec<String> {
+    raw.and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+        .unwrap_or_default()
+}
+
+fn encode_image_files(paths: &[String]) -> Result<Vec<String>, String> {
+    paths
+        .iter()
+        .map(|path| {
+            let bytes = std::fs::read(path)
+                .map_err(|err| format!("Could not read image '{path}': {err}"))?;
+            Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+        })
+        .collect()
+}
+
+fn dispatch_prompt(
+    backend: &BackendHandle,
+    session_id: String,
+    prompt: String,
+    image_paths: Option<Vec<String>>,
+    activate: bool,
+) {
+    if session_id.is_empty() || prompt.is_empty() {
+        return;
+    }
+
+    if let Ok(mut ui) = backend.ui_state.lock() {
+        ui.is_loading = true;
+        ui.provider_health = "starting".to_string();
+    }
+
+    if activate {
+        if let Ok(mut active) = backend.active_session_id.lock() {
+            *active = session_id.clone();
+        }
+    }
+
+    spawn_send_prompt(
+        backend.runtime.handle().clone(),
+        backend.chat_runtime.clone(),
+        backend.callbacks,
+        backend.callback_ctx,
+        backend.ui_state.clone(),
+        session_id,
+        prompt,
+        image_paths,
+    );
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_send_prompt_with_images(
+    handle: *mut BackendHandle,
+    text: *const c_char,
+    images_json: *const c_char,
+) {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return;
+    };
+    let Some(prompt_raw) = c_char_ptr_to_string(text) else {
+        return;
+    };
+    let images = parse_image_paths(c_char_ptr_to_string(images_json));
+    let active_session = backend
+        .active_session_id
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+
+    dispatch_prompt(
+        backend,
+        active_session,
+        prompt_raw.trim().to_string(),
+        Some(images),
+        false,
+    );
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_send_prompt_for_session_with_images(
+    handle: *mut BackendHandle,
+    session_id: *const c_char,
+    text: *const c_char,
+    images_json: *const c_char,
+) {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return;
+    };
+    let Some(target_session) = c_char_ptr_to_string(session_id) else {
+        return;
+    };
+    let Some(prompt_raw) = c_char_ptr_to_string(text) else {
+        return;
+    };
+    let images = parse_image_paths(c_char_ptr_to_string(images_json));
+
+    dispatch_prompt(
+        backend,
+        target_session,
+        prompt_raw.trim().to_string(),
+        Some(images),
+        true,
+    );
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chat_backend_list_project_files(
+    handle: *mut BackendHandle,
+    session_id: *const c_char,
+) -> *mut c_char {
+    let Some(backend) = (unsafe { handle.as_ref() }) else {
+        return into_c_string("[]".to_string());
+    };
+
+    let session_id = c_char_ptr_to_string(session_id)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            backend
+                .active_session_id
+                .lock()
+                .map(|value| value.clone())
+                .ok()
+        })
+        .unwrap_or_default();
+
+    let files = backend
+        .runtime
+        .block_on(backend.chat_runtime.list_project_files(&session_id));
+    into_c_string(serde_json::to_string(&files).unwrap_or_else(|_| "[]".to_string()))
 }
 
 fn spawn_send_prompt(
@@ -430,9 +566,48 @@ fn spawn_send_prompt(
     ui_state: Arc<Mutex<UiState>>,
     stream_session: String,
     prompt: String,
+    image_paths: Option<Vec<String>>,
 ) {
     runtime.spawn(async move {
-        match chat_runtime.send_message(&stream_session, prompt).await {
+        let images = match image_paths.filter(|paths| !paths.is_empty()) {
+            Some(paths) => {
+                match tokio::task::spawn_blocking(move || encode_image_files(&paths)).await {
+                    Ok(Ok(images)) => Some(images),
+                    Ok(Err(message)) => {
+                        if let Ok(mut ui) = ui_state.lock() {
+                            ui.is_loading = false;
+                            ui.provider_health = "available".to_string();
+                        }
+                        emit_session_string(
+                            callbacks.on_stream_error,
+                            ctx as *mut c_void,
+                            &stream_session,
+                            &message,
+                        );
+                        return;
+                    }
+                    Err(err) => {
+                        if let Ok(mut ui) = ui_state.lock() {
+                            ui.is_loading = false;
+                            ui.provider_health = "available".to_string();
+                        }
+                        emit_session_string(
+                            callbacks.on_stream_error,
+                            ctx as *mut c_void,
+                            &stream_session,
+                            &format!("Image processing task failed: {err}"),
+                        );
+                        return;
+                    }
+                }
+            }
+            None => None,
+        };
+
+        match chat_runtime
+            .send_message_with_images(&stream_session, prompt, images)
+            .await
+        {
             Ok(mut rx) => {
                 while let Some(event) = rx.recv().await {
                     match event {
@@ -494,6 +669,49 @@ fn spawn_send_prompt(
                                 timestamp: now.to_rfc3339(),
                             };
                             let _ = chat_runtime.record_usage(record).await;
+                        }
+                        StreamEvent::ContextFiles(files) => {
+                            let payload =
+                                serde_json::to_string(&files).unwrap_or_else(|_| "[]".to_string());
+                            emit_session_string(
+                                callbacks.on_context_files,
+                                ctx as *mut c_void,
+                                &stream_session,
+                                &payload,
+                            );
+                        }
+                        StreamEvent::ExecutorStatus {
+                            tool,
+                            file,
+                            validation_result,
+                        } => {
+                            let payload = json!({
+                                "tool": tool,
+                                "file": file,
+                                "validationResult": validation_result,
+                            })
+                            .to_string();
+                            emit_session_string(
+                                callbacks.on_executor_status,
+                                ctx as *mut c_void,
+                                &stream_session,
+                                &payload,
+                            );
+                        }
+                        StreamEvent::TokenBudget {
+                            estimated_tokens,
+                            num_ctx,
+                        } => {
+                            if let Some(callback) = callbacks.on_token_budget {
+                                if let Ok(session_cstr) = CString::new(stream_session.clone()) {
+                                    callback(
+                                        ctx as *mut c_void,
+                                        session_cstr.as_ptr(),
+                                        estimated_tokens,
+                                        num_ctx,
+                                    );
+                                }
+                            }
                         }
                         StreamEvent::Finished => {
                             if let Ok(mut ui) = ui_state.lock() {
@@ -2976,9 +3194,7 @@ pub unsafe extern "C" fn chat_backend_set_token_budget(handle: *mut BackendHandl
 
 /// Devolver presupuesto de tokens como JSON.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn chat_backend_token_budget_json(
-    handle: *mut BackendHandle,
-) -> *mut c_char {
+pub unsafe extern "C" fn chat_backend_token_budget_json(handle: *mut BackendHandle) -> *mut c_char {
     let Some(backend) = (unsafe { handle.as_ref() }) else {
         return std::ptr::null_mut();
     };
@@ -3261,6 +3477,9 @@ models_dir = "/tmp/multilink-models"
             on_sessions_updated: None,
             on_models_updated: None,
             on_messages_updated: None,
+            on_context_files: None,
+            on_executor_status: None,
+            on_token_budget: None,
         };
 
         let handle = chat_backend_create(callbacks, std::ptr::null_mut());
@@ -3272,5 +3491,42 @@ models_dir = "/tmp/multilink-models"
             chat_backend_stop_generation(handle);
             chat_backend_destroy(handle);
         }
+    }
+
+    #[test]
+    fn parse_image_paths_handles_valid_and_invalid_json() {
+        assert_eq!(
+            parse_image_paths(Some(r#"["/tmp/a.png","/tmp/b.jpg"]"#.to_string())),
+            vec!["/tmp/a.png".to_string(), "/tmp/b.jpg".to_string()]
+        );
+        assert!(parse_image_paths(Some("not-json".to_string())).is_empty());
+        assert!(parse_image_paths(None).is_empty());
+    }
+
+    #[test]
+    fn encode_image_files_returns_base64_payload() {
+        let path = std::env::temp_dir().join(format!(
+            "multilink-image-test-{}-{}.bin",
+            std::process::id(),
+            get_timestamp_millis()
+        ));
+        let bytes = b"\x89PNG\r\n";
+        std::fs::write(&path, bytes).expect("write temp image");
+
+        let encoded =
+            encode_image_files(&[path.to_string_lossy().to_string()]).expect("encode image");
+        assert_eq!(
+            encoded,
+            vec![base64::engine::general_purpose::STANDARD.encode(bytes)]
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn get_timestamp_millis() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0)
     }
 }

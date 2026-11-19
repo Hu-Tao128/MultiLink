@@ -5,7 +5,11 @@
 #include <QJsonObject>
 #include <QGuiApplication>
 #include <QClipboard>
+#include <QDir>
+#include <QImage>
 #include <QMetaObject>
+#include <QUrl>
+#include <QUuid>
 
 #include <cstdlib>
 #include <utility>
@@ -20,12 +24,19 @@ struct BackendCallbacks {
     void (*on_sessions_updated)(void *ctx, const char *json);
     void (*on_models_updated)(void *ctx, const char *json);
     void (*on_messages_updated)(void *ctx, const char *json);
+    void (*on_context_files)(void *ctx, const char *session_id, const char *json);
+    void (*on_executor_status)(void *ctx, const char *session_id, const char *json);
+    void (*on_token_budget)(void *ctx, const char *session_id, size_t estimated_tokens, size_t num_ctx);
 };
 
 void *chat_backend_create(BackendCallbacks callbacks, void *ctx);
 void chat_backend_destroy(void *backend);
 void chat_backend_send_prompt(void *backend, const char *text);
 void chat_backend_send_prompt_for_session(void *backend, const char *session_id, const char *text);
+void chat_backend_send_prompt_with_images(void *backend, const char *text, const char *images_json);
+void chat_backend_send_prompt_for_session_with_images(void *backend, const char *session_id,
+                                                      const char *text, const char *images_json);
+char *chat_backend_list_project_files(void *backend, const char *session_id);
 void chat_backend_stop_generation(void *backend);
 char *chat_backend_new_session(void *backend);
 void chat_backend_select_session(void *backend, const char *session_id);
@@ -165,6 +176,48 @@ static void onMessagesUpdatedThunk(void *ctx, const char *json) {
     }, Qt::QueuedConnection);
 }
 
+static void onContextFilesThunk(void *ctx, const char *session_id, const char *json) {
+    auto *self = static_cast<ChatController *>(ctx);
+    const QString sessionId = QString::fromUtf8(session_id ? session_id : "");
+    const QString payload = QString::fromUtf8(json ? json : "[]");
+    QMetaObject::invokeMethod(self, [self, sessionId, payload]() {
+        QVariantList files;
+        const QJsonDocument doc = QJsonDocument::fromJson(payload.toUtf8());
+        if (doc.isArray()) {
+            for (const QJsonValue &value : doc.array()) {
+                if (value.isString()) {
+                    files.append(value.toString());
+                }
+            }
+        }
+        emit self->contextFilesUpdated(sessionId, files);
+    }, Qt::QueuedConnection);
+}
+
+static void onExecutorStatusThunk(void *ctx, const char *session_id, const char *json) {
+    auto *self = static_cast<ChatController *>(ctx);
+    const QString sessionId = QString::fromUtf8(session_id ? session_id : "");
+    const QString payload = QString::fromUtf8(json ? json : "{}");
+    QMetaObject::invokeMethod(self, [self, sessionId, payload]() {
+        const QJsonObject obj = QJsonDocument::fromJson(payload.toUtf8()).object();
+        emit self->executorStatusUpdated(
+            sessionId,
+            obj.value(QStringLiteral("tool")).toString(),
+            obj.value(QStringLiteral("file")).toString(),
+            obj.value(QStringLiteral("validationResult")).toString());
+    }, Qt::QueuedConnection);
+}
+
+static void onTokenBudgetThunk(void *ctx, const char *session_id, size_t estimated_tokens, size_t num_ctx) {
+    auto *self = static_cast<ChatController *>(ctx);
+    const QString sessionId = QString::fromUtf8(session_id ? session_id : "");
+    QMetaObject::invokeMethod(self, [self, sessionId, estimated_tokens, num_ctx]() {
+        emit self->tokenBudgetUpdated(sessionId,
+                                      static_cast<int>(estimated_tokens),
+                                      static_cast<int>(num_ctx));
+    }, Qt::QueuedConnection);
+}
+
 ChatController::ChatController(QObject *parent)
     : QObject(parent) {
     BackendCallbacks callbacks{};
@@ -176,6 +229,9 @@ ChatController::ChatController(QObject *parent)
     callbacks.on_sessions_updated = &onSessionsUpdatedThunk;
     callbacks.on_models_updated = &onModelsUpdatedThunk;
     callbacks.on_messages_updated = &onMessagesUpdatedThunk;
+    callbacks.on_context_files = &onContextFilesThunk;
+    callbacks.on_executor_status = &onExecutorStatusThunk;
+    callbacks.on_token_budget = &onTokenBudgetThunk;
 
     m_backend = chat_backend_create(callbacks, this);
     refreshSnapshot();
@@ -285,6 +341,93 @@ void ChatController::sendPromptForSession(const QString &sessionId, const QStrin
     const QByteArray encoded = text.toUtf8();
     chat_backend_send_prompt_for_session(m_backend, sessionEncoded.constData(), encoded.constData());
     refreshSnapshot();
+}
+
+static QString localPathFromImageEntry(const QString &entry) {
+    const QString trimmed = entry.trimmed();
+    if (trimmed.startsWith(QStringLiteral("file:"), Qt::CaseInsensitive)) {
+        const QString local = QUrl(trimmed).toLocalFile();
+        return local.isEmpty() ? trimmed : local;
+    }
+    return trimmed;
+}
+
+QString ChatController::saveClipboardImageToTemp() {
+    const QImage image = QGuiApplication::clipboard()->image();
+    if (image.isNull()) {
+        return QString();
+    }
+
+    const QString path = QDir(QDir::tempPath())
+                             .filePath(QStringLiteral("multilink-paste-%1.png")
+                                           .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+    if (!image.save(path, "PNG")) {
+        return QString();
+    }
+    return path;
+}
+
+void ChatController::sendPromptWithImages(const QString &text, const QStringList &imagePaths) {
+    sendPromptForSessionWithImages(m_selectedSessionId, text, imagePaths);
+}
+
+void ChatController::sendPromptForSessionWithImages(const QString &sessionId,
+                                                   const QString &text,
+                                                   const QStringList &imagePaths) {
+    if (!m_backend || sessionId.isEmpty()) {
+        return;
+    }
+    if (m_selectedSessionId != sessionId) {
+        m_selectedSessionId = sessionId;
+        emit selectedSessionIdChanged();
+    }
+    if (m_streamingSessionId != sessionId) {
+        m_streamingSessionId = sessionId;
+        emit streamingSessionIdChanged();
+    }
+
+    QJsonArray images;
+    for (const QString &entry : imagePaths) {
+        const QString local = localPathFromImageEntry(entry);
+        if (!local.isEmpty()) {
+            images.append(local);
+        }
+    }
+    const QByteArray imagesJson = QJsonDocument(images).toJson(QJsonDocument::Compact);
+
+    const QByteArray sessionEncoded = sessionId.toUtf8();
+    const QByteArray encoded = text.toUtf8();
+    chat_backend_send_prompt_for_session_with_images(
+        m_backend,
+        sessionEncoded.constData(),
+        encoded.constData(),
+        imagesJson.constData());
+    refreshSnapshot();
+}
+
+QStringList ChatController::listProjectFiles(const QString &sessionId) {
+    QStringList files;
+    if (!m_backend) {
+        return files;
+    }
+
+    const QByteArray sessionEncoded = sessionId.toUtf8();
+    const QString payload = takeRustString(
+        chat_backend_list_project_files(m_backend, sessionEncoded.constData()));
+    const QJsonDocument doc = QJsonDocument::fromJson(payload.toUtf8());
+    if (!doc.isArray()) {
+        return files;
+    }
+    for (const QJsonValue &value : doc.array()) {
+        if (value.isString()) {
+            files.append(value.toString());
+        }
+    }
+    return files;
+}
+
+QStringList ChatController::listProjectFilesForActiveSession() {
+    return listProjectFiles(m_selectedSessionId);
 }
 
 void ChatController::stopGeneration() {
