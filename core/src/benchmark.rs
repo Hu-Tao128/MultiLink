@@ -196,11 +196,12 @@ mod tests {
 
     #[test]
     fn release_checklist_is_ready() {
-        let mut checklist = ReleaseChecklist::default();
-        checklist.core_tests_pass = true;
-        checklist.gui_builds = vec!["linux".to_string()];
-        checklist.benchmarks_pass = true;
-        checklist.documentation_updated = true;
+        let checklist = ReleaseChecklist {
+            core_tests_pass: true,
+            gui_builds: vec!["linux".to_string()],
+            benchmarks_pass: true,
+            documentation_updated: true,
+        };
 
         assert!(checklist.is_ready());
     }

@@ -153,7 +153,7 @@ impl UsageStore {
         }
 
         let mut model_breakdown: Vec<ModelUsage> = models.into_values().collect();
-        model_breakdown.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
+        model_breakdown.sort_by_key(|a| std::cmp::Reverse(a.total_tokens));
 
         Ok(UsageSummary {
             total_prompt_tokens: total_prompt,
@@ -201,7 +201,7 @@ impl UsageStore {
             }
 
             let mut model_breakdown: Vec<ModelUsage> = models.into_values().collect();
-            model_breakdown.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
+            model_breakdown.sort_by_key(|a| std::cmp::Reverse(a.total_tokens));
 
             result.push((
                 session_id,
