@@ -208,6 +208,7 @@ async fn runtime_streams_and_persists_session() {
             }
             StreamEvent::Error(message) => panic!("unexpected error: {message}"),
             StreamEvent::Usage { .. } => {}
+            _ => {}
         }
     }
 
@@ -559,7 +560,7 @@ async fn runtime_times_out_when_first_token_is_too_slow() {
                 break;
             }
             StreamEvent::Finished => break,
-            StreamEvent::Chunk(_) | StreamEvent::Usage { .. } => {}
+            _ => {}
         }
     }
 
@@ -621,7 +622,7 @@ async fn runtime_extends_first_token_timeout_for_thinking_models() {
                 saw_finished = true;
                 break;
             }
-            StreamEvent::Started | StreamEvent::Usage { .. } => {}
+            _ => {}
         }
     }
 

@@ -52,6 +52,8 @@ pub struct PromptOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<super::session::ChatMessage>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_context_dir: Option<PathBuf>,
 }
 
@@ -66,6 +68,7 @@ impl Default for PromptOptions {
             num_predict: None,
             think: None,
             messages: None,
+            images: None,
             system_context_dir: None,
         }
     }

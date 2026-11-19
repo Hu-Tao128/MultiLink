@@ -19,6 +19,8 @@ pub struct ChatMessage {
     pub role: String,
     pub content: String,
     pub timestamp: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
 }
 
 impl ChatMessage {
@@ -27,6 +29,16 @@ impl ChatMessage {
             role: "user".to_string(),
             content,
             timestamp: now_unix(),
+            images: None,
+        }
+    }
+
+    pub fn user_with_images(content: String, images: Vec<String>) -> Self {
+        Self {
+            role: "user".to_string(),
+            content,
+            timestamp: now_unix(),
+            images: if images.is_empty() { None } else { Some(images) },
         }
     }
 
@@ -35,6 +47,7 @@ impl ChatMessage {
             role: "assistant".to_string(),
             content,
             timestamp: now_unix(),
+            images: None,
         }
     }
 }

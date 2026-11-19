@@ -11,6 +11,7 @@ pub enum ChatCommand {
         relative_path: String,
         content: String,
     },
+    Files,
 }
 
 pub fn route_command(prompt: &str) -> Option<ChatCommand> {
@@ -19,6 +20,7 @@ pub fn route_command(prompt: &str) -> Option<ChatCommand> {
     let command = *parts.first()?;
 
     match command {
+        "/files" => Some(ChatCommand::Files),
         "/init" => {
             let smart = prompt.contains("smart") || prompt.contains("--smart");
             let force = prompt.contains("--force") || prompt.contains("-f");

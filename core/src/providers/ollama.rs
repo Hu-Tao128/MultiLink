@@ -105,6 +105,7 @@ impl OllamaProvider {
                 role: "user".to_string(),
                 content: warmup_prompt.to_string(),
                 thinking: None,
+                images: None,
             }],
             options: Some(OllamaOptions {
                 num_ctx: Some(128),
@@ -531,12 +532,14 @@ struct OllamaRequest {
     think: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-struct OllamaMessage {
-    role: String,
-    content: String,
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OllamaMessage {
+    pub role: String,
+    pub content: String,
     #[serde(default)]
-    thinking: Option<String>,
+    pub thinking: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -668,6 +671,7 @@ impl LLMProvider for OllamaProvider {
                     role: m.role,
                     content: m.content,
                     thinking: None,
+                    images: m.images,
                 })
                 .collect()
         } else {
@@ -677,12 +681,14 @@ impl LLMProvider for OllamaProvider {
                     role: "system".to_string(),
                     content: sys.clone(),
                     thinking: None,
+                    images: None,
                 });
             }
             msgs.push(OllamaMessage {
                 role: "user".to_string(),
                 content: prompt,
                 thinking: None,
+                images: options.images.clone(),
             });
             msgs
         };
@@ -740,12 +746,14 @@ impl LLMProvider for OllamaProvider {
                     role: "system".to_string(),
                     content: sys.clone(),
                     timestamp: 0,
+                    images: None,
                 });
             }
             msgs.push(ChatMessage {
                 role: "user".to_string(),
                 content: prompt,
                 timestamp: 0,
+                images: options.images.clone(),
             });
             msgs
         };
@@ -756,6 +764,7 @@ impl LLMProvider for OllamaProvider {
                 role: m.role,
                 content: m.content,
                 thinking: None,
+                images: m.images,
             })
             .collect();
 

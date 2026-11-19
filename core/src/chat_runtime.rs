@@ -37,7 +37,7 @@ use crate::providers::{PromptOptions, ProviderCapabilities, ProviderId};
 use crate::router::ProviderRouter;
 use crate::session::{ChatMessage, ChatSession, SessionState};
 use crate::skills::{Skill, SkillLoader, SkillOrchestrator};
-use crate::tools::{create_default_registry_with_engine, ToolExecutor};
+use crate::tools::{create_default_registry_with_engine_and_corpus, CorpusStore, ToolExecutor};
 use crate::usage::{UsageRecord, UsageStore};
 
 #[derive(Debug, Clone)]
@@ -50,6 +50,16 @@ pub enum StreamEvent {
         total_tokens: usize,
         is_estimated: bool,
     },
+    ContextFiles(Vec<String>),
+    ExecutorStatus {
+        tool: String,
+        file: Option<String>,
+        validation_result: Option<String>,
+    },
+    TokenBudget {
+        estimated_tokens: usize,
+        num_ctx: usize,
+    },
     Finished,
     Error(String),
 }
@@ -61,6 +71,7 @@ pub struct ChatResponse {
 pub struct HandleUserMessageRequest {
     pub session_id: String,
     pub prompt: String,
+    pub images: Option<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -77,6 +88,7 @@ pub struct ChatRuntime {
     runtime_config: RuntimeConfig,
     system_context_dir: Option<PathBuf>,
     tool_executor: Arc<ToolExecutor>,
+    project_corpus: CorpusStore,
     mcp_runtime: Arc<McpRuntime>,
     usage_store: Arc<UsageStore>,
 }
@@ -140,9 +152,11 @@ impl ChatRuntime {
             .min(hardware_caps.max_project_top_k)
             .max(2);
 
-        let tool_registry = create_default_registry_with_engine(
+        let project_corpus = CorpusStore::new();
+        let tool_registry = create_default_registry_with_engine_and_corpus(
             project_root,
             Arc::new(ContextEngineV1) as Arc<dyn ContextEngine>,
+            project_corpus.clone(),
         );
         let mcp_runtime = Arc::new(McpRuntime::new(Vec::new()));
         let tool_executor = Arc::new(
@@ -166,6 +180,7 @@ impl ChatRuntime {
             runtime_config,
             system_context_dir,
             tool_executor,
+            project_corpus,
             mcp_runtime,
             usage_store,
         }
@@ -407,6 +422,37 @@ impl ChatRuntime {
         self.active_session_id.read().await.clone()
     }
 
+    pub async fn get_project_snapshot_files(&self, session_id: &str) -> Vec<String> {
+        let (root, model_hint) = {
+            let guard = self.sessions.read().await;
+            let session = guard.get(session_id);
+            (
+                session.and_then(|s| s.project_root.clone()),
+                session.and_then(|s| s.model.clone()),
+            )
+        };
+        let project_root = root.or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|d| d.to_string_lossy().to_string())
+        });
+        let Some(project_root) = project_root else {
+            return Vec::new();
+        };
+        let context_config = self
+            .runtime_config
+            .effective_for_model(model_hint.as_deref());
+        let root_for_task = PathBuf::from(project_root);
+        tokio::task::spawn_blocking(move || {
+            collect_project_snapshot(&root_for_task, &context_config)
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .map(|s| s.relative_paths())
+        .unwrap_or_default()
+    }
+
     pub async fn update_session_model(
         &self,
         session_id: &str,
@@ -527,10 +573,21 @@ impl ChatRuntime {
         session_id: &str,
         prompt: String,
     ) -> Result<mpsc::Receiver<StreamEvent>, ChatRuntimeError> {
+        self.send_message_with_images(session_id, prompt, None)
+            .await
+    }
+
+    pub async fn send_message_with_images(
+        &self,
+        session_id: &str,
+        prompt: String,
+        images: Option<Vec<String>>,
+    ) -> Result<mpsc::Receiver<StreamEvent>, ChatRuntimeError> {
         let response = self
             .handle_user_message(HandleUserMessageRequest {
                 session_id: session_id.to_string(),
                 prompt,
+                images,
             })
             .await?;
         Ok(response.events)
@@ -563,6 +620,23 @@ impl ChatRuntime {
             };
 
             let response = match command {
+                crate::commands::ChatCommand::Files => {
+                    let files = self.get_project_snapshot_files(session_id).await;
+                    if files.is_empty() {
+                        "No se encontraron archivos indexados en el snapshot del proyecto actual."
+                            .to_string()
+                    } else {
+                        format!(
+                            "📁 **Archivos indexados en el snapshot ({})**:\n\n{}",
+                            files.len(),
+                            files
+                                .iter()
+                                .map(|f| format!("- `{}`", f))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        )
+                    }
+                }
                 crate::commands::ChatCommand::Init(cmd) => {
                     let root = get_project_root_for_init(project_root.clone(), session_id);
                     let result = init_command::run_init(&root, &cmd);
@@ -741,7 +815,16 @@ impl ChatRuntime {
             let session = guard
                 .get_mut(session_id)
                 .ok_or(ChatRuntimeError::SessionNotFound)?;
-            session.add_user_message(prompt.clone());
+            match &request.images {
+                Some(imgs) if !imgs.is_empty() => {
+                    session
+                        .messages
+                        .push(ChatMessage::user_with_images(prompt.clone(), imgs.clone()));
+                }
+                _ => {
+                    session.add_user_message(prompt.clone());
+                }
+            }
             session.set_state(SessionState::Sending);
             let provider = session.provider;
             let model = session.model.clone();
@@ -785,13 +868,26 @@ impl ChatRuntime {
             mcp_tools.len()
         );
         let skill_orchestrator = Arc::new(SkillOrchestrator::new(Vec::new()));
+        let planner_num_ctx = self
+            .runtime_config
+            .effective_for_model(model.as_deref())
+            .max_context_tokens
+            .min(cached_hardware_caps().max_context_tokens)
+            .max(2048);
+        let (event_tx, event_rx) = mpsc::channel(128);
         let mut executor = Executor::new(
             self.router.clone(),
             skill_orchestrator,
             Arc::new(ContextEngineV1) as Arc<dyn ContextEngine>,
             self.tool_executor.clone(),
         )
-        .with_tool_selector(self.router.clone(), model_size, model.clone());
+        .with_status_sender(event_tx.clone())
+        .with_tool_selector(
+            self.router.clone(),
+            model_size,
+            model.clone(),
+            Some(planner_num_ctx),
+        );
 
         if let Some(project_root) = session_project_root.as_deref() {
             executor = executor.with_working_dir(std::path::PathBuf::from(project_root));
@@ -821,12 +917,15 @@ impl ChatRuntime {
             }
         };
 
+        if !executor.recorded_write_paths().is_empty() {
+            self.invalidate_project_context(session_id).await;
+        }
+
         if let Some(output) = planner_output
             .as_deref()
             .filter(|output| output.starts_with("[tools_complete]"))
         {
             let response_text = render_tools_complete_response(output);
-            let (event_tx, event_rx) = mpsc::channel(8);
             let _ = event_tx.send(StreamEvent::Started).await;
             let _ = event_tx
                 .send(StreamEvent::Chunk(response_text.clone()))
@@ -989,18 +1088,22 @@ impl ChatRuntime {
             );
         }
 
-        let messages = match self
+        let (messages, selected_files) = match self
             .build_messages(
                 session_id,
                 final_prompt.clone(),
                 include_project_context_for_request,
                 &effective_runtime,
                 model_profile.as_ref(),
+                request.images.clone(),
             )
             .await
         {
-            Ok(msgs) => msgs,
-            Err(err) => return Err(err),
+            Ok(res) => res,
+            Err(err) => {
+                let _ = event_tx.send(StreamEvent::Error(err.to_string())).await;
+                return Err(err);
+            }
         };
         if context_debug_enabled(&self.runtime_config) {
             eprintln!(
@@ -1021,11 +1124,39 @@ impl ChatRuntime {
             );
         }
 
+        // Send the window we budgeted for (plus generation headroom) so Ollama
+        // does not silently fall back to 2048/4096. Never exceed the model's
+        // advertised context length.
+        let chat_num_ctx = {
+            let prompt_budget = effective_runtime.max_context_tokens.max(1024);
+            let with_headroom = prompt_budget.saturating_add(2_048);
+            match model_profile.as_ref() {
+                Some(profile) => profile
+                    .context_length
+                    .min(with_headroom)
+                    .max(prompt_budget)
+                    .max(2_048),
+                None => with_headroom.max(2_048),
+            }
+        };
+
+        // Emit selected files from RAG and token budget before starting response stream
+        let _ = event_tx
+            .send(StreamEvent::ContextFiles(selected_files))
+            .await;
+        let _ = event_tx
+            .send(StreamEvent::TokenBudget {
+                estimated_tokens: context_tokens,
+                num_ctx: chat_num_ctx,
+            })
+            .await;
+
         let options = PromptOptions {
             model,
             model_server_url,
             messages: Some(messages),
             system_context_dir: self.system_context_dir.clone(),
+            num_ctx: Some(chat_num_ctx),
             ..PromptOptions::default()
         };
 
@@ -1072,19 +1203,20 @@ impl ChatRuntime {
                         eprintln!(
                         "[provider] retrying without project context (possible context overflow)"
                     );
-                        let fallback_messages = self
+                        let (fallback_messages, _) = self
                             .build_messages(
                                 session_id,
                                 final_prompt.clone(),
                                 false,
                                 &effective_runtime,
                                 model_profile.as_ref(),
+                                request.images.clone(),
                             )
                             .await?;
                         let fallback_options = PromptOptions {
                             model: options.model.clone(),
                             messages: Some(fallback_messages),
-                            num_ctx: None,
+                            num_ctx: options.num_ctx,
                             ..PromptOptions::default()
                         };
                         let retry_result = self
@@ -1115,7 +1247,6 @@ impl ChatRuntime {
                 }
             };
 
-        let (event_tx, event_rx) = mpsc::channel(128);
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         self.cancellation
             .lock()
@@ -1554,24 +1685,30 @@ impl ChatRuntime {
 
 impl ChatRuntime {
     async fn ensure_project_context_cached(&self, session_id: &str) {
-        let (root, model_hint) = {
+        let (root, model_hint, cached_context) = {
             let guard = self.sessions.read().await;
             let Some(session) = guard.get(session_id) else {
                 return;
             };
-            if session
-                .project_context
-                .as_ref()
-                .is_some_and(|ctx| !ctx.trim().is_empty())
-            {
-                return;
-            }
-            (session.project_root.clone(), session.model.clone())
+            (
+                session.project_root.clone(),
+                session.model.clone(),
+                session.project_context.clone(),
+            )
         };
 
         let Some(project_root) = root else {
             return;
         };
+
+        if let Some(context) = cached_context.filter(|ctx| !ctx.trim().is_empty()) {
+            // Keep the shared tool corpus aligned with the snapshot injected
+            // into the prompt (also covers sessions restored from disk).
+            self.project_corpus
+                .set(std::path::Path::new(&project_root), context)
+                .await;
+            return;
+        }
 
         let context_config = self
             .runtime_config
@@ -1590,10 +1727,53 @@ impl ChatRuntime {
             }
         };
 
+        self.project_corpus
+            .set(std::path::Path::new(&project_root), context.clone())
+            .await;
+
         let mut guard = self.sessions.write().await;
         if let Some(session) = guard.get_mut(session_id) {
             session.project_context = Some(context);
         }
+    }
+
+    /// Relative paths indexed in the current `ProjectSnapshot` for the session.
+    /// Used by the GUI for `@file` autocompletion. Reuses the cached snapshot
+    /// and never rescans the disk.
+    pub async fn list_project_files(&self, session_id: &str) -> Vec<String> {
+        let cached = {
+            let guard = self.sessions.read().await;
+            guard
+                .get(session_id)
+                .and_then(|session| session.project_context.clone())
+        };
+
+        cached
+            .as_deref()
+            .map(project_files_from_context)
+            .unwrap_or_default()
+    }
+
+    /// Drops the cached project context for `session_id` and the shared corpus
+    /// entry for its root. Called after write tools succeed so the next RAG
+    /// pass reflects the files that were just created/modified.
+    async fn invalidate_project_context(&self, session_id: &str) {
+        let (root, snapshot) = {
+            let mut guard = self.sessions.write().await;
+            let Some(session) = guard.get_mut(session_id) else {
+                return;
+            };
+            session.project_context = None;
+            (session.project_root.clone(), session.clone())
+        };
+
+        if let Some(root) = root {
+            self.project_corpus
+                .invalidate(std::path::Path::new(&root))
+                .await;
+        }
+
+        let _ = persist_session(&self.storage_dir, &snapshot).await;
     }
 
     async fn build_messages(
@@ -1603,7 +1783,8 @@ impl ChatRuntime {
         include_project_context: bool,
         effective_runtime: &RuntimeConfig,
         model_profile: Option<&ModelProfile>,
-    ) -> Result<Vec<ChatMessage>, ChatRuntimeError> {
+        current_images: Option<Vec<String>>,
+    ) -> Result<(Vec<ChatMessage>, Vec<String>), ChatRuntimeError> {
         let session = {
             let guard = self.sessions.read().await;
             guard
@@ -1613,6 +1794,7 @@ impl ChatRuntime {
         };
 
         let mut messages = Vec::new();
+        let mut selected_files = Vec::new();
         let mut tokens = 0usize;
         let model_hint = session.model.as_deref();
         let model_tier = match model_profile.map(|p| p.class) {
@@ -1682,6 +1864,7 @@ impl ChatRuntime {
                     embed_max_retries: effective_runtime.embed_max_retries,
                     embed_batch_size: effective_runtime.embed_batch_size,
                     top_k: effective_runtime.context_project_top_k,
+                    min_score: effective_runtime.context_min_score.clamp(0.0, 1.0),
                 };
 
                 if effective_runtime.execution_servers.is_empty() {
@@ -1856,6 +2039,7 @@ impl ChatRuntime {
                                         .context_index_refresh_on_query,
                                     retrieval_enable_filters: effective_runtime
                                         .context_retrieval_enable_filters,
+                                    min_score: effective_runtime.context_min_score.clamp(0.0, 1.0),
                                     version: if effective_runtime.context_engine == "v2plus" {
                                         ContextEngineVersion::V2Plus
                                     } else {
@@ -1905,6 +2089,9 @@ impl ChatRuntime {
                                         embed_max_retries: effective_runtime.embed_max_retries,
                                         embed_batch_size: effective_runtime.embed_batch_size,
                                         top_k: effective_runtime.context_project_top_k,
+                                        min_score: effective_runtime
+                                            .context_min_score
+                                            .clamp(0.0, 1.0),
                                     },
                                 )
                                 .await;
@@ -1958,6 +2145,7 @@ impl ChatRuntime {
                     };
 
                     let context_latency_ms = start.elapsed().as_millis() as u64;
+                    selected_files = retrieval.selected_files.clone();
 
                     if !retrieval.context.trim().is_empty() {
                         if retrieval.is_truncated {
@@ -2038,6 +2226,7 @@ impl ChatRuntime {
                 role: "system".to_string(),
                 content: system_content,
                 timestamp: 0,
+                images: None,
             });
         }
 
@@ -2057,9 +2246,10 @@ impl ChatRuntime {
             role: "user".to_string(),
             content: current_prompt,
             timestamp: 0,
+            images: current_images,
         });
 
-        Ok(messages)
+        Ok((messages, selected_files))
     }
 
     async fn maybe_summarize_session(
@@ -2379,6 +2569,20 @@ fn cl100k_tokenizer() -> Option<&'static tiktoken_rs::CoreBPE> {
         .as_ref()
 }
 
+fn project_files_from_context(context: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    for line in context.lines() {
+        let Some(path) = line.strip_prefix("File: ") else {
+            continue;
+        };
+        let path = path.trim();
+        if !path.is_empty() && !files.iter().any(|existing| existing == path) {
+            files.push(path.to_string());
+        }
+    }
+    files
+}
+
 async fn build_project_context_for_root(
     project_root: &str,
     runtime_config: RuntimeConfig,
@@ -2404,13 +2608,21 @@ async fn build_system_context(
         .map(|snapshot| snapshot.render())
 }
 
-struct ProjectSnapshot {
-    root: PathBuf,
-    files: Vec<(PathBuf, String)>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSnapshot {
+    pub root: PathBuf,
+    pub files: Vec<(PathBuf, String)>,
 }
 
 impl ProjectSnapshot {
-    fn render(&self) -> String {
+    pub fn relative_paths(&self) -> Vec<String> {
+        self.files
+            .iter()
+            .map(|(path, _)| path.to_string_lossy().to_string())
+            .collect()
+    }
+
+    pub fn render(&self) -> String {
         let mut output = String::new();
         output.push_str(&format!("Project root: {}\n\n", self.root.display()));
         output.push_str("Project structure:\n");
@@ -2433,7 +2645,7 @@ impl ProjectSnapshot {
     }
 }
 
-fn collect_project_snapshot(
+pub fn collect_project_snapshot(
     root: &Path,
     runtime_config: &RuntimeConfig,
 ) -> Result<ProjectSnapshot, ChatRuntimeError> {
@@ -2576,6 +2788,15 @@ fn is_allowed_project_file(path: &Path) -> bool {
                 | "sh"
                 | "bash"
                 | "qml"
+                | "html"
+                | "htm"
+                | "css"
+                | "scss"
+                | "vue"
+                | "svelte"
+                | "sql"
+                | "xml"
+                | "svg"
                 | "json"
                 | "toml"
                 | "md"
@@ -2618,6 +2839,14 @@ fn code_fence_for_path(path: &Path) -> &'static str {
         Some("sh") => "bash",
         Some("bash") => "bash",
         Some("qml") => "qml",
+        Some("html") | Some("htm") => "html",
+        Some("css") => "css",
+        Some("scss") => "scss",
+        Some("vue") => "vue",
+        Some("svelte") => "svelte",
+        Some("sql") => "sql",
+        Some("xml") => "xml",
+        Some("svg") => "svg",
         Some("json") => "json",
         Some("toml") => "toml",
         Some("md") => "markdown",
@@ -3129,11 +3358,7 @@ fn is_contradictory_bullet(
         || lower.contains("add docker")
         || lower.contains("create dockerfile")
         || lower.contains("configurar imagen docker");
-    if has_docker && mentions_add_docker {
-        return true;
-    }
-
-    false
+    has_docker && mentions_add_docker
 }
 
 fn detect_natural_write_target(prompt: &str) -> Option<String> {
@@ -3182,8 +3407,9 @@ fn detect_natural_write_target(prompt: &str) -> Option<String> {
 
     // Fallback: si no se encontró ruta explícita, buscar extensiones conocidas
     let bare_extensions = [
-        "html", "htm", "css", "js", "ts", "jsx", "tsx", "rs", "py", "go", "java", "kt", "rb",
-        "php", "json", "toml", "yaml", "yml", "md", "txt", "sh", "sql", "xml", "svg",
+        "html", "htm", "css", "scss", "vue", "svelte", "js", "ts", "jsx", "tsx", "rs", "py", "go",
+        "java", "kt", "rb", "php", "json", "toml", "yaml", "yml", "md", "txt", "sh", "sql", "xml",
+        "svg",
     ];
     let found = bare_extensions.iter().find(|ext| {
         lower.split_whitespace().any(|word| {
@@ -3788,8 +4014,8 @@ async fn recover_partials_from_wal(
 mod tests {
     use super::{
         execute_write_file_command, extract_nonempty_file_payload_from_assistant,
-        parse_write_file_command, sanitize_model_init_analysis, sanitize_model_markdown,
-        try_apply_web_landing_edit, WriteFileCommand,
+        parse_write_file_command, project_files_from_context, sanitize_model_init_analysis,
+        sanitize_model_markdown, try_apply_web_landing_edit, WriteFileCommand,
     };
     use crate::commands::{InitAction, InitResult, ProjectInfo};
     use std::collections::HashSet;
@@ -3966,6 +4192,15 @@ mod tests {
         .expect("web edit");
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn project_files_from_context_returns_relative_paths_once() {
+        let context = "Project root: /tmp/demo\n\nFiles:\n\nFile: src/main.rs\n```rust\nfn main() {}\n```\n\nFile: README.md\n```markdown\n# Demo\n```\n\nFile: src/main.rs\n```rust\nfn main() {}\n```\n";
+        assert_eq!(
+            project_files_from_context(context),
+            vec!["src/main.rs".to_string(), "README.md".to_string()]
+        );
     }
 }
 

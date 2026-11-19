@@ -32,7 +32,8 @@ pub use context_engine::{
 pub use auth::{AuthProvider, AuthService, OAuthConfig, OAuthFlow, StoredToken, TokenStore};
 pub use benchmark::{BenchmarkResult, BenchmarkRunner, ReleaseChecklist, ReleaseCriteria};
 pub use chat_runtime::{
-    ChatResponse, ChatRuntime, ChatRuntimeError, HandleUserMessageRequest, StreamEvent,
+    collect_project_snapshot, ChatResponse, ChatRuntime, ChatRuntimeError, HandleUserMessageRequest,
+    ProjectSnapshot, StreamEvent,
 };
 pub use config::{
     AppConfig, McpConfig, McpServerConfig, ProviderKind, RemoteThreshold, TaskWeight,
