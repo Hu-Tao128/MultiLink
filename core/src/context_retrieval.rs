@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::context_engine::tokenizer::Tokenizer;
+
 #[derive(Debug, Clone)]
 pub struct RetrievalConfig {
     pub embeddings_enabled: bool,
@@ -14,6 +16,7 @@ pub struct RetrievalConfig {
     pub embed_max_retries: u8,
     pub embed_batch_size: usize,
     pub top_k: usize,
+    pub min_score: f32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -255,7 +258,11 @@ pub async fn build_relevant_project_context(
         );
     }
 
-    if !embedding_used {
+    let terms = query_terms(prompt);
+
+    // Preferred project files are only a fallback for queries without useful
+    // terms. Any real query is ranked with lexical/BM25 + embeddings.
+    if !embedding_used && terms.is_empty() {
         if let Some((context, selected_files, used_tokens)) = build_context_from_preferred_files(
             &chunks,
             &preferred_fallback,
@@ -273,21 +280,42 @@ pub async fn build_relevant_project_context(
         }
     }
 
-    let mut ranked: Vec<(usize, f32)> = lexical
-        .into_iter()
-        .map(|(idx, score)| {
-            let final_score = if let Some(embed_scores) = embedding.as_ref() {
-                let emb = embed_scores.get(idx).copied().unwrap_or(0.0);
-                score * 0.35 + emb * 0.65
+    let mut lexical_by_idx = vec![0.0f32; chunks.len()];
+    for (idx, score) in lexical {
+        if idx < lexical_by_idx.len() {
+            lexical_by_idx[idx] = score;
+        }
+    }
+
+    let embedding_by_idx = embedding
+        .clone()
+        .unwrap_or_else(|| vec![0.0f32; chunks.len()]);
+    let lexical_normalized = normalize_min_max(&lexical_by_idx);
+    let embeddings_normalized = normalize_min_max(&embedding_by_idx);
+    let embedding_has_signal = embedding_used && embedding_by_idx.iter().any(|s| *s > 0.0);
+
+    let mut ranked: Vec<(usize, f32)> = (0..chunks.len())
+        .map(|idx| {
+            let lex = lexical_normalized.get(idx).copied().unwrap_or(0.0);
+            let emb = embeddings_normalized.get(idx).copied().unwrap_or(0.0);
+            let score = if embedding_has_signal {
+                lex * 0.35 + emb * 0.65
             } else {
-                score
+                lex
             };
-            (idx, final_score)
+            (idx, score)
         })
         .collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
 
+    if !terms.is_empty() {
+        let threshold = config.min_score.max(0.0);
+        ranked.retain(|(_, score)| *score >= threshold);
+    }
+
     let top_k = config.top_k.clamp(2, 24);
+    let mentioned_files = path_hints(prompt);
+    let mut per_file: HashMap<String, usize> = HashMap::new();
     let mut selected_blocks = Vec::new();
     let mut selected_files = Vec::new();
     let mut used_tokens = 0usize;
@@ -296,6 +324,17 @@ pub async fn build_relevant_project_context(
         let Some(chunk) = chunks.get(idx) else {
             continue;
         };
+
+        let file_lower = chunk.path.to_ascii_lowercase();
+        let explicitly_mentioned = mentioned_files
+            .iter()
+            .filter(|hint| hint.contains('.'))
+            .any(|hint| file_lower == *hint || file_lower.ends_with(&format!("/{hint}")));
+        let per_file_limit = if explicitly_mentioned { usize::MAX } else { 2 };
+        if per_file.get(&chunk.path).copied().unwrap_or(0) >= per_file_limit {
+            continue;
+        }
+
         let block = render_chunk_block(chunk);
         let block_tokens = estimate_tokens_for_model(&block, model_hint);
 
@@ -306,6 +345,7 @@ pub async fn build_relevant_project_context(
                     used_tokens = estimate_tokens_for_model(&trimmed, model_hint);
                     selected_blocks.push(trimmed);
                     selected_files.push(chunk.path.clone());
+                    *per_file.entry(chunk.path.clone()).or_insert(0) += 1;
                 }
             }
             break;
@@ -314,9 +354,21 @@ pub async fn build_relevant_project_context(
         used_tokens += block_tokens;
         selected_blocks.push(block);
         selected_files.push(chunk.path.clone());
+        *per_file.entry(chunk.path.clone()).or_insert(0) += 1;
     }
 
     if selected_blocks.is_empty() {
+        if !terms.is_empty() {
+            return RetrievalResult {
+                context: String::new(),
+                selected_files: Vec::new(),
+                used_tokens: 0,
+                top_k,
+                embedding_used,
+                embedding_diag,
+            };
+        }
+
         let fallback = truncate_to_token_budget(raw_context, token_budget, model_hint);
         let used_tokens = estimate_tokens_for_model(&fallback, model_hint);
         return RetrievalResult {
@@ -676,8 +728,39 @@ fn render_chunk_block(chunk: &ProjectChunk) -> String {
     )
 }
 
+fn normalize_min_max(scores: &[f32]) -> Vec<f32> {
+    if scores.is_empty() {
+        return Vec::new();
+    }
+
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for score in scores {
+        if score.is_finite() {
+            min = min.min(*score);
+            max = max.max(*score);
+        }
+    }
+
+    if !min.is_finite() || !max.is_finite() {
+        return vec![0.0; scores.len()];
+    }
+
+    let range = max - min;
+    if range.abs() <= f32::EPSILON {
+        let value = if max > 0.0 { 1.0 } else { 0.0 };
+        return vec![value; scores.len()];
+    }
+
+    scores
+        .iter()
+        .map(|score| ((score - min) / range).clamp(0.0, 1.0))
+        .collect()
+}
+
 fn lexical_scores(prompt: &str, chunks: &[ProjectChunk]) -> Vec<(usize, f32)> {
     let terms = query_terms(prompt);
+    let gate_terms = Tokenizer::tokenize(prompt);
     let path_hints = path_hints(prompt);
     let is_project_overview_prompt = looks_like_project_overview_prompt(prompt);
     let mut scores = Vec::with_capacity(chunks.len());
@@ -814,7 +897,7 @@ fn lexical_scores(prompt: &str, chunks: &[ProjectChunk]) -> Vec<(usize, f32)> {
                     score += 2.0;
                 }
                 if preview_l.contains(term) {
-                    score += 1.0;
+                    score += 8.0;
                 }
             }
 
@@ -835,6 +918,20 @@ fn lexical_scores(prompt: &str, chunks: &[ProjectChunk]) -> Vec<(usize, f32)> {
             }
             if hidden_or_vendor {
                 score -= 4.0;
+            }
+
+            // Generic path/depth bonuses must not make a chunk relevant when
+            // none of the meaningful (non-stopword) query terms appears in it.
+            // Project-overview questions are language-agnostic and rely on the
+            // type heuristics.
+            let matched_meaningful = gate_terms.iter().any(|term| {
+                path_l.contains(term)
+                    || file_name_only.contains(term)
+                    || lang_l.contains(term)
+                    || preview_l.contains(term)
+            });
+            if !gate_terms.is_empty() && !matched_meaningful && !is_project_overview_prompt {
+                score = 0.0;
             }
         }
 
@@ -1035,7 +1132,7 @@ fn lock_embed_model_cache(
     }
 }
 
-async fn resolve_embed_model(
+pub(crate) async fn resolve_embed_model(
     base_url: &str,
     configured: &str,
     model_hint: Option<&str>,
@@ -1287,6 +1384,87 @@ mod tests {
     fn detect_project_type_unknown() {
         let d = detect_project_type(&[mk("docs/notes.txt")]);
         assert_eq!(d.project_type, ProjectType::Unknown);
+    }
+
+    fn config_without_embeddings(min_score: f32) -> RetrievalConfig {
+        RetrievalConfig {
+            embeddings_enabled: false,
+            embed_model: String::new(),
+            embed_base_url: "http://127.0.0.1:1".to_string(),
+            ollama_base_url: "http://127.0.0.1:1".to_string(),
+            embed_connect_timeout_ms: 50,
+            embed_request_timeout_ms: 50,
+            embed_max_retries: 0,
+            embed_batch_size: 8,
+            top_k: 8,
+            min_score,
+        }
+    }
+
+    fn demo_project_context() -> String {
+        r#"Project root: /tmp/demo
+
+Files:
+
+File: Cargo.toml
+```toml
+[package]
+name = "demo"
+```
+
+File: src/main.rs
+```rust
+fn main() {
+    println!("hi");
+}
+```
+
+File: src/payments.rs
+```rust
+pub fn process_refund(order_id: u64) -> bool {
+    order_id > 0
+}
+```
+
+File: src/ui.rs
+```rust
+pub fn render_button() {}
+```
+"#
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn specific_query_uses_ranking_not_preferred_files_without_embeddings() {
+        let result = build_relevant_project_context(
+            &demo_project_context(),
+            "where is process_refund defined",
+            2048,
+            None,
+            config_without_embeddings(0.15),
+        )
+        .await;
+
+        assert!(!result.embedding_used);
+        assert_eq!(result.selected_files, vec!["src/payments.rs".to_string()]);
+        assert!(result.context.contains("process_refund"));
+        assert!(!result.selected_files.contains(&"Cargo.toml".to_string()));
+        assert!(!result.selected_files.contains(&"src/main.rs".to_string()));
+    }
+
+    #[tokio::test]
+    async fn empty_query_terms_keep_preferred_file_fallback() {
+        let result = build_relevant_project_context(
+            &demo_project_context(),
+            "???",
+            2048,
+            None,
+            config_without_embeddings(0.15),
+        )
+        .await;
+
+        assert!(!result.embedding_used);
+        assert!(result.selected_files.contains(&"Cargo.toml".to_string()));
     }
 }
 

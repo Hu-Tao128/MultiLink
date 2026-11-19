@@ -3,16 +3,20 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::{Tool, ToolInput, ToolResult};
+use super::{CorpusStore, Tool, ToolInput, ToolResult};
 use crate::context_engine::ContextEngine;
 
 pub struct SearchCode {
     context_engine: Arc<dyn ContextEngine>,
+    corpus: CorpusStore,
 }
 
 impl SearchCode {
-    pub fn new(context_engine: Arc<dyn ContextEngine>) -> Self {
-        Self { context_engine }
+    pub fn new(context_engine: Arc<dyn ContextEngine>, corpus: CorpusStore) -> Self {
+        Self {
+            context_engine,
+            corpus,
+        }
     }
 }
 
@@ -58,15 +62,10 @@ impl Tool for SearchCode {
 
         let config = crate::context_engine::ContextRetrievalConfig::default();
 
+        let corpus = self.corpus.get_or_build(project_root).await;
         let result = self
             .context_engine
-            .retrieve(
-                project_root.to_string_lossy().as_ref(),
-                query,
-                top_k * 500,
-                None,
-                &config,
-            )
+            .retrieve(&corpus, query, top_k * 500, None, &config)
             .await;
 
         let results: Vec<Value> = result
@@ -287,11 +286,15 @@ impl Tool for OpenFile {
 
 pub struct SearchAndOpen {
     context_engine: Arc<dyn ContextEngine>,
+    corpus: CorpusStore,
 }
 
 impl SearchAndOpen {
-    pub fn new(context_engine: Arc<dyn ContextEngine>) -> Self {
-        Self { context_engine }
+    pub fn new(context_engine: Arc<dyn ContextEngine>, corpus: CorpusStore) -> Self {
+        Self {
+            context_engine,
+            corpus,
+        }
     }
 }
 
@@ -337,15 +340,10 @@ impl Tool for SearchAndOpen {
 
         let config = crate::context_engine::ContextRetrievalConfig::default();
 
+        let corpus = self.corpus.get_or_build(project_root).await;
         let result = self
             .context_engine
-            .retrieve(
-                project_root.to_string_lossy().as_ref(),
-                query,
-                top_k * 500,
-                None,
-                &config,
-            )
+            .retrieve(&corpus, query, top_k * 500, None, &config)
             .await;
 
         let mut files = Vec::new();
@@ -410,10 +408,78 @@ mod tests {
 
     #[test]
     fn test_search_code_schema() {
-        let tool = SearchCode::new(Arc::new(crate::context_engine::ContextEngineV1)
-            as Arc<dyn crate::context_engine::ContextEngine>);
+        let tool = SearchCode::new(
+            Arc::new(crate::context_engine::ContextEngineV1)
+                as Arc<dyn crate::context_engine::ContextEngine>,
+            CorpusStore::new(),
+        );
         let schema = tool.input_schema();
         assert_eq!(schema["properties"]["query"]["type"], "string");
         assert_eq!(schema["properties"]["top_k"]["type"], "number");
+    }
+
+    struct RecordingEngine {
+        seen: Arc<std::sync::Mutex<String>>,
+    }
+
+    #[async_trait]
+    impl ContextEngine for RecordingEngine {
+        async fn retrieve(
+            &self,
+            project_context: &str,
+            _prompt: &str,
+            _token_budget: usize,
+            _model_hint: Option<&str>,
+            _config: &crate::context_engine::ContextRetrievalConfig,
+        ) -> crate::context_engine::RetrievalResult {
+            *self.seen.lock().expect("seen") = project_context.to_string();
+            crate::context_engine::RetrievalResult {
+                context: String::new(),
+                selected_files: Vec::new(),
+                used_tokens: 0,
+                top_k: 0,
+                embedding_used: false,
+                embedding_reason: "test".to_string(),
+                embedding_latency_ms: 0,
+                embedding_attempts: 0,
+                embed_base_url: String::new(),
+                embed_model: String::new(),
+                is_truncated: false,
+                budget_used: 0,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn search_code_retrieves_over_rendered_corpus_not_project_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").expect("write");
+
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let tool = SearchCode::new(
+            Arc::new(RecordingEngine { seen: seen.clone() }),
+            CorpusStore::new(),
+        );
+
+        let mut args = std::collections::HashMap::new();
+        args.insert("query".to_string(), Value::String("main".to_string()));
+        let result = tool
+            .execute(
+                ToolInput {
+                    path: None,
+                    pattern: None,
+                    args: Some(args),
+                },
+                temp.path(),
+            )
+            .await;
+
+        assert!(result.success, "{:?}", result.error);
+        let corpus = seen.lock().expect("seen").clone();
+        assert!(corpus.contains("File: main.rs"), "corpus: {corpus}");
+        assert!(
+            corpus.contains("fn main()"),
+            "corpus should contain file contents: {corpus}"
+        );
     }
 }

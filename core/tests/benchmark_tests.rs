@@ -106,6 +106,7 @@ fn retrieval_config_without_embeddings() -> RetrievalConfig {
         embed_max_retries: 0,
         embed_batch_size: 8,
         top_k: 8,
+        min_score: 0.0,
     }
 }
 

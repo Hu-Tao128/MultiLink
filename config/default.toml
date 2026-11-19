@@ -49,6 +49,8 @@ embed_model = "embeddinggemma"
 # embed_max_retries = 1
 # embed_batch_size = 24
 project_top_k = 8
+# Puntaje mínimo (0.0-1.0) para descartar chunks irrelevantes.
+min_score = 0.15
 max_project_tokens = 2000
 debug = false
 engine = "v2"

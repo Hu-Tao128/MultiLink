@@ -20,6 +20,13 @@ struct EmbeddingCacheFile {
     vectors: HashMap<String, EmbeddingCacheEntry>,
 }
 
+/// Cache keys include the embedding model and vector dimension. Switching
+/// embedding models would otherwise leave vectors of incompatible lengths in
+/// the cache, producing silent `cosine = 0.0` scores.
+fn embedding_cache_key(model: &str, dimensions: usize, chunk_hash: &str) -> String {
+    format!("{model}:{dimensions}:{chunk_hash}")
+}
+
 pub struct EmbeddingBlendResult {
     pub scores: HashMap<String, f32>,
     pub used_embeddings: bool,
@@ -97,10 +104,14 @@ pub async fn blend_embedding_scores(
         };
     };
 
+    let dimensions = query_vec.len();
     let mut missing = Vec::new();
     let mut missing_ids = Vec::new();
     for chunk in candidates {
-        if !cache.vectors.contains_key(&chunk.chunk_hash) {
+        if !cache
+            .vectors
+            .contains_key(&embedding_cache_key(model, dimensions, &chunk.chunk_hash))
+        {
             let text = format!(
                 "File: {}\nSymbol: {}\nStart: {}\n{}",
                 chunk.file, chunk.symbol, chunk.start_line, chunk.content
@@ -132,7 +143,7 @@ pub async fn blend_embedding_scores(
                 for (idx, vec) in vectors.into_iter().enumerate() {
                     if let Some(hash) = missing_ids.get(offset + idx) {
                         cache.vectors.insert(
-                            hash.clone(),
+                            embedding_cache_key(model, dimensions, hash),
                             EmbeddingCacheEntry {
                                 vector: vec,
                                 timestamp_secs: ts,
@@ -156,11 +167,14 @@ pub async fn blend_embedding_scores(
 
     let mut scores = HashMap::new();
     for chunk in candidates {
-        if let Some(entry) = cache.vectors.get(&chunk.chunk_hash) {
-            scores.insert(
-                chunk.chunk_hash.clone(),
-                cosine_similarity(&query_vec, &entry.vector),
-            );
+        let key = embedding_cache_key(model, dimensions, &chunk.chunk_hash);
+        if let Some(entry) = cache.vectors.get(&key) {
+            if entry.vector.len() == dimensions {
+                scores.insert(
+                    chunk.chunk_hash.clone(),
+                    cosine_similarity(&query_vec, &entry.vector),
+                );
+            }
         }
     }
 
@@ -374,7 +388,8 @@ mod tests {
     use std::fs;
 
     use super::{
-        get_timestamp_secs, load_cache, save_cache, EmbeddingCacheEntry, EmbeddingCacheFile,
+        embedding_cache_key, get_timestamp_secs, load_cache, save_cache, EmbeddingCacheEntry,
+        EmbeddingCacheFile,
     };
 
     #[test]
@@ -395,5 +410,40 @@ mod tests {
 
         let loaded = load_cache(&path);
         assert_eq!(loaded.vectors.get("abc").map(|v| v.vector.len()), Some(3));
+    }
+
+    #[test]
+    fn embedding_cache_key_separates_model_and_dimension() {
+        let base = embedding_cache_key("model-a", 3, "chunk");
+        assert_ne!(base, embedding_cache_key("model-b", 3, "chunk"));
+        assert_ne!(base, embedding_cache_key("model-a", 4, "chunk"));
+        assert_ne!(base, embedding_cache_key("model-a", 3, "other"));
+    }
+
+    #[test]
+    fn embedding_cache_does_not_reuse_vectors_across_models() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("embeddings.json");
+
+        let mut cache = EmbeddingCacheFile::default();
+        cache.vectors.insert(
+            embedding_cache_key("model-a", 3, "abc"),
+            EmbeddingCacheEntry {
+                vector: vec![0.1, 0.2, 0.3],
+                timestamp_secs: get_timestamp_secs(),
+            },
+        );
+        save_cache(&path, &cache).expect("save");
+
+        let loaded = load_cache(&path);
+        assert!(loaded
+            .vectors
+            .contains_key(&embedding_cache_key("model-a", 3, "abc")));
+        assert!(!loaded
+            .vectors
+            .contains_key(&embedding_cache_key("model-b", 3, "abc")));
+        assert!(!loaded
+            .vectors
+            .contains_key(&embedding_cache_key("model-a", 4, "abc")));
     }
 }

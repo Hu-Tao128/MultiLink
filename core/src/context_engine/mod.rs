@@ -63,6 +63,7 @@ pub struct ContextRetrievalConfig {
     pub top_k: usize,
     pub index_refresh_on_query: bool,
     pub retrieval_enable_filters: bool,
+    pub min_score: f32,
     pub version: ContextEngineVersion,
 }
 
@@ -81,6 +82,7 @@ impl Default for ContextRetrievalConfig {
             top_k: 8,
             index_refresh_on_query: true,
             retrieval_enable_filters: false,
+            min_score: 0.15,
             version: ContextEngineVersion::V1,
         }
     }
@@ -113,6 +115,7 @@ impl ContextEngine for ContextEngineV1 {
                 embed_max_retries: config.embed_max_retries,
                 embed_batch_size: config.embed_batch_size,
                 top_k: config.top_k,
+                min_score: config.min_score,
             },
         )
         .await
@@ -178,6 +181,8 @@ impl ContextEngine for ContextEngineV2 {
             config.embed_max_retries,
             config.embed_batch_size,
             config.retrieval_enable_filters,
+            config.top_k,
+            config.min_score,
             Some(&indexed.index_dir),
         )
         .await;
@@ -235,6 +240,8 @@ impl ContextEngine for ContextEngineV2Plus {
             config.embed_max_retries,
             config.embed_batch_size,
             config.retrieval_enable_filters,
+            config.top_k,
+            config.min_score,
             Some(&indexed.index_dir),
         )
         .await

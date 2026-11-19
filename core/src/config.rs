@@ -149,6 +149,8 @@ pub struct ContextConfig {
     pub index_refresh_on_query: bool,
     pub retrieval_enable_filters: bool,
     pub v2plus_metrics: bool,
+    #[serde(default = "default_min_score")]
+    pub min_score: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +249,8 @@ pub struct RuntimeConfig {
     pub context_index_refresh_on_query: bool,
     pub context_retrieval_enable_filters: bool,
     pub context_v2plus_metrics: bool,
+    #[serde(default = "default_min_score")]
+    pub context_min_score: f32,
     pub observability_json_logs: bool,
     #[serde(default)]
     pub execution_servers: Vec<ExecutionServerRuntime>,
@@ -416,6 +420,10 @@ fn default_config_version() -> u32 {
     CURRENT_CONFIG_VERSION
 }
 
+fn default_min_score() -> f32 {
+    0.15
+}
+
 impl Default for RuntimeProfiles {
     fn default() -> Self {
         Self {
@@ -472,6 +480,7 @@ impl Default for RuntimeConfig {
             context_index_refresh_on_query: true,
             context_retrieval_enable_filters: false,
             context_v2plus_metrics: true,
+            context_min_score: default_min_score(),
             observability_json_logs: false,
             execution_servers: Vec::new(),
             remote_threshold: RemoteThreshold::Heavy,
@@ -515,6 +524,7 @@ impl Default for ContextConfig {
             index_refresh_on_query: true,
             retrieval_enable_filters: false,
             v2plus_metrics: true,
+            min_score: default_min_score(),
         }
     }
 }
@@ -897,6 +907,7 @@ impl AppConfig {
         self.runtime.context_index_refresh_on_query = self.context.index_refresh_on_query;
         self.runtime.context_retrieval_enable_filters = self.context.retrieval_enable_filters;
         self.runtime.context_v2plus_metrics = self.context.v2plus_metrics;
+        self.runtime.context_min_score = self.context.min_score.clamp(0.0, 1.0);
         self.runtime.network_allow_remote = self.network.allow_remote;
         self.runtime.network_shared_secret = self.network.shared_secret.clone();
         self.runtime.network_allowed_ips = self.network.allowed_ips.clone();
@@ -980,6 +991,12 @@ impl AppConfig {
                     "context.embed_base_url must start with http:// or https://".to_string(),
                 ));
             }
+        }
+
+        if !(0.0..=1.0).contains(&self.context.min_score) {
+            return Err(ConfigError::Invalid(
+                "context.min_score must be in range 0.0..=1.0".to_string(),
+            ));
         }
 
         if !(2..=24).contains(&self.context.project_top_k) {

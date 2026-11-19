@@ -14,7 +14,7 @@ pub struct CodeChunk {
     pub chunk_type: ChunkType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkType {
     Function,
     Struct,
@@ -64,10 +64,16 @@ impl ChunkExtractor {
         if let Some(chunk_type) = self.get_chunk_type(node_kind) {
             let start = node.start_position();
             let end = node.end_position();
-            let text = node
-                .utf8_text(source.as_bytes())
-                .unwrap_or_default()
-                .to_string();
+            // Containers (impl/class/mod/trait) would otherwise index their
+            // whole body and then index every method again. Keep only the
+            // header for containers that contain indexable children.
+            let text = if self.is_container(chunk_type) && self.contains_indexable_child(node) {
+                container_header(node, source)
+            } else {
+                node.utf8_text(source.as_bytes())
+                    .unwrap_or_default()
+                    .to_string()
+            };
             let symbol = self.extract_symbol(node, source);
 
             chunks.push(CodeChunk {
@@ -121,6 +127,21 @@ impl ChunkExtractor {
         }
     }
 
+    fn is_container(&self, chunk_type: ChunkType) -> bool {
+        matches!(
+            chunk_type,
+            ChunkType::Impl | ChunkType::Module | ChunkType::Class | ChunkType::Trait
+        )
+    }
+
+    fn contains_indexable_child(&self, node: Node) -> bool {
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        children.into_iter().any(|child| {
+            self.get_chunk_type(child.kind()).is_some() || self.contains_indexable_child(child)
+        })
+    }
+
     fn extract_symbol(&self, node: Node, source: &str) -> Option<String> {
         let mut cursor = node.walk();
 
@@ -138,6 +159,16 @@ impl ChunkExtractor {
         }
 
         None
+    }
+}
+
+fn container_header(node: Node, source: &str) -> String {
+    let full = node.utf8_text(source.as_bytes()).unwrap_or_default();
+    let header = full.lines().next().unwrap_or_default().trim();
+    if header.is_empty() {
+        full.to_string()
+    } else {
+        header.to_string()
     }
 }
 
@@ -208,5 +239,46 @@ def another_function():
 
         assert!(has_class, "Should have a class");
         assert!(has_functions >= 2, "Should have at least 2 functions");
+    }
+
+    #[test]
+    fn test_container_header_avoids_duplicating_method_bodies() {
+        let source = r#"
+impl MyStruct {
+    fn new() -> Self {
+        Self { field: 0 }
+    }
+
+    fn value(&self) -> i32 {
+        self.field
+    }
+}
+"#;
+        let chunks = extract_semantic_chunks(source, "test.rs");
+
+        let impl_chunk = chunks
+            .iter()
+            .find(|chunk| chunk.chunk_type == ChunkType::Impl)
+            .expect("impl chunk");
+        assert!(!impl_chunk.text.contains("fn new"));
+        assert!(!impl_chunk.text.contains("fn value"));
+
+        let methods = chunks
+            .iter()
+            .filter(|chunk| chunk.chunk_type == ChunkType::Function)
+            .count();
+        assert!(methods >= 2, "methods should still be indexed separately");
+    }
+
+    #[test]
+    fn test_container_without_children_keeps_full_body() {
+        let source = "class Config:\n    timeout = 30\n    retries = 3\n";
+        let chunks = extract_semantic_chunks(source, "test.py");
+
+        let class_chunk = chunks
+            .iter()
+            .find(|chunk| chunk.chunk_type == ChunkType::Class)
+            .expect("class chunk");
+        assert!(class_chunk.text.contains("timeout = 30"));
     }
 }

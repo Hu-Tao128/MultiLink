@@ -17,6 +17,7 @@ pub struct SemanticChunk {
     pub file: String,
     pub language: String,
     pub start_line: usize,
+    pub end_line: usize,
     pub symbol: String,
     pub content: String,
     pub chunk_hash: String,
@@ -85,8 +86,12 @@ fn fallback_chunks(file: &SourceFile, block_lines: usize) -> Vec<SemanticChunk> 
         return Vec::new();
     }
 
+    const FALLBACK_OVERLAP_LINES: usize = 4;
+
     let mut out = Vec::new();
     let mut start = 0usize;
+    let step = block_lines.saturating_sub(FALLBACK_OVERLAP_LINES).max(1);
+
     while start < lines.len() {
         let end = (start + block_lines).min(lines.len());
         let content = lines[start..end].join("\n");
@@ -99,7 +104,10 @@ fn fallback_chunks(file: &SourceFile, block_lines: usize) -> Vec<SemanticChunk> 
                 content,
             ));
         }
-        start = end;
+        if end >= lines.len() {
+            break;
+        }
+        start += step;
     }
 
     out
@@ -117,6 +125,9 @@ fn build_chunk(
     symbol.hash(&mut hasher);
     content.hash(&mut hasher);
 
+    let line_count = content.lines().count();
+    let end_line = start_line + line_count.saturating_sub(1);
+
     SemanticChunk {
         file: file.path.clone(),
         language: if file.language.is_empty() {
@@ -125,6 +136,7 @@ fn build_chunk(
             file.language.clone()
         },
         start_line,
+        end_line,
         symbol,
         content,
         chunk_hash: format!("{:016x}", hasher.finish()),
@@ -303,7 +315,7 @@ fn is_js_like_file(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{semantic_chunks, SourceFile};
+    use super::{fallback_chunks, semantic_chunks, SourceFile};
 
     #[test]
     fn chunks_rust_by_symbols() {
@@ -330,5 +342,48 @@ mod tests {
         assert!(!chunks.is_empty());
         assert_eq!(chunks[0].start_line, 1);
         assert!(chunks[0].symbol.starts_with("block_"));
+    }
+
+    #[test]
+    fn html_and_css_fall_back_to_line_chunks() {
+        let files = vec![
+            SourceFile {
+                path: "index.html".to_string(),
+                language: "html".to_string(),
+                content: "<section>\n  <h1>Hi</h1>\n</section>\n".repeat(8),
+            },
+            SourceFile {
+                path: "styles.css".to_string(),
+                language: "css".to_string(),
+                content: "body { color: red; }\n.card { margin: 0; }\n".repeat(8),
+            },
+        ];
+
+        let chunks = semantic_chunks(&files, 4);
+        assert!(chunks.iter().any(|chunk| chunk.file == "index.html"));
+        assert!(chunks.iter().any(|chunk| chunk.file == "styles.css"));
+        assert!(chunks
+            .iter()
+            .all(|chunk| !chunk.symbol.is_empty() && !chunk.content.is_empty()));
+    }
+
+    #[test]
+    fn fallback_chunks_overlap_and_include_end_line() {
+        let content = (1..=30)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let file = SourceFile {
+            path: "notes.txt".to_string(),
+            language: "text".to_string(),
+            content,
+        };
+
+        let chunks = fallback_chunks(&file, 10);
+        assert_eq!(chunks[0].start_line, 1);
+        assert_eq!(chunks[0].end_line, 10);
+        assert_eq!(chunks[1].start_line, 7);
+        assert_eq!(chunks[1].end_line, 16);
+        assert!(chunks[1].start_line <= chunks[0].end_line);
     }
 }

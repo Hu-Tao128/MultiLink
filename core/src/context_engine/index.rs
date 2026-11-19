@@ -18,8 +18,12 @@ pub struct IndexedProject {
     pub index_dir: PathBuf,
 }
 
+const INDEX_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PersistedIndex {
+    #[serde(default)]
+    schema_version: u32,
     #[serde(default)]
     source_fingerprint: String,
     #[serde(default)]
@@ -42,6 +46,8 @@ struct PersistedChunk {
     file: String,
     language: String,
     start_line: usize,
+    #[serde(default)]
+    end_line: usize,
     symbol: String,
     content: String,
     chunk_hash: String,
@@ -76,13 +82,17 @@ pub async fn load_or_build(raw_context: &str) -> Option<IndexedProject> {
     let manifest = index_dir.join("manifest.json");
 
     let previous_index = if let Ok(existing) = fs::read_to_string(&manifest) {
-        serde_json::from_str::<PersistedIndex>(&existing).ok()
+        serde_json::from_str::<PersistedIndex>(&existing)
+            .ok()
+            .filter(|index| index.schema_version == INDEX_SCHEMA_VERSION)
     } else {
         None
     };
 
     if let Some(parsed_manifest) = previous_index.as_ref() {
-        if parsed_manifest.source_fingerprint == source_fingerprint {
+        if parsed_manifest.schema_version == INDEX_SCHEMA_VERSION
+            && parsed_manifest.source_fingerprint == source_fingerprint
+        {
             let out = IndexedProject {
                 project_hash,
                 source_fingerprint: source_fingerprint.clone(),
@@ -94,6 +104,7 @@ pub async fn load_or_build(raw_context: &str) -> Option<IndexedProject> {
                         file: c.file,
                         language: c.language,
                         start_line: c.start_line,
+                        end_line: c.end_line,
                         symbol: c.symbol,
                         content: c.content,
                         chunk_hash: c.chunk_hash,
@@ -118,6 +129,7 @@ pub async fn load_or_build(raw_context: &str) -> Option<IndexedProject> {
     let files = build_file_states(&parsed.files, &chunks);
 
     let persisted = PersistedIndex {
+        schema_version: INDEX_SCHEMA_VERSION,
         source_fingerprint: source_fingerprint.clone(),
         project_hash: project_hash.clone(),
         files,
@@ -127,6 +139,7 @@ pub async fn load_or_build(raw_context: &str) -> Option<IndexedProject> {
                 file: chunk.file.clone(),
                 language: chunk.language.clone(),
                 start_line: chunk.start_line,
+                end_line: chunk.end_line,
                 symbol: chunk.symbol.clone(),
                 content: chunk.content.clone(),
                 chunk_hash: chunk.chunk_hash.clone(),
@@ -175,6 +188,10 @@ pub async fn load_best_effort(raw_context: &str) -> Option<IndexedProject> {
     let persisted = fs::read_to_string(&manifest)
         .ok()
         .and_then(|raw| serde_json::from_str::<PersistedIndex>(&raw).ok())?;
+
+    if persisted.schema_version != INDEX_SCHEMA_VERSION {
+        return None;
+    }
 
     if persisted.source_fingerprint == source_fingerprint {
         let exact = indexed_from_persisted(
@@ -248,6 +265,7 @@ fn indexed_from_persisted(
                 file: c.file,
                 language: c.language,
                 start_line: c.start_line,
+                end_line: c.end_line,
                 symbol: c.symbol,
                 content: c.content,
                 chunk_hash: c.chunk_hash,
@@ -286,6 +304,7 @@ fn build_incremental_chunks(
                         file: chunk.file.clone(),
                         language: chunk.language.clone(),
                         start_line: chunk.start_line,
+                        end_line: chunk.end_line,
                         symbol: chunk.symbol.clone(),
                         content: chunk.content.clone(),
                         chunk_hash: chunk.chunk_hash.clone(),
@@ -350,6 +369,7 @@ fn convert_code_chunk_to_semantic(chunk: CodeChunk) -> SemanticChunk {
         file: chunk.file,
         language: chunk.language.to_string(),
         start_line: chunk.start_line,
+        end_line: chunk.end_line,
         symbol: chunk.symbol.unwrap_or_else(|| "unnamed".to_string()),
         content: chunk.text,
         chunk_hash: format!("{:016x}", hasher.finish()),

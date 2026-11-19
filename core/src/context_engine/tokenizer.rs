@@ -1,5 +1,28 @@
 use std::collections::HashSet;
 
+const STOPWORDS: &[&str] = &[
+    // English
+    "a", "about", "after", "all", "also", "an", "and", "any", "are", "as", "at", "be", "because",
+    "been", "before", "being", "but", "by", "can", "could", "did", "do", "does", "for", "from",
+    "had", "has", "have", "he", "her", "here", "him", "his", "how", "i", "if", "in", "into", "is",
+    "it", "its", "just", "me", "more", "most", "my", "no", "not", "of", "on", "only", "or",
+    "other", "our", "out", "over", "same", "she", "should", "so", "some", "such", "than", "that",
+    "the", "their", "them", "then", "there", "these", "they", "this", "those", "to", "too",
+    "under", "up", "us", "very", "was", "we", "were", "what", "when", "where", "which", "who",
+    "why", "will", "with", "would", "you", "your", // Spanish
+    "al", "algo", "algunas", "algunos", "ante", "antes", "como", "con", "contra", "cual", "cuales",
+    "cuando", "de", "del", "desde", "donde", "dos", "el", "ella", "ellas", "ellos", "en", "entre",
+    "era", "es", "esa", "ese", "eso", "esta", "estas", "este", "esto", "estos", "fue", "ha", "han",
+    "hasta", "hay", "la", "las", "le", "les", "lo", "los", "mas", "menos", "mi", "mis", "mucho",
+    "muy", "nos", "o", "otra", "otras", "otro", "otros", "para", "pero", "por", "porque", "que",
+    "quien", "quienes", "se", "ser", "si", "sin", "sobre", "son", "su", "sus", "tambien", "te",
+    "tiene", "todo", "todos", "tu", "tus", "un", "una", "unas", "uno", "unos", "y", "ya",
+];
+
+fn is_stopword(token: &str) -> bool {
+    STOPWORDS.contains(&token)
+}
+
 pub struct Tokenizer;
 
 impl Tokenizer {
@@ -21,7 +44,9 @@ impl Tokenizer {
             tokens.push(current_token);
         }
 
-        Self::split_compound_tokens(tokens)
+        let mut tokens = Self::split_compound_tokens(tokens);
+        tokens.retain(|token| !is_stopword(token));
+        tokens
     }
 
     fn split_compound_tokens(tokens: Vec<String>) -> Vec<String> {
@@ -127,9 +152,15 @@ mod tests {
     #[test]
     fn test_split_snake_case() {
         let tokens = Tokenizer::tokenize("my_function_name");
-        assert!(tokens.contains(&"my".to_string()));
+        assert!(!tokens.contains(&"my".to_string()));
         assert!(tokens.contains(&"function".to_string()));
         assert!(tokens.contains(&"name".to_string()));
+    }
+
+    #[test]
+    fn test_filters_spanish_and_english_stopwords() {
+        let tokens = Tokenizer::tokenize("de que trata este proyecto and the main function");
+        assert_eq!(tokens, vec!["trata", "proyecto", "main", "function"]);
     }
 
     #[test]

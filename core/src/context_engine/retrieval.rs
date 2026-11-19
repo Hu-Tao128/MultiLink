@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::context_engine::chunker::SemanticChunk;
 use crate::context_engine::lexical_search::LexicalIndex;
+use crate::context_engine::tokenizer::Tokenizer;
 
 #[derive(Debug, Clone)]
 pub struct RankedChunk {
@@ -82,6 +83,8 @@ pub async fn hybrid_retrieval(
     embed_max_retries: u8,
     embed_batch_size: usize,
     retrieval_enable_filters: bool,
+    configured_top_k: usize,
+    min_score: f32,
     index_dir: Option<&PathBuf>,
 ) -> RetrievalResult {
     if chunks.is_empty() {
@@ -95,13 +98,35 @@ pub async fn hybrid_retrieval(
     };
 
     let lexical = lexical_scores(prompt, chunks);
+
+    // Reuse v1 model auto-detection when v2 has no embedding model configured.
+    let resolved_embed_model =
+        if embed_enabled && index_dir.is_some() && embed_model.trim().is_empty() {
+            let probe = crate::context_retrieval::RetrievalConfig {
+                embeddings_enabled: true,
+                embed_model: String::new(),
+                embed_base_url: embed_base_url.to_string(),
+                ollama_base_url: embed_base_url.to_string(),
+                embed_connect_timeout_ms,
+                embed_request_timeout_ms,
+                embed_max_retries,
+                embed_batch_size,
+                top_k: configured_top_k.clamp(2, 24),
+                min_score,
+            };
+            crate::context_retrieval::resolve_embed_model(embed_base_url, "", model_hint, &probe)
+                .await
+        } else {
+            embed_model.to_string()
+        };
+
     let embed_result = if embed_enabled {
         if let Some(dir) = index_dir {
             super::embeddings::blend_embedding_scores(
                 prompt,
                 chunks,
                 embed_base_url,
-                embed_model,
+                &resolved_embed_model,
                 embed_connect_timeout_ms,
                 embed_request_timeout_ms,
                 embed_max_retries,
@@ -117,7 +142,7 @@ pub async fn hybrid_retrieval(
                 latency_ms: 0,
                 attempts: 0,
                 base_url: embed_base_url.to_string(),
-                model: embed_model.to_string(),
+                model: resolved_embed_model.clone(),
             }
         }
     } else {
@@ -128,68 +153,66 @@ pub async fn hybrid_retrieval(
             latency_ms: 0,
             attempts: 0,
             base_url: embed_base_url.to_string(),
-            model: embed_model.to_string(),
+            model: resolved_embed_model.clone(),
         }
     };
 
     let embed_used = embed_result.used_embeddings;
+    let raw_lexical: Vec<f32> = (0..chunks.len())
+        .map(|idx| lexical.combined.get(idx).copied().unwrap_or(0.0))
+        .collect();
+    let raw_embeddings: Vec<f32> = chunks
+        .iter()
+        .map(|chunk| {
+            embed_result
+                .scores
+                .get(&chunk.chunk_hash)
+                .copied()
+                .unwrap_or(0.0)
+        })
+        .collect();
+
+    let lexical_normalized = normalize_min_max(&raw_lexical);
+    let embeddings_normalized = normalize_min_max(&raw_embeddings);
+    let embedding_has_signal = embed_used && raw_embeddings.iter().any(|score| *score > 0.0);
+
+    let make_ranked = |idx: usize, chunk: &SemanticChunk| {
+        let lex = lexical_normalized.get(idx).copied().unwrap_or(0.0);
+        let emb = embeddings_normalized.get(idx).copied().unwrap_or(0.0);
+        let final_score = if embedding_has_signal {
+            lex * 0.35 + emb * 0.65
+        } else {
+            lex
+        };
+        RankedChunk {
+            chunk: chunk.clone(),
+            score: final_score,
+            lexical_score: lex,
+            embedding_score: emb,
+            bm25_score: lexical.bm25.get(idx).copied().unwrap_or(0.0),
+            heuristic_score: lexical.heuristic.get(idx).copied().unwrap_or(0.0),
+        }
+    };
+
     let mut ranked: Vec<RankedChunk> = chunks
         .iter()
         .enumerate()
         .filter(|(_, chunk)| matches_filters(chunk, filters.as_ref()))
-        .map(|(idx, chunk)| {
-            let lex = lexical.combined.get(idx).copied().unwrap_or(0.0);
-            let b25 = lexical.bm25.get(idx).copied().unwrap_or(0.0);
-            let heur = lexical.heuristic.get(idx).copied().unwrap_or(0.0);
-            let emb = embed_result
-                .scores
-                .get(&chunk.chunk_hash)
-                .copied()
-                .unwrap_or(0.0);
-            let final_score = if embed_used {
-                lex * 0.35 + emb * 0.65
-            } else {
-                lex
-            };
-            RankedChunk {
-                chunk: chunk.clone(),
-                score: final_score,
-                lexical_score: lex,
-                embedding_score: emb,
-                bm25_score: b25,
-                heuristic_score: heur,
-            }
-        })
+        .map(|(idx, chunk)| make_ranked(idx, chunk))
         .collect();
 
     if ranked.is_empty() {
         ranked = chunks
             .iter()
             .enumerate()
-            .map(|(idx, chunk)| {
-                let lex = lexical.combined.get(idx).copied().unwrap_or(0.0);
-                let b25 = lexical.bm25.get(idx).copied().unwrap_or(0.0);
-                let heur = lexical.heuristic.get(idx).copied().unwrap_or(0.0);
-                let emb = embed_result
-                    .scores
-                    .get(&chunk.chunk_hash)
-                    .copied()
-                    .unwrap_or(0.0);
-                let final_score = if embed_used {
-                    lex * 0.35 + emb * 0.65
-                } else {
-                    lex
-                };
-                RankedChunk {
-                    chunk: chunk.clone(),
-                    score: final_score,
-                    lexical_score: lex,
-                    embedding_score: emb,
-                    bm25_score: b25,
-                    heuristic_score: heur,
-                }
-            })
+            .map(|(idx, chunk)| make_ranked(idx, chunk))
             .collect();
+    }
+
+    let query_terms = query_terms(prompt);
+    if !query_terms.is_empty() {
+        let threshold = min_score.max(0.0);
+        ranked.retain(|chunk| chunk.score >= threshold);
     }
 
     ranked.sort_by(|a, b| {
@@ -198,7 +221,7 @@ pub async fn hybrid_retrieval(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let top_k = (token_budget / 150).clamp(2, 24);
+    let top_k = configured_top_k.clamp(2, 24);
     let ranked_limited: Vec<RankedChunk> = if let Some(active_filters) = filters.as_ref() {
         if active_filters.languages.len() > 1 {
             partitioned_merge_by_language(ranked, top_k)
@@ -209,8 +232,31 @@ pub async fn hybrid_retrieval(
         ranked.into_iter().take(top_k).collect()
     };
 
-    let compression_result =
-        super::compress::fit_to_budget(ranked_limited, token_budget, model_hint);
+    let mentioned_files: HashSet<String> = path_hints(prompt).into_iter().collect();
+    let compression_result = super::compress::fit_to_budget(
+        ranked_limited,
+        token_budget,
+        model_hint,
+        2,
+        &mentioned_files,
+    );
+
+    if compression_result.selected.is_empty() {
+        return RetrievalResult {
+            context: String::new(),
+            selected_files: Vec::new(),
+            used_tokens: 0,
+            top_k,
+            embedding_used: embed_used,
+            embedding_reason: embed_result.reason,
+            embedding_latency_ms: embed_result.latency_ms,
+            embedding_attempts: embed_result.attempts,
+            embed_base_url: embed_result.base_url,
+            embed_model: embed_result.model,
+            is_truncated: compression_result.is_truncated,
+            budget_used: compression_result.budget_used,
+        };
+    }
 
     let context = render_result(&compression_result.selected, model_hint);
     let used = estimate_tokens_for_model(&context, model_hint);
@@ -237,6 +283,36 @@ pub async fn hybrid_retrieval(
     }
 }
 
+fn normalize_min_max(scores: &[f32]) -> Vec<f32> {
+    if scores.is_empty() {
+        return Vec::new();
+    }
+
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for score in scores {
+        if score.is_finite() {
+            min = min.min(*score);
+            max = max.max(*score);
+        }
+    }
+
+    if !min.is_finite() || !max.is_finite() {
+        return vec![0.0; scores.len()];
+    }
+
+    let range = max - min;
+    if range.abs() <= f32::EPSILON {
+        let value = if max > 0.0 { 1.0 } else { 0.0 };
+        return vec![value; scores.len()];
+    }
+
+    scores
+        .iter()
+        .map(|score| ((score - min) / range).clamp(0.0, 1.0))
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct LexicalScores {
     pub combined: Vec<f32>,
@@ -246,6 +322,7 @@ pub struct LexicalScores {
 
 fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> LexicalScores {
     let terms = query_terms(prompt);
+    let gate_terms = Tokenizer::tokenize(prompt);
     let path_hints = path_hints(prompt);
     let is_project_overview_prompt = looks_like_project_overview_prompt(prompt);
     let is_code_query = detect_code_query(prompt);
@@ -281,6 +358,27 @@ fn lexical_scores(prompt: &str, chunks: &[SemanticChunk]) -> LexicalScores {
                 {
                     combined[i] += 1.0;
                 }
+            }
+        }
+    }
+
+    // Heuristic path/depth bonuses must not keep chunks that contain none of
+    // the query terms; those are noise for a real query.
+    if !gate_terms.is_empty() && !is_project_overview_prompt {
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let file_lower = chunk.file.to_ascii_lowercase();
+            let symbol_lower = chunk.symbol.to_ascii_lowercase();
+            let content_lower = chunk.content.to_ascii_lowercase();
+            let matched_term = gate_terms.iter().any(|term| {
+                file_lower.contains(term)
+                    || symbol_lower.contains(term)
+                    || content_lower.contains(term)
+            });
+            let explicitly_mentioned = path_hints
+                .iter()
+                .any(|hint| file_lower == *hint || file_lower.contains(&format!("/{hint}")));
+            if !matched_term && !explicitly_mentioned {
+                combined[idx] = 0.0;
             }
         }
     }
@@ -967,6 +1065,7 @@ mod tests {
             file: "src/main.rs".to_string(),
             language: "rust".to_string(),
             start_line: 1,
+            end_line: 1,
             symbol: "main".to_string(),
             content: "fn main() {}".to_string(),
             chunk_hash: "abc".to_string(),
@@ -982,6 +1081,7 @@ mod tests {
                 file: "tests/README.md".to_string(),
                 language: "markdown".to_string(),
                 start_line: 1,
+                end_line: 1,
                 symbol: "block_1".to_string(),
                 content: "test docs".to_string(),
                 chunk_hash: "a".to_string(),
@@ -990,6 +1090,7 @@ mod tests {
                 file: "README.md".to_string(),
                 language: "markdown".to_string(),
                 start_line: 1,
+                end_line: 1,
                 symbol: "block_1".to_string(),
                 content: "project overview".to_string(),
                 chunk_hash: "b".to_string(),
@@ -997,5 +1098,71 @@ mod tests {
         ];
         let scores = lexical_scores("de que trata este proyecto", &chunks);
         assert!(scores.combined[1] > scores.combined[0]);
+    }
+
+    fn test_chunk(file: &str, symbol: &str, content: &str) -> SemanticChunk {
+        SemanticChunk {
+            file: file.to_string(),
+            language: "rust".to_string(),
+            start_line: 1,
+            end_line: 1,
+            symbol: symbol.to_string(),
+            content: content.to_string(),
+            chunk_hash: format!("{file}:{symbol}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn min_score_filters_chunks_without_query_match() {
+        let chunks = vec![
+            test_chunk(
+                "src/payments.rs",
+                "process_refund",
+                "fn process_refund() {}",
+            ),
+            test_chunk("src/ui.rs", "render_button", "fn render_button() {}"),
+        ];
+
+        let result = hybrid_retrieval(
+            "process_refund",
+            &chunks,
+            10_000,
+            None,
+            "",
+            "",
+            false,
+            50,
+            50,
+            0,
+            8,
+            false,
+            8,
+            0.5,
+            None,
+        )
+        .await;
+
+        assert_eq!(result.selected_files, vec!["src/payments.rs".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn respects_configured_top_k() {
+        let chunks: Vec<SemanticChunk> = (0..5)
+            .map(|index| {
+                test_chunk(
+                    &format!("src/file_{index}.rs"),
+                    &format!("alpha_{index}"),
+                    "pub fn alpha() {}",
+                )
+            })
+            .collect();
+
+        let result = hybrid_retrieval(
+            "alpha", &chunks, 10_000, None, "", "", false, 50, 50, 0, 8, false, 2, 0.0, None,
+        )
+        .await;
+
+        assert_eq!(result.top_k, 2);
+        assert_eq!(result.selected_files.len(), 2);
     }
 }
