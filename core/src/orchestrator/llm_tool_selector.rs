@@ -40,6 +40,7 @@ pub struct LlmToolSelector {
     tool_descriptions: Vec<ToolDescription>,
     model_size: ModelSize,
     current_model: Option<String>,
+    num_ctx: Option<usize>,
 }
 
 impl LlmToolSelector {
@@ -48,13 +49,23 @@ impl LlmToolSelector {
         tool_descriptions: Vec<ToolDescription>,
         model_size: ModelSize,
         current_model: Option<String>,
+        num_ctx: Option<usize>,
     ) -> Self {
         Self {
             router,
             tool_descriptions,
             model_size,
             current_model,
+            num_ctx,
         }
+    }
+
+    /// Sets the Ollama context window used for tool-selection calls. Keeping it
+    /// explicit prevents the server from silently truncating to its default
+    /// (2048/4096) while the prompt budget assumes a larger window.
+    pub fn with_num_ctx(mut self, num_ctx: Option<usize>) -> Self {
+        self.num_ctx = num_ctx;
+        self
     }
 
     pub async fn select_next_tool(
@@ -71,33 +82,39 @@ impl LlmToolSelector {
 
         eprintln!("[llm_tool_selector] provider_selected={:?}", provider);
         eprintln!("[llm_tool_selector] sending_prompt chars={}", prompt.len());
-        let decision = self.send_and_parse(&provider, &prompt, &system, 0.1).await;
 
-        eprintln!(
-            "[llm_tool_selector] first_attempt result={}",
-            decision.is_ok()
-        );
+        let mut attempt_prompt = prompt.clone();
+        let mut last_error = String::new();
 
-        match decision {
-            Ok(call) => self.accept_tool_call(call, available_tools),
-            Err(err) => {
-                eprintln!(
-                    "[llm_tool_selector] first parse failed: {}; retrying with lower temperature",
-                    err
-                );
-                let decision = self.send_and_parse(&provider, &prompt, &system, 0.01).await;
-                match decision {
-                    Ok(call) => self.accept_tool_call(call, available_tools),
-                    Err(err) => {
-                        eprintln!(
-                            "[llm_tool_selector] retry also failed: {}; falling back to heuristic",
-                            err
-                        );
-                        self.heuristic_fallback(goal, available_tools)
-                    }
+        for (attempt, temperature) in [(0u8, 0.1f32), (1, 0.01), (2, 0.0)] {
+            let decision = self
+                .send_and_parse(&provider, &attempt_prompt, &system, goal, temperature)
+                .await
+                .and_then(|call| self.accept_tool_call(call, available_tools));
+
+            match decision {
+                Ok(call) => return Ok(call),
+                Err(err) => {
+                    eprintln!(
+                        "[llm_tool_selector] attempt {} failed: {}",
+                        attempt + 1,
+                        err
+                    );
+                    last_error = err.clone();
+                    attempt_prompt = format!(
+                        "{prompt}\n\nYOUR PREVIOUS RESPONSE WAS INVALID: {err}\n\
+                         Return ONLY the tool call. For write_file use a \n\
+                         [[WRITE_FILE path=\"relative/path.ext\"]] block, never JSON-escaped content."
+                    );
                 }
             }
         }
+
+        eprintln!(
+            "[llm_tool_selector] all attempts failed (last error: {}); falling back to heuristic",
+            last_error
+        );
+        self.heuristic_fallback(goal, available_tools)
     }
 
     fn accept_tool_call(
@@ -151,13 +168,15 @@ impl LlmToolSelector {
         provider: &ProviderId,
         prompt: &str,
         system: &str,
+        goal: &str,
         temperature: f32,
     ) -> Result<ToolCall, String> {
         let options = PromptOptions {
             system_prompt: Some(system.to_string()),
             temperature: Some(temperature),
             model: self.current_model.clone(),
-            num_predict: Some(384),
+            num_ctx: self.num_ctx,
+            num_predict: Some(2048),
             think: Some(false),
             ..PromptOptions::default()
         };
@@ -168,11 +187,36 @@ impl LlmToolSelector {
             .await
             .map_err(|e| format!("LLM error: {:?}", e))?;
 
-        self.parse_response(&response.text)
+        self.parse_response(&response.text, goal)
     }
 
-    fn parse_response(&self, text: &str) -> Result<ToolCall, String> {
+    fn parse_response(&self, text: &str, goal: &str) -> Result<ToolCall, String> {
         let text = text.trim();
+
+        // Structured write blocks are preferred: they avoid escaping the file
+        // body inside a JSON string (the main failure mode of small models).
+        if let Some(block) = parse_write_blocks(text).into_iter().next() {
+            return Ok(ToolCall {
+                tool: "write_file".to_string(),
+                args: serde_json::json!({
+                    "path": block.path,
+                    "content": block.content,
+                }),
+                reasoning: "structured [[WRITE_FILE]] block".to_string(),
+            });
+        }
+
+        // An opening block without its closing marker means the selector was
+        // truncated. Keep the path and let the executor generate the payload.
+        if !contains_marker(text, WRITE_BLOCK_CLOSE) {
+            if let Some(path) = parse_write_header_path(text) {
+                return Ok(ToolCall {
+                    tool: "write_file".to_string(),
+                    args: serde_json::json!({"path": path, "content": ""}),
+                    reasoning: "truncated [[WRITE_FILE]] block".to_string(),
+                });
+            }
+        }
 
         let cleaned = text
             .trim_start_matches("```json")
@@ -191,6 +235,21 @@ impl LlmToolSelector {
         if let Some(extracted) = extract_json_object(text) {
             if let Ok(decision) = serde_json::from_str::<ToolSelectionResponse>(&extracted) {
                 return self.decision_to_call(decision);
+            }
+        }
+
+        // Last resort for small models: prose plus a single code fence and a
+        // recognizable path. Keep only the fenced payload.
+        if goal_has_write_intent(goal) {
+            if let Some(block) = extract_fenced_write_payload(text, goal) {
+                return Ok(ToolCall {
+                    tool: "write_file".to_string(),
+                    args: serde_json::json!({
+                        "path": block.path,
+                        "content": block.content,
+                    }),
+                    reasoning: "fenced write payload fallback".to_string(),
+                });
             }
         }
 
@@ -265,7 +324,7 @@ impl LlmToolSelector {
                     .copied()
             } else {
                 candidates
-                    .sort_by(|a, b| mcp_tool_score(b, &terms).cmp(&mcp_tool_score(a, &terms)));
+                    .sort_by_key(|candidate| std::cmp::Reverse(mcp_tool_score(candidate, &terms)));
                 candidates.first().copied()
             };
 
@@ -286,6 +345,18 @@ impl LlmToolSelector {
                         tool.name,
                         required.join(", ")
                     ),
+                });
+            }
+        }
+
+        if goal_has_write_intent(goal) {
+            if let Some(path) = detect_write_path(goal) {
+                return Ok(ToolCall {
+                    tool: "write_file".to_string(),
+                    // Content is filled by the executor's dedicated payload
+                    // generation pass; never ask the selector to inline it.
+                    args: serde_json::json!({"path": path, "content": ""}),
+                    reasoning: "heuristic fallback: write intent detected".to_string(),
                 });
             }
         }
@@ -409,7 +480,14 @@ COMPLETION RULES:\n\
 - Do not repeat write_file/apply_patch for the same path.\n\
 - For requests that ask for HTML, CSS and JS, create the missing files before returning null.\n\
 - If the needed files were already written successfully, return null.\n\n\
-RESPOND IN JSON FORMAT:\n\
+WRITE TOOL FORMAT (use this instead of JSON for write_file):\n\
+[[WRITE_FILE path=\"relative/path.ext\"]]\n\
+```\n\
+<full file content, unescaped>\n\
+```\n\
+[[/WRITE_FILE]]\n\
+Do NOT put the file content inside JSON. Do not escape newlines.\n\n\
+RESPOND IN JSON FORMAT for every other tool:\n\
 {{\n  \"tool\": \"tool_name\",\n  \"args\": {{ ... }},\n  \"reasoning\": \"why this tool next\"\n}}\n\n\
 IF NO MORE TOOLS NEEDED (goal achieved or blocked):\n\
 {{\n  \"tool\": null,\n  \"args\": null,\n  \"reasoning\": \"goal achieved\" or \"blocked because...\"\n}}",
@@ -485,7 +563,7 @@ IF NO MORE TOOLS NEEDED (goal achieved or blocked):\n\
     }
 
     fn system_prompt(&self) -> String {
-        r"You are a coding assistant that selects tools to accomplish tasks.
+        r#"You are a coding assistant that selects tools to accomplish tasks.
 
 RULES:
 - Tools whose names start with mcp__ are live MCP tools. When the goal asks to use MCP, you MUST select one of those tools.
@@ -496,6 +574,7 @@ RULES:
 - Prefer read operations before write operations
 - If a tool fails, try a different approach or ask for clarification
 - Use run_command after write_file to validate changes (cargo check, npm test, etc.)
+- For write_file, prefer the [[WRITE_FILE path="..."]] block format with the raw file body; JSON-escaped multiline content is error-prone.
 
 THINKING PROCESS:
 1. What is the current state?
@@ -503,7 +582,7 @@ THINKING PROCESS:
 3. Which tool gets us closest to the goal?
 4. What are the arguments?
 
-Respond ONLY with valid JSON."
+Respond ONLY with valid JSON."#
             .to_string()
     }
 
@@ -534,34 +613,278 @@ Respond ONLY with valid JSON."
     }
 }
 
+const WRITE_BLOCK_OPEN: &str = "[[WRITE_FILE";
+const WRITE_BLOCK_CLOSE: &str = "[[/WRITE_FILE]]";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WriteBlock {
+    pub path: String,
+    pub content: String,
+}
+
+fn goal_has_write_intent(goal: &str) -> bool {
+    const WRITE_VERBS: &[&str] = &[
+        "crea",
+        "crear",
+        "create",
+        "write",
+        "escribe",
+        "escribir",
+        "genera",
+        "generar",
+        "generate",
+        "save",
+        "guarda",
+        "guardar",
+        "anade",
+        "anadir",
+        "añade",
+        "añadir",
+        "update",
+        "modify",
+        "modifica",
+        "actualiza",
+    ];
+
+    goal.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|token| WRITE_VERBS.contains(&token))
+}
+
+const WRITE_EXTENSIONS: &[&str] = &[
+    "html", "htm", "css", "scss", "js", "mjs", "cjs", "jsx", "ts", "tsx", "vue", "svelte", "rs",
+    "py", "go", "java", "kt", "kts", "rb", "php", "json", "toml", "yaml", "yml", "md", "txt", "sh",
+    "sql", "xml", "svg", "dart", "c", "cc", "cpp", "h", "hpp", "cs", "lua", "qml", "zig",
+];
+
+fn detect_write_path(text: &str) -> Option<String> {
+    for raw in text.split_whitespace() {
+        let token = raw
+            .trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '`' | '"' | '\'' | ',' | ';' | ':' | '.' | ')' | '(' | '[' | ']' | '{' | '}'
+                )
+            })
+            .trim_start_matches("./")
+            .trim_start_matches('/');
+
+        if token.is_empty() || token.contains("..") {
+            continue;
+        }
+
+        let Some((_, ext)) = token.rsplit_once('.') else {
+            continue;
+        };
+        if ext.is_empty() || ext.len() > 8 || !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+            continue;
+        }
+
+        let known = WRITE_EXTENSIONS
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(ext));
+        if token.contains('/') || known {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+fn extract_block_path(attrs: &str) -> Option<String> {
+    let lower = attrs.to_ascii_lowercase();
+
+    if let Some(key_pos) = lower.find("path") {
+        let rest = attrs[key_pos + "path".len()..].trim_start();
+        if let Some(rest) = rest.strip_prefix('=') {
+            let rest = rest.trim_start();
+            if let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                if let Some(end) = rest[1..].find(quote) {
+                    let value = rest[1..1 + end].trim();
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+            } else {
+                let end = rest
+                    .find(|c: char| c.is_whitespace() || c == ']')
+                    .unwrap_or(rest.len());
+                let value = rest[..end].trim().trim_matches('"').trim_matches('\'');
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+
+    // Fallback: first quoted string in the tag.
+    for quote in ['"', '\''] {
+        if let Some(start) = attrs.find(quote) {
+            if let Some(end_rel) = attrs[start + 1..].find(quote) {
+                let value = attrs[start + 1..start + 1 + end_rel].trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn find_marker(text: &str, marker: &str) -> Option<usize> {
+    text.to_ascii_lowercase().find(&marker.to_ascii_lowercase())
+}
+
+fn contains_marker(text: &str, marker: &str) -> bool {
+    find_marker(text, marker).is_some()
+}
+
+fn parse_write_header_path(text: &str) -> Option<String> {
+    let open = find_marker(text, WRITE_BLOCK_OPEN)?;
+    let attrs_start = open + WRITE_BLOCK_OPEN.len();
+    let attrs_end = attrs_start + text[attrs_start..].find("]]")?;
+    extract_block_path(&text[attrs_start..attrs_end])
+}
+
+fn clean_block_content(raw: &str) -> String {
+    let trimmed = raw.trim();
+
+    let without_open = match trimmed.strip_prefix("```") {
+        Some(rest) => match rest.find('\n') {
+            Some(line_end) => &rest[line_end + 1..],
+            None => "",
+        },
+        None => trimmed,
+    };
+
+    let without_close = match without_open.rfind("```") {
+        Some(index) if without_open[index..].trim() == "```" => &without_open[..index],
+        _ => without_open,
+    };
+
+    without_close
+        .trim_matches(|c| c == '\n' || c == '\r')
+        .to_string()
+}
+
+/// Parses every `[[WRITE_FILE path="..."]] ... [[/WRITE_FILE]]` block. The
+/// payload is delimited by markers and never goes through JSON parsing, so raw
+/// braces, quotes and even internal ``` fences survive intact.
+pub(crate) fn parse_write_blocks(text: &str) -> Vec<WriteBlock> {
+    let mut blocks = Vec::new();
+    let mut cursor = 0usize;
+
+    while let Some(open_rel) = find_marker(&text[cursor..], WRITE_BLOCK_OPEN) {
+        let open = cursor + open_rel;
+        let attrs_start = open + WRITE_BLOCK_OPEN.len();
+        let Some(attrs_end_rel) = text[attrs_start..].find("]]") else {
+            break;
+        };
+        let attrs_end = attrs_start + attrs_end_rel;
+        let body_start = attrs_end + 2;
+
+        let Some(close_rel) = find_marker(&text[body_start..], WRITE_BLOCK_CLOSE) else {
+            break;
+        };
+        let close = body_start + close_rel;
+
+        let path = extract_block_path(&text[attrs_start..attrs_end]);
+        if let Some(path) = path {
+            let content = clean_block_content(&text[body_start..close]);
+            blocks.push(WriteBlock { path, content });
+        }
+
+        cursor = close + WRITE_BLOCK_CLOSE.len();
+    }
+
+    blocks
+}
+
+/// Strips one leading/trailing code fence from a model response, keeping the
+/// body untouched. Also used by the executor's two-phase generation.
+pub(crate) fn strip_fenced_payload(text: &str) -> String {
+    let trimmed = text.trim();
+    let Some(fence_start) = trimmed.find("```") else {
+        return trimmed.to_string();
+    };
+
+    let after_open = &trimmed[fence_start + 3..];
+    let Some(line_end) = after_open.find('\n') else {
+        return String::new();
+    };
+    let body_start = fence_start + 3 + line_end + 1;
+    let body = &trimmed[body_start..];
+    let body_end = body.rfind("```").unwrap_or(body.len());
+
+    body[..body_end]
+        .trim_matches(|c| c == '\n' || c == '\r')
+        .to_string()
+}
+
+fn extract_fenced_write_payload(text: &str, goal: &str) -> Option<WriteBlock> {
+    let path = detect_write_path(goal).or_else(|| detect_write_path(text))?;
+    let content = strip_fenced_payload(text);
+    if content.trim().is_empty() {
+        return None;
+    }
+    Some(WriteBlock { path, content })
+}
+
 fn extract_json_object(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let len = bytes.len();
     let mut i = 0;
 
     while i < len {
-        if bytes[i] == b'{' {
-            let start = i;
-            let mut depth = 1u32;
+        if bytes[i] != b'{' {
             i += 1;
-            while i < len && depth > 0 {
-                if bytes[i] == b'{' {
-                    depth += 1;
-                } else if bytes[i] == b'}' {
-                    depth -= 1;
-                }
-                i += 1;
-            }
-            if depth == 0 {
-                let candidate = &text[start..i];
-                if candidate.len() > 2
-                    && serde_json::from_str::<serde_json::Value>(candidate).is_ok()
-                {
-                    return Some(candidate.to_string());
-                }
-            }
-        } else {
+            continue;
+        }
+
+        let start = i;
+        let mut depth = 0u32;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut found_end = false;
+
+        // Brace counting must ignore braces that live inside JSON strings.
+        // Tool arguments routinely embed source code (`fn f() { ... }`,
+        // `body { }`, unbalanced braces in comments), which used to terminate
+        // the candidate early and made every multiline write fail to parse.
+        while i < len {
+            let byte = bytes[i];
             i += 1;
+
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            match byte {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        found_end = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if found_end {
+            let candidate = &text[start..i];
+            if candidate.len() > 2 && serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                return Some(candidate.to_string());
+            }
         }
     }
     None
@@ -611,9 +934,10 @@ mod tests {
             tool_descriptions: vec![],
             model_size: ModelSize::Medium,
             current_model: None,
+            num_ctx: None,
         };
         let text = "```json\n{\"tool\": \"open_file\", \"args\": {\"path\": \"main.rs\"}, \"reasoning\": \"test\"}\n```";
-        let result = selector.parse_response(text);
+        let result = selector.parse_response(text, "");
         assert!(result.is_ok());
         let call = result.unwrap();
         assert_eq!(call.tool, "open_file");
@@ -626,10 +950,11 @@ mod tests {
             tool_descriptions: vec![],
             model_size: ModelSize::Medium,
             current_model: None,
+            num_ctx: None,
         };
         let text =
             r#"{"tool": "search_code", "args": {"query": "test"}, "reasoning": "need to search"}"#;
-        let result = selector.parse_response(text);
+        let result = selector.parse_response(text, "");
         assert!(result.is_ok());
         let call = result.unwrap();
         assert_eq!(call.tool, "search_code");
@@ -642,9 +967,10 @@ mod tests {
             tool_descriptions: vec![],
             model_size: ModelSize::Medium,
             current_model: None,
+            num_ctx: None,
         };
         let text = "I think we should search first: {\"tool\": \"search_code\", \"args\": {\"query\": \"test\"}, \"reasoning\": \"need context\"}";
-        let result = selector.parse_response(text);
+        let result = selector.parse_response(text, "");
         assert!(result.is_ok());
     }
 
@@ -655,9 +981,10 @@ mod tests {
             tool_descriptions: vec![],
             model_size: ModelSize::Medium,
             current_model: None,
+            num_ctx: None,
         };
         let text = r#"{"tool": null, "args": null, "reasoning": "goal achieved"}"#;
-        let result = selector.parse_response(text);
+        let result = selector.parse_response(text, "");
         assert!(result.is_ok());
         assert!(result.unwrap().tool.is_empty());
     }
@@ -669,6 +996,7 @@ mod tests {
             tool_descriptions: vec![],
             model_size: ModelSize::Medium,
             current_model: None,
+            num_ctx: None,
         };
         let result = selector
             .heuristic_fallback("find the router implementation", &[])
@@ -683,6 +1011,7 @@ mod tests {
             tool_descriptions: vec![],
             model_size: ModelSize::Medium,
             current_model: None,
+            num_ctx: None,
         };
         let result = selector.heuristic_fallback("open main.rs", &[]).unwrap();
         assert_eq!(result.tool, "open_file");
@@ -695,6 +1024,7 @@ mod tests {
             tool_descriptions: vec![],
             model_size: ModelSize::Small,
             current_model: None,
+            num_ctx: None,
         };
         let available = vec!["mcp__fastapi_users__create_user".to_string()];
         let call = selector.resolve_tool_name(
@@ -722,6 +1052,7 @@ mod tests {
             }],
             model_size: ModelSize::Small,
             current_model: None,
+            num_ctx: None,
         };
         let available = vec!["mcp__fastapi_users__health_check".to_string()];
         let result = selector
@@ -747,6 +1078,7 @@ mod tests {
             }],
             model_size: ModelSize::Small,
             current_model: None,
+            num_ctx: None,
         };
         let available = vec!["mcp__fastapi_users__create_user".to_string()];
         let result = selector
@@ -765,5 +1097,176 @@ mod tests {
         let parsed: ToolSelectionResponse =
             serde_json::from_str(&result.unwrap()).expect("should parse nested json");
         assert_eq!(parsed.tool, Some("write_file".to_string()));
+    }
+
+    #[test]
+    fn test_extract_json_object_ignores_braces_and_quotes_inside_content() {
+        let content = r#"body {
+  color: red;
+}
+@media screen {
+  .a { content: "{not json}"; }
+}
+// unbalanced brace in comment: {"#;
+        let payload = serde_json::json!({
+            "tool": "write_file",
+            "args": { "path": "styles.css", "content": content },
+            "reasoning": "write the stylesheet"
+        });
+        let text = format!("Sure, here is the call:\n{}\nDone.", payload);
+
+        let extracted = extract_json_object(&text).expect("should extract object");
+        let parsed: ToolSelectionResponse =
+            serde_json::from_str(&extracted).expect("should parse extracted object");
+        assert_eq!(parsed.tool, Some("write_file".to_string()));
+        let parsed_content = parsed
+            .args
+            .as_ref()
+            .and_then(|args| args.get("content"))
+            .and_then(|value| value.as_str())
+            .expect("content should roundtrip");
+        assert_eq!(parsed_content, content);
+    }
+
+    #[test]
+    fn test_extract_json_object_handles_escaped_quotes_and_backslashes() {
+        let content = "let s = \"a \\\"quoted\\\" value\";\nif (x) { y(); }";
+        let payload = serde_json::json!({
+            "tool": "write_file",
+            "args": { "path": "src/main.js", "content": content }
+        });
+        let text = format!("prefix {} suffix", payload);
+        let extracted = extract_json_object(&text).expect("should extract object");
+        let parsed: ToolSelectionResponse =
+            serde_json::from_str(&extracted).expect("should parse escaped content");
+        assert_eq!(parsed.args.unwrap()["content"].as_str(), Some(content));
+    }
+
+    fn test_selector() -> LlmToolSelector {
+        LlmToolSelector {
+            router: Arc::new(ProviderRouter::new()),
+            tool_descriptions: vec![],
+            model_size: ModelSize::Medium,
+            current_model: None,
+            num_ctx: None,
+        }
+    }
+
+    #[test]
+    fn test_parse_write_block_simple() {
+        let text =
+            "[[WRITE_FILE path=\"src/main.js\"]]\n```js\nconsole.log('hi');\n```\n[[/WRITE_FILE]]";
+        let blocks = parse_write_blocks(text);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, "src/main.js");
+        assert_eq!(blocks[0].content, "console.log('hi');");
+    }
+
+    #[test]
+    fn test_parse_write_block_preserves_internal_fences() {
+        let text = r#"[[WRITE_FILE path="docs/example.md"]]
+```md
+# Example
+```rust
+fn main() {}
+```
+done
+```
+[[/WRITE_FILE]]"#;
+        let blocks = parse_write_blocks(text);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, "docs/example.md");
+        assert!(blocks[0].content.contains("```rust"));
+        assert!(blocks[0].content.contains("fn main() {}"));
+        assert!(blocks[0].content.trim_end().ends_with("done"));
+    }
+
+    #[test]
+    fn test_parse_write_block_keeps_braces_and_quotes() {
+        let text = r#"[[WRITE_FILE path='styles.css']]
+```css
+body { color: "red"; }
+.card { content: "{not json}"; }
+```
+[[/WRITE_FILE]]"#;
+        let blocks = parse_write_blocks(text);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, "styles.css");
+        assert_eq!(
+            blocks[0].content,
+            "body { color: \"red\"; }\n.card { content: \"{not json}\"; }"
+        );
+    }
+
+    #[test]
+    fn test_parse_response_prioritizes_write_block_over_json() {
+        let selector = test_selector();
+        let text = "[[WRITE_FILE path=\"index.html\"]]\n```html\n<h1>ok</h1>\n```\n[[/WRITE_FILE]]";
+        let call = selector
+            .parse_response(text, "crea index.html")
+            .expect("call");
+        assert_eq!(call.tool, "write_file");
+        assert_eq!(call.args["path"], "index.html");
+        assert_eq!(call.args["content"], "<h1>ok</h1>");
+    }
+
+    #[test]
+    fn test_parse_response_truncated_block_requests_payload_generation() {
+        let selector = test_selector();
+        let text = "[[WRITE_FILE path=\"src/big.ts\"]]\n```ts\nexport const value = 1;";
+        let call = selector
+            .parse_response(text, "create src/big.ts")
+            .expect("call");
+        assert_eq!(call.tool, "write_file");
+        assert_eq!(call.args["path"], "src/big.ts");
+        assert_eq!(call.args["content"], "");
+    }
+
+    #[test]
+    fn test_parse_response_extracts_fence_with_surrounding_prose() {
+        let selector = test_selector();
+        let text = "Sure! Here is the file:\n\n```js\nconst answer = 42;\n```\n\nLet me know if you need changes.";
+        let call = selector
+            .parse_response(text, "crea src/app.js")
+            .expect("call");
+        assert_eq!(call.tool, "write_file");
+        assert_eq!(call.args["path"], "src/app.js");
+        assert_eq!(call.args["content"], "const answer = 42;");
+    }
+
+    #[test]
+    fn test_strip_fenced_payload_ignores_prose_after_fence() {
+        let text = "```python\nprint('hi')\n```\ntrailing prose";
+        assert_eq!(strip_fenced_payload(text), "print('hi')");
+    }
+
+    #[test]
+    fn test_parse_write_blocks_supports_multiple_blocks() {
+        let text = "[[WRITE_FILE path=\"a.js\"]]\n```\nA\n```\n[[/WRITE_FILE]]\n[[WRITE_FILE path=\"b.js\"]]\n```\nB\n```\n[[/WRITE_FILE]]";
+        let blocks = parse_write_blocks(text);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].path, "a.js");
+        assert_eq!(blocks[1].path, "b.js");
+        assert_eq!(blocks[1].content, "B");
+    }
+
+    #[test]
+    fn test_parse_write_block_is_case_insensitive() {
+        let text = "[[write_file path=\"a.txt\"]]\n```\nhello\n```\n[[/write_file]]";
+        let blocks = parse_write_blocks(text);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].path, "a.txt");
+        assert_eq!(blocks[0].content, "hello");
+    }
+
+    #[test]
+    fn test_parse_write_block_keeps_unbalanced_braces() {
+        let text = "[[WRITE_FILE path=\"src/broken.rs\"]]\n```rs\nfn broken() {\n    // unmatched brace stays literal\n```\n[[/WRITE_FILE]]";
+        let blocks = parse_write_blocks(text);
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].content.contains("fn broken() {"));
+        assert!(blocks[0]
+            .content
+            .contains("// unmatched brace stays literal"));
     }
 }

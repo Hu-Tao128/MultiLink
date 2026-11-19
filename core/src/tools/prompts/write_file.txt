@@ -1,7 +1,7 @@
 TOOL: write_file
 
 DESCRIPTION:
-Write content to a file. Creates parent directories if needed.
+Write content to a file. Creates parent directories if needed. Prefer the [[WRITE_FILE path="..."]] block (see RESPONSE FORMAT) over JSON-escaped content.
 
 WHEN TO USE:
 - Creating new files
@@ -16,21 +16,43 @@ DO NOT USE WHEN:
 - On config files without user confirmation
 - Path is absolute (starts with /) — ALWAYS use relative paths
 
+RESPONSE FORMAT (preferred):
+Do NOT put the file body inside a JSON string. Use a delimited block so the
+content is written verbatim (newlines, quotes, braces and backticks included):
+
+[[WRITE_FILE path="src/components/Button.tsx"]]
+```tsx
+export function Button() {
+  return <button>Click</button>;
+}
+```
+[[/WRITE_FILE]]
+
 EXAMPLES:
 User: "create a new component Button.tsx"
--> write_file({"path": "src/components/Button.tsx", "content": "<Button component...>"})
-
-User: "add a README explaining the project"
--> write_file({"path": "README.md", "content": "# Project\n\nDescription..."})
+-> [[WRITE_FILE path="src/components/Button.tsx"]]
+   ```tsx
+   export function Button() { ... }
+   ```
+   [[/WRITE_FILE]]
 
 User: "crea index.html"
--> write_file({"path": "index.html", "content": "<!DOCTYPE html>..."})
-
-User: "crea landing page en carpeta medicina"
--> write_file({"path": "medicina/index.html", "content": "<!DOCTYPE html>..."})
+-> [[WRITE_FILE path="index.html"]]
+   ```html
+   <!DOCTYPE html>
+   ...
+   ```
+   [[/WRITE_FILE]]
 
 User: "crea carpeta src con main.js"
--> write_file({"path": "src/main.js", "content": "console.log('hello');"})
+-> [[WRITE_FILE path="src/main.js"]]
+   ```js
+   console.log('hello');
+   ```
+   [[/WRITE_FILE]]
+
+JSON form (fallback only, small payloads):
+write_file({"path": "README.md", "content": "# Project\n\nDescription..."})
 
 SCHEMA:
 {

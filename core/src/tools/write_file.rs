@@ -59,7 +59,7 @@ impl Tool for WriteFile {
         };
 
         let (old_content, is_new) = if target_path.exists() {
-            match std::fs::read_to_string(&target_path) {
+            match tokio::fs::read_to_string(&target_path).await {
                 Ok(c) => (Some(c), false),
                 Err(_) => (None, true),
             }
@@ -78,13 +78,13 @@ impl Tool for WriteFile {
 
         if let Some(parent) = target_path.parent() {
             if !parent.exists() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
                     return ToolResult::err(format!("Failed to create parent directory: {}", e));
                 }
             }
         }
 
-        if let Err(e) = std::fs::write(&target_path, &content) {
+        if let Err(e) = tokio::fs::write(&target_path, &content).await {
             return ToolResult::err(format!("Failed to write file: {}", e));
         }
 

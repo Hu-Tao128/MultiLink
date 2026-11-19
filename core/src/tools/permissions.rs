@@ -1,20 +1,18 @@
 use std::path::Path;
 
-static PROTECTED_PATTERNS: &[&str] = &[
+static PROTECTED_FILE_NAMES: &[&str] = &[
     ".env",
     ".env.local",
     ".env.production",
     ".env.development",
     "credentials.json",
     "credentials.toml",
+    "secrets.json",
+    "secrets.yaml",
     "id_rsa",
     "id_rsa.pub",
-    ".ssh/",
-    "config/secrets.",
-    "secret",
-    "token",
-    "password",
-    "passwd",
+    "id_ed25519",
+    "id_ed25519.pub",
 ];
 
 static DANGEROUS_COMMAND_TOKENS: &[&str] = &[
@@ -106,14 +104,11 @@ fn check_file_write_allowed(path_str: &str, project_root: &Path) -> PermissionCh
         }
     }
 
-    let lower = path_str.to_lowercase();
-    for pattern in PROTECTED_PATTERNS {
-        if lower.contains(pattern) {
-            return PermissionCheck::denied(format!(
-                "Writing to protected file '{}' matches pattern '{}'. This file appears to contain secrets or credentials.",
-                path_str, pattern
-            ));
-        }
+    if let Some(pattern) = protected_name_match(path) {
+        return PermissionCheck::denied(format!(
+            "Writing to protected file '{}' matches '{}'. This file appears to contain secrets or credentials.",
+            path_str, pattern
+        ));
     }
 
     let resolved = if path.is_absolute() {
@@ -133,6 +128,29 @@ fn check_file_write_allowed(path_str: &str, project_root: &Path) -> PermissionCh
     }
 
     PermissionCheck::allowed()
+}
+
+fn protected_name_match(path: &Path) -> Option<String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+
+    if let Some(pattern) = PROTECTED_FILE_NAMES
+        .iter()
+        .find(|pattern| file_name.eq_ignore_ascii_case(pattern))
+    {
+        return Some((*pattern).to_string());
+    }
+
+    if path
+        .components()
+        .any(|component| component.as_os_str() == ".ssh")
+    {
+        return Some(".ssh/".to_string());
+    }
+
+    None
 }
 
 fn check_command_allowed(cmd: &str) -> PermissionCheck {
@@ -237,5 +255,40 @@ mod tests {
         let root = PathBuf::from("/home/user/project");
         let result = check_tool_allowed("run_command", &cmd_input(":(){ :|:& };:"), &root);
         assert!(!result.allowed);
+    }
+
+    #[test]
+    fn test_block_protected_file_names_only() {
+        let root = PathBuf::from("/home/user/project");
+        for path in [
+            ".env",
+            "config/.env.production",
+            "config/.ssh/id_rsa",
+            "config/.ssh/id_ed25519",
+            "credentials.json",
+            "config/secrets.yaml",
+        ] {
+            let result = check_tool_allowed("write_file", &tool_input(path), &root);
+            assert!(!result.allowed, "expected '{}' to be blocked", path);
+        }
+    }
+
+    #[test]
+    fn test_allow_paths_that_merely_contain_protected_words() {
+        let root = PathBuf::from("/home/user/project");
+        for path in [
+            "src/auth/token_store.rs",
+            "src/tokenizer.rs",
+            "components/PasswordField.tsx",
+            "src/secrets_manager.rs",
+            "docs/tokens.md",
+        ] {
+            let result = check_tool_allowed("write_file", &tool_input(path), &root);
+            assert!(
+                result.allowed,
+                "expected '{}' to be allowed, got: {:?}",
+                path, result.reason
+            );
+        }
     }
 }

@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::context_engine::parser::chunk_extractor::CodeChunk;
 use crate::context_engine::ContextEngine;
-use crate::orchestrator::llm_tool_selector::LlmToolSelector;
+use crate::orchestrator::llm_tool_selector::{strip_fenced_payload, LlmToolSelector};
 use crate::orchestrator::model_strategy::{ExecutionConfig, ModelSize};
 use crate::orchestrator::old_tools;
 use crate::orchestrator::planner::{Action, MinimalPlanner, MultiStepPlan, Plan, Step};
@@ -71,6 +71,14 @@ pub struct Executor {
     tool_selector: Option<Arc<LlmToolSelector>>,
     tool_descriptions: Vec<ToolDescription>,
     working_dir: Option<std::path::PathBuf>,
+    /// Successful writes performed during the last execution. Used by the
+    /// runtime to invalidate its cached project context / corpus.
+    written_paths: Arc<Mutex<Vec<String>>>,
+    /// Model used by the tool selector; reused for the dedicated write-payload
+    /// generation pass.
+    planner_model: Option<String>,
+    planner_num_ctx: Option<usize>,
+    status_sender: Option<tokio::sync::mpsc::Sender<crate::chat_runtime::StreamEvent>>,
 }
 
 impl Executor {
@@ -98,7 +106,19 @@ impl Executor {
             tool_selector: None,
             tool_descriptions,
             working_dir: None,
+            written_paths: Arc::new(Mutex::new(Vec::new())),
+            planner_model: None,
+            planner_num_ctx: None,
+            status_sender: None,
         }
+    }
+
+    pub fn with_status_sender(
+        mut self,
+        sender: tokio::sync::mpsc::Sender<crate::chat_runtime::StreamEvent>,
+    ) -> Self {
+        self.status_sender = Some(sender);
+        self
     }
 
     pub fn with_tool_selector(
@@ -106,15 +126,162 @@ impl Executor {
         router: Arc<ProviderRouter>,
         model_size: ModelSize,
         model_name: Option<String>,
+        num_ctx: Option<usize>,
     ) -> Self {
         let tool_selector = Arc::new(LlmToolSelector::new(
             router,
             self.tool_descriptions.clone(),
             model_size,
-            model_name,
+            model_name.clone(),
+            num_ctx,
         ));
         self.tool_selector = Some(tool_selector);
+        self.planner_model = model_name;
+        self.planner_num_ctx = num_ctx;
         self
+    }
+
+    /// Paths written successfully during the last `execute*` call.
+    pub fn recorded_write_paths(&self) -> Vec<String> {
+        match self.written_paths.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn record_write(&self, tool: &str, path: Option<String>) {
+        if !is_write_tool(tool) {
+            return;
+        }
+        let mut guard = match self.written_paths.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.push(path.unwrap_or_else(|| "<unknown>".to_string()));
+    }
+
+    fn validate_required_args(&self, tool: &str, args: &serde_json::Value) -> Result<(), String> {
+        let Some(description) = self
+            .tool_descriptions
+            .iter()
+            .find(|description| description.name.eq_ignore_ascii_case(tool))
+        else {
+            return Ok(());
+        };
+
+        let required: Vec<String> = description
+            .schema
+            .get("required")
+            .and_then(|value| value.as_array())
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter_map(|field| field.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if required.is_empty() {
+            return Ok(());
+        }
+
+        let Some(object) = args.as_object() else {
+            return Err(format!(
+                "arguments must be an object containing: {}",
+                required.join(", ")
+            ));
+        };
+
+        let missing: Vec<&str> = required
+            .iter()
+            .filter(|field| {
+                object
+                    .get(field.as_str())
+                    .map(|value| value.is_null())
+                    .unwrap_or(true)
+            })
+            .map(String::as_str)
+            .collect();
+
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("missing required field(s): {}", missing.join(", ")))
+        }
+    }
+
+    async fn existing_file_content(&self, path: &str) -> Option<String> {
+        let root = self
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| self.tool_executor.project_root().to_path_buf());
+        let content = tokio::fs::read_to_string(root.join(path)).await.ok()?;
+        const MAX_EXISTING_CHARS: usize = 8_000;
+        if content.chars().count() > MAX_EXISTING_CHARS {
+            Some(content.chars().take(MAX_EXISTING_CHARS).collect())
+        } else {
+            Some(content)
+        }
+    }
+
+    /// Dedicated content-generation pass. Small local models routinely fail to
+    /// inline a whole file inside the JSON tool-call payload, so this call asks
+    /// for raw file content only, with a generous output budget.
+    async fn generate_write_payload(
+        &self,
+        path: &str,
+        goal: &str,
+        existing: Option<&str>,
+    ) -> Result<String, String> {
+        let available_providers = self.router.get_available_providers().await;
+        if available_providers.is_empty() {
+            return Err("no provider available for content generation".to_string());
+        }
+        let required = crate::orchestrator::planner::infer_capabilities(goal);
+        let provider =
+            ProviderSelector::select(&required, &available_providers).unwrap_or(ProviderId::Ollama);
+
+        let system = "You write the complete contents of a single file. \
+Return ONLY the raw file body, with no markdown fences, no JSON and no commentary. \
+Never truncate the file: produce the full requested content.";
+
+        let mut prompt = format!(
+            "Write the complete content of the file `{}` for this goal:\n{}\n",
+            path, goal
+        );
+        if let Some(existing) = existing {
+            if !existing.trim().is_empty() {
+                prompt.push_str("\nCurrent file content (rewrite or extend it as needed):\n");
+                prompt.push_str(existing);
+                prompt.push('\n');
+            }
+        }
+        prompt.push_str(
+            "\nRules:\n- Output ONLY the file content.\n- No ``` fences.\n- No explanations or greetings.\n",
+        );
+
+        let options = PromptOptions {
+            system_prompt: Some(system.to_string()),
+            temperature: Some(0.2),
+            model: self.planner_model.clone(),
+            num_ctx: self.planner_num_ctx,
+            num_predict: Some(4096),
+            think: Some(false),
+            ..PromptOptions::default()
+        };
+
+        let response = self
+            .router
+            .send(provider, prompt, options)
+            .await
+            .map_err(|err| format!("LLM error: {:?}", err))?;
+
+        let content = strip_fenced_payload(&response.text);
+        if content.trim().is_empty() {
+            return Err("model returned empty content".to_string());
+        }
+
+        Ok(content)
     }
 
     pub fn with_working_dir(mut self, dir: std::path::PathBuf) -> Self {
@@ -274,9 +441,32 @@ impl Executor {
                         "[planner] tool_step intent={:?} selected_tool={} executed=true",
                         plan_intent, name
                     );
+                    let affected_file = input.path.clone();
+                    if let Some(ref tx) = self.status_sender {
+                        let _ = tx.try_send(crate::chat_runtime::StreamEvent::ExecutorStatus {
+                            tool: name.clone(),
+                            file: affected_file.clone(),
+                            validation_result: None,
+                        });
+                    }
                     let input_json = serde_json::to_string(&input).unwrap_or_default();
                     let result = self.tool_executor.execute(&name, input.clone()).await;
                     let tool_failed = !result.success;
+                    if !tool_failed && is_write_tool(&name) {
+                        self.record_write(&name, input.path.clone());
+                    }
+                    if let Some(ref tx) = self.status_sender {
+                        let val_res = if result.success {
+                            "success".to_string()
+                        } else {
+                            result.error.clone().unwrap_or_else(|| "failed".to_string())
+                        };
+                        let _ = tx.try_send(crate::chat_runtime::StreamEvent::ExecutorStatus {
+                            tool: name.clone(),
+                            file: affected_file.clone(),
+                            validation_result: Some(val_res),
+                        });
+                    }
                     let json_output =
                         serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
 
@@ -303,6 +493,13 @@ impl Executor {
                                 "[executor] auto-validate after {}: running '{}'",
                                 name, first_cmd
                             );
+                            if let Some(ref tx) = self.status_sender {
+                                let _ = tx.try_send(crate::chat_runtime::StreamEvent::ExecutorStatus {
+                                    tool: "auto_validate".to_string(),
+                                    file: affected_file.clone(),
+                                    validation_result: Some(format!("running: {}", first_cmd)),
+                                });
+                            }
                             steps.insert(
                                 0,
                                 Step::ToolCall {
@@ -494,6 +691,7 @@ impl Executor {
         let mut successful_write_signatures: HashSet<String> = HashSet::new();
         let mut written_contents: HashMap<String, String> = HashMap::new();
         let mut duplicate_write_skips = 0usize;
+        let mut argument_retries: HashMap<String, u8> = HashMap::new();
 
         let tool_selector = exec_context
             .tool_selector
@@ -507,7 +705,7 @@ impl Executor {
             }
 
             if let Some(ref selector) = tool_selector {
-                let tool_call = selector
+                let mut tool_call = selector
                     .select_next_tool(initial_goal, &step_results, &available_tools)
                     .await?;
 
@@ -569,6 +767,52 @@ impl Executor {
                         return Ok(summary);
                     }
                     return Ok(format!("{}\n\n{}", last_output, summary));
+                }
+
+                // Two-phase write: the selector only chooses the path; the
+                // file body is generated in a dedicated non-JSON call. This
+                // keeps large payloads out of the tool-selection response.
+                if tool_call.tool == "write_file" {
+                    if let Some(path) = tool_path(&tool_call.args) {
+                        let needs_payload = tool_content(&tool_call.args)
+                            .map(|content| content.trim().is_empty())
+                            .unwrap_or(true);
+                        if needs_payload {
+                            let existing = self.existing_file_content(&path).await;
+                            match self
+                                .generate_write_payload(&path, initial_goal, existing.as_deref())
+                                .await
+                            {
+                                Ok(content) => {
+                                    if let Some(object) = tool_call.args.as_object_mut() {
+                                        object.insert(
+                                            "content".to_string(),
+                                            serde_json::Value::String(content),
+                                        );
+                                    } else {
+                                        tool_call.args = serde_json::json!({
+                                            "path": path,
+                                            "content": content,
+                                        });
+                                    }
+                                }
+                                Err(err) => {
+                                    step_results.push(crate::orchestrator::planner::StepResult {
+                                        step_index: iterations,
+                                        step_id: format!("step_{}", iterations),
+                                        output: format!(
+                                            "WRITE PAYLOAD ERROR for '{}': {}. Try writing the file again.",
+                                            path, err
+                                        ),
+                                        tool_name: Some("Tool: write_file".to_string()),
+                                        metadata: None,
+                                    });
+                                    iterations += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                 }
 
                 let tool_signature = write_tool_signature(&tool_call.tool, &tool_call.args);
@@ -666,6 +910,47 @@ impl Executor {
                     ));
                 }
 
+                if let Err(validation_error) =
+                    self.validate_required_args(&tool_call.tool, &tool_call.args)
+                {
+                    let attempts = argument_retries.entry(tool_call.tool.clone()).or_insert(0);
+                    let retry_instruction = if *attempts < 2 {
+                        *attempts += 1;
+                        format!(
+                            "Retry {}/2: call {} again with arguments that satisfy its schema.",
+                            *attempts, tool_call.tool
+                        )
+                    } else {
+                        "Retry budget exhausted: choose a different tool or return null."
+                            .to_string()
+                    };
+
+                    step_results.push(crate::orchestrator::planner::StepResult {
+                        step_index: iterations,
+                        step_id: format!("step_{}", iterations),
+                        output: format!(
+                            "TOOL ARGUMENT ERROR for {}: {}. {}",
+                            tool_call.tool, validation_error, retry_instruction
+                        ),
+                        tool_name: Some(format!("Tool: {}", tool_call.tool)),
+                        metadata: Some(crate::orchestrator::planner::StepMetadata::new(
+                            iterations,
+                            Some(&tool_call.tool),
+                            Some(serde_json::to_string(&tool_call.args).unwrap_or_default()),
+                        )),
+                    });
+                    iterations += 1;
+                    continue;
+                }
+
+                let affected_file = tool_path(&tool_call.args);
+                if let Some(ref tx) = self.status_sender {
+                    let _ = tx.try_send(crate::chat_runtime::StreamEvent::ExecutorStatus {
+                        tool: tool_call.tool.clone(),
+                        file: affected_file.clone(),
+                        validation_result: None,
+                    });
+                }
                 let result = if let Some(ref dir) = self.working_dir {
                     self.tool_executor
                         .execute_json_with_root(&tool_call.tool, tool_call.args.clone(), dir)
@@ -677,6 +962,23 @@ impl Executor {
                 };
                 let raw_output = serde_json::to_string(&result).unwrap_or_default();
 
+                if let Some(ref tx) = self.status_sender {
+                    let val_res = if result.success {
+                        "success".to_string()
+                    } else {
+                        result.error.clone().unwrap_or_else(|| "failed".to_string())
+                    };
+                    let _ = tx.try_send(crate::chat_runtime::StreamEvent::ExecutorStatus {
+                        tool: tool_call.tool.clone(),
+                        file: affected_file.clone(),
+                        validation_result: Some(val_res),
+                    });
+                }
+
+                if result.success && is_write_tool(&tool_call.tool) {
+                    self.record_write(&tool_call.tool, tool_path(&tool_call.args));
+                }
+
                 let is_search = matches!(
                     tool_call.tool.as_str(),
                     "search_code" | "search_and_open" | "fs_grep"
@@ -686,9 +988,19 @@ impl Executor {
                     || raw_output.trim().is_empty()
                     || raw_output.contains("No results");
 
+                let failure_attempts = argument_retries.get(&tool_call.tool).copied().unwrap_or(0);
+                let can_retry_failure = !result.success && failure_attempts < 2;
+
                 let augmented_output = if !result.success {
                     let err_msg = result.error.as_deref().unwrap_or("unknown error");
-                    if err_msg.contains("Absolute paths") {
+                    if can_retry_failure {
+                        format!(
+                            "TOOL FAILED: {} — correction attempt {}/2: fix the arguments and call {} again before answering the user.",
+                            err_msg,
+                            failure_attempts + 1,
+                            tool_call.tool
+                        )
+                    } else if err_msg.contains("Absolute paths") {
                         format!(
                             "TOOL FAILED: {} — Use ONLY relative paths like 'index.html' or 'src/main.rs'. Never use paths starting with '/'.",
                             err_msg
@@ -732,6 +1044,11 @@ impl Executor {
                         "[executor] dynamic_step tool={} success=false error={:?} — added corrective message to context",
                         tool_call.tool, result.error
                     );
+                    if can_retry_failure {
+                        *argument_retries.entry(tool_call.tool.clone()).or_insert(0) += 1;
+                        iterations += 1;
+                        continue;
+                    }
                     if is_write_tool(&tool_call.tool)
                         && self
                             .auto_write_missing_web_assets(
@@ -962,7 +1279,13 @@ impl Executor {
                 path
             );
             successful_write_paths.push(path.clone());
-            successful_write_signatures.insert(format!("write_file:{}", path));
+            if let Some(signature) = write_tool_signature(
+                "write_file",
+                &serde_json::json!({ "path": path, "content": content }),
+            ) {
+                successful_write_signatures.insert(signature);
+            }
+            self.record_write("write_file", Some(path.clone()));
             written_contents.insert(path, content);
             wrote_any = true;
         }
@@ -1370,11 +1693,22 @@ fn tool_content(args: &serde_json::Value) -> Option<String> {
 }
 
 fn write_tool_signature(tool: &str, args: &serde_json::Value) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
     if !is_write_tool(tool) {
         return None;
     }
 
-    tool_path(args).map(|path| format!("{}:{}", tool, path))
+    let path = tool_path(args)?;
+    let payload = args
+        .get("content")
+        .and_then(|value| value.as_str())
+        .or_else(|| args.get("patch").and_then(|value| value.as_str()))
+        .unwrap_or("");
+
+    let digest = Sha256::digest(payload.as_bytes());
+    let hash = hex::encode(digest);
+    Some(format!("{}:{}:{}", tool, path, &hash[..16]))
 }
 
 fn missing_required_assets(goal: &str, written_paths: &[String]) -> Vec<&'static str> {
@@ -1711,11 +2045,20 @@ mod tests {
             "content": "<!doctype html>"
         });
 
-        assert_eq!(
-            write_tool_signature("write_file", &args),
-            Some("write_file:index.html".to_string())
-        );
+        let signature = write_tool_signature("write_file", &args).expect("signature");
+        assert!(signature.starts_with("write_file:index.html:"));
         assert_eq!(write_tool_signature("fs_ls", &args), None);
+
+        // A different payload for the same path is a different write, which
+        // lets the model complete a stub it just created.
+        let updated = serde_json::json!({
+            "path": "index.html",
+            "content": "<!doctype html><h1>done</h1>"
+        });
+        assert_ne!(
+            write_tool_signature("write_file", &updated),
+            Some(signature)
+        );
     }
 
     #[test]
@@ -1804,5 +2147,32 @@ mod tests {
             },
         ];
         assert_eq!(successful_mcp_create_count(&results), 1);
+    }
+
+    fn test_executor() -> Executor {
+        let registry = Arc::new(ToolRegistry::new(std::env::current_dir().unwrap()));
+        Executor::new(
+            Arc::new(ProviderRouter::new()),
+            Arc::new(SkillOrchestrator::new(Vec::new())),
+            Arc::new(ContextEngineV1),
+            Arc::new(ToolExecutor::new(registry)),
+        )
+    }
+
+    #[test]
+    fn validate_required_args_reports_missing_fields() {
+        let executor = test_executor();
+
+        let err = executor
+            .validate_required_args("write_file", &serde_json::json!({"path": "a.txt"}))
+            .expect_err("missing content should fail");
+        assert!(err.contains("content"), "{err}");
+
+        assert!(executor
+            .validate_required_args(
+                "write_file",
+                &serde_json::json!({"path": "a.txt", "content": "hello"})
+            )
+            .is_ok());
     }
 }

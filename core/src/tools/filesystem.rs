@@ -60,21 +60,22 @@ impl Tool for FsLs {
             None => project_root.to_path_buf(),
         };
 
-        if !target_path.exists() {
-            return ToolResult::err("Path does not exist");
+        match tokio::fs::metadata(&target_path).await {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return ToolResult::err("Path is not a directory"),
+            Err(_) => return ToolResult::err("Path does not exist"),
         }
 
-        if !target_path.is_dir() {
-            return ToolResult::err("Path is not a directory");
-        }
-
-        match std::fs::read_dir(&target_path) {
-            Ok(entries) => {
+        match tokio::fs::read_dir(&target_path).await {
+            Ok(mut entries) => {
                 let mut result: Vec<Value> = Vec::new();
-                for entry in entries.flatten() {
-                    let path = entry.path();
+                while let Ok(Some(entry)) = entries.next_entry().await {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    let is_dir = path.is_dir();
+                    let is_dir = entry
+                        .file_type()
+                        .await
+                        .map(|file_type| file_type.is_dir())
+                        .unwrap_or(false);
                     result.push(json!({
                         "name": name,
                         "type": if is_dir { "directory" } else { "file" }
@@ -135,15 +136,13 @@ impl Tool for FsCat {
             Err(e) => return ToolResult::err(e),
         };
 
-        if !target_path.exists() {
-            return ToolResult::err("File does not exist");
+        match tokio::fs::metadata(&target_path).await {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return ToolResult::err("Path is not a file"),
+            Err(_) => return ToolResult::err("File does not exist"),
         }
 
-        if !target_path.is_file() {
-            return ToolResult::err("Path is not a file");
-        }
-
-        match std::fs::read_to_string(&target_path) {
+        match tokio::fs::read_to_string(&target_path).await {
             Ok(content) => ToolResult::ok(json!({
                 "content": content,
                 "path": target_path.to_string_lossy(),
@@ -197,15 +196,77 @@ impl Tool for FsGrep {
             .and_then(|v| v.as_u64())
             .unwrap_or(50) as usize;
 
-        let pattern_lower = pattern.to_lowercase();
-        let mut results = Vec::new();
+        // walkdir and file reads are blocking; keep them off the async runtime.
+        let search_pattern = pattern.clone();
+        let results =
+            tokio::task::spawn_blocking(move || grep_blocking(&base_path, &search_pattern, limit))
+                .await;
 
-        if base_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&base_path) {
+        match results {
+            Ok(results) => ToolResult::ok(json!({
+                "results": results,
+                "count": results.len(),
+                "pattern": pattern
+            })),
+            Err(err) => ToolResult::err(format!("Search task failed: {}", err)),
+        }
+    }
+}
+
+fn grep_blocking(base_path: &Path, pattern: &str, limit: usize) -> Vec<Value> {
+    let pattern_lower = pattern.to_lowercase();
+    let mut results = Vec::new();
+
+    if base_path.is_file() {
+        if let Ok(content) = std::fs::read_to_string(base_path) {
+            for (line_num, line) in content.lines().enumerate() {
+                if line.to_lowercase().contains(&pattern_lower) {
+                    results.push(json!({
+                        "file": base_path.to_string_lossy(),
+                        "line": line_num + 1,
+                        "content": line
+                    }));
+                    if results.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+    } else if base_path.is_dir() {
+        let entries = walkdir::WalkDir::new(base_path)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .take(100);
+
+        for entry in entries {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !matches!(
+                ext,
+                "rs" | "toml"
+                    | "json"
+                    | "md"
+                    | "yaml"
+                    | "yml"
+                    | "txt"
+                    | "sh"
+                    | "py"
+                    | "js"
+                    | "ts"
+                    | "html"
+                    | "css"
+                    | "sql"
+            ) {
+                continue;
+            }
+
+            if let Ok(content) = std::fs::read_to_string(path) {
                 for (line_num, line) in content.lines().enumerate() {
                     if line.to_lowercase().contains(&pattern_lower) {
                         results.push(json!({
-                            "file": base_path.to_string_lossy(),
+                            "file": path.to_string_lossy(),
                             "line": line_num + 1,
                             "content": line
                         }));
@@ -215,58 +276,12 @@ impl Tool for FsGrep {
                     }
                 }
             }
-        } else if base_path.is_dir() {
-            let entries = walkdir::WalkDir::new(&base_path)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-                .take(100);
 
-            for entry in entries {
-                let path = entry.path();
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if !matches!(
-                    ext,
-                    "rs" | "toml"
-                        | "json"
-                        | "md"
-                        | "yaml"
-                        | "yml"
-                        | "txt"
-                        | "sh"
-                        | "py"
-                        | "js"
-                        | "ts"
-                ) {
-                    continue;
-                }
-
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    for (line_num, line) in content.lines().enumerate() {
-                        if line.to_lowercase().contains(&pattern_lower) {
-                            results.push(json!({
-                                "file": path.to_string_lossy(),
-                                "line": line_num + 1,
-                                "content": line
-                            }));
-                            if results.len() >= limit {
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if results.len() >= limit {
-                    break;
-                }
+            if results.len() >= limit {
+                break;
             }
         }
-
-        ToolResult::ok(json!({
-            "results": results,
-            "count": results.len(),
-            "pattern": pattern
-        }))
     }
+
+    results
 }
